@@ -59,6 +59,13 @@ The bot has demonstrated profitable performance in testing. Below is a screensho
 - **Performance:** Consistent upward trend with significant profit accumulation
 - **Growth:** Over 3,200% increase in profit during the test period
 
+
+----------
+
+<img width="651" height="830" alt="image" src="https://github.com/user-attachments/assets/79eafc8f-6133-4eed-a275-2d692774b056" />
+<img width="651" height="830" alt="image" src="https://github.com/user-attachments/assets/e79fac4f-9aa2-407d-97fe-49a673edac11" />
+<img width="900" height="808" alt="image" src="https://github.com/user-attachments/assets/ff115671-3621-4cd1-9684-be13c3b11ffe" />
+
 *Note: These results are from a test environment. Real-world performance may vary based on market conditions, wallet selection, and configuration parameters.*
 
 ---
