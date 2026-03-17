@@ -1,57 +1,49 @@
-import { ethers } from 'ethers';
-import { ClobClient } from '@polymarket/clob-client';
-import { SignatureType } from '@polymarket/order-utils';
+import { ClobClient, SignatureType } from '@polymarket/clob-client';
+import { TypedDataDomain, TypedDataField, Wallet } from 'ethers';
 import { ENV } from '../config/env';
+
 const PROXY_WALLET = ENV.PROXY_WALLET;
-const walletAddress = ENV.PRIVATE_KEY;
+const PRIVATE_KEY = ENV.PRIVATE_KEY;
 const CLOB_HTTP_URL = ENV.CLOB_HTTP_URL;
-export const clobCliendApi = 'WEJwTDJabGRHTm9YM0J5YVdObA==';
+
+type TypedDataTypes = Record<string, Array<TypedDataField>>;
+type TypedDataValue = Record<string, unknown>;
+
+const createSigner = () => {
+    const normalizedPrivateKey = PRIVATE_KEY.startsWith('0x') ? PRIVATE_KEY : `0x${PRIVATE_KEY}`;
+    const wallet = new Wallet(normalizedPrivateKey);
+
+    return {
+        _signTypedData: (
+            domain: TypedDataDomain,
+            types: TypedDataTypes,
+            value: TypedDataValue
+        ) => wallet.signTypedData(domain, types, value),
+        getAddress: async () => wallet.address,
+    };
+};
 
 const createClobClient = async (): Promise<ClobClient> => {
     const chainId = 137;
-    const host = CLOB_HTTP_URL as string;
-    
-    const targetwallet = walletAddress.startsWith('0x') ? walletAddress.slice(2) : walletAddress;
-    
-    let wallet: ethers.Wallet;
-    try {
-        wallet = new ethers.Wallet(targetwallet);
-    } catch (error: any) {
-        throw new Error(
-            `Failed to create wallet: ${error.message}. ` +
-            `Please verify  (without 0x prefix).`
-        );
-    }
-    let clobClient = new ClobClient(
-        host,
+    const signer = createSigner();
+    const bootstrapClient = new ClobClient(
+        CLOB_HTTP_URL,
         chainId,
-        wallet,
+        signer,
         undefined,
         SignatureType.POLY_GNOSIS_SAFE,
-        PROXY_WALLET as string
+        PROXY_WALLET
     );
+    const creds = await bootstrapClient.createOrDeriveApiKey();
 
-    const originalConsoleError = console.error;
-    console.error = function () {};
-    let creds = await clobClient.createApiKey();
-    console.error = originalConsoleError;
-    if (creds.key) {
-        console.log('API Key created', creds);
-    } else {
-        creds = await clobClient.deriveApiKey();
-        console.log('API Key derived', creds);
-    }
-
-    clobClient = new ClobClient(
-        host,
+    return new ClobClient(
+        CLOB_HTTP_URL,
         chainId,
-        wallet,
+        signer,
         creds,
         SignatureType.POLY_GNOSIS_SAFE,
-        PROXY_WALLET as string
+        PROXY_WALLET
     );
-    console.log(clobClient);
-    return clobClient;
 };
 
 export default createClobClient;

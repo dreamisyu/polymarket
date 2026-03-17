@@ -9,12 +9,20 @@
         "lint": "eslint .",
         "lint:fix": "eslint --fix .",
         "format": "prettier --write .",
+        "audit:npm": "npm audit --omit=dev",
+        "audit:npm:all": "npm audit",
+        "audit:osv": "node scripts/osv-audit.mjs",
+        "audit:osv:all": "node scripts/osv-audit.mjs --include-dev",
+        "audit:all": "npm run audit:npm:all && npm run audit:osv:all",
         "test": "echo \"Error: no test specified\" && exit 1"
     },
     "keywords": [],
     "author": "BlackSky-jose",
     "license": "ISC",
     "type": "commonjs",
+    "engines": {
+        "node": ">=20.10"
+    },
     "description": "",
     "devDependencies": {
         "@eslint/js": "^9.19.0",
@@ -34,12 +42,11 @@
         "typescript-eslint": "^8.23.0"
     },
     "dependencies": {
-        "@polymarket/clob-client": "^4.14.0",
+        "@polymarket/clob-client": "^5.8.0",
         "axios": "^1.7.9",
         "chalk": "^5.4.1",
         "dotenv": "^16.4.7",
-        "ethers": "^5.7.2",
-        "moment": "^2.30.1",
+        "ethers": "^6.16.0",
         "mongoose": "^8.9.5",
         "ora": "^5.4.1"
     }
