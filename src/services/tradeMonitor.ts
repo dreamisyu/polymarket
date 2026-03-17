@@ -39,11 +39,11 @@ const fetchTradeData = async () => {
             console.warn('API returned non-array response, skipping...');
             return;
         }
-        
+
         if (activities_raw.length === 0) {
             return;
         }
-        
+
         const activities: UserActivityInterface[] = activities_raw;
 
         // Filter for TRADE type activities only
@@ -69,7 +69,7 @@ const fetchTradeData = async () => {
 
         if (newTrades.length > 0) {
             console.log(`Found ${newTrades.length} new trade(s) to process`);
-            
+
             // Save new trades to database
             for (const trade of newTrades) {
                 const activityData = {
@@ -89,10 +89,10 @@ const fetchTradeData = async () => {
 
 const tradeMonitor = async () => {
     console.log('Trade Monitor is running every', FETCH_INTERVAL, 'seconds');
-    await init();    //Load my oders before sever downs
+    await init(); //Load my oders before sever downs
     while (true) {
-        await fetchTradeData();     //Fetch all user activities
-        await new Promise((resolve) => setTimeout(resolve, FETCH_INTERVAL * 1000));     //Fetch user activities every second
+        await fetchTradeData(); //Fetch all user activities
+        await new Promise((resolve) => setTimeout(resolve, FETCH_INTERVAL * 1000)); //Fetch user activities every second
     }
 };
 

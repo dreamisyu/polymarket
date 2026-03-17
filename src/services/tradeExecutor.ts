@@ -36,7 +36,7 @@ const doTrading = async (clobClient: ClobClient) => {
     for (const trade of temp_trades) {
         try {
             console.log('Trade to copy:', trade);
-            
+
             // Fetch current positions for both wallets
             const my_positions_raw = await fetchData(
                 `https://data-api.polymarket.com/positions?user=${PROXY_WALLET}`
@@ -44,15 +44,15 @@ const doTrading = async (clobClient: ClobClient) => {
             const user_positions_raw = await fetchData(
                 `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}`
             );
-            
+
             // Validate API responses are arrays
-            const my_positions: UserPositionInterface[] = Array.isArray(my_positions_raw) 
-                ? my_positions_raw 
+            const my_positions: UserPositionInterface[] = Array.isArray(my_positions_raw)
+                ? my_positions_raw
                 : [];
-            const user_positions: UserPositionInterface[] = Array.isArray(user_positions_raw) 
-                ? user_positions_raw 
+            const user_positions: UserPositionInterface[] = Array.isArray(user_positions_raw)
+                ? user_positions_raw
                 : [];
-            
+
             // Find positions for this specific condition
             const my_position = my_positions.find(
                 (position: UserPositionInterface) => position.conditionId === trade.conditionId
@@ -60,19 +60,19 @@ const doTrading = async (clobClient: ClobClient) => {
             const user_position = user_positions.find(
                 (position: UserPositionInterface) => position.conditionId === trade.conditionId
             );
-            
+
             // Get balances
             const my_balance = await getMyBalance(PROXY_WALLET);
             const user_balance = await getMyBalance(USER_ADDRESS);
-            
+
             console.log('My current balance:', my_balance);
             console.log('User current balance:', user_balance);
             console.log('My position:', my_position);
             console.log('User position:', user_position);
-            
+
             // Determine trading condition based on trade side and positions
             let condition: string;
-            
+
             if (trade.side === 'BUY') {
                 // If user is buying, we should buy too
                 condition = 'buy';
@@ -90,9 +90,9 @@ const doTrading = async (clobClient: ClobClient) => {
                     condition = trade.side.toLowerCase();
                 }
             }
-            
+
             console.log(`Determined condition: ${condition} for trade ${trade.transactionHash}`);
-            
+
             // Execute the trade using postOrder
             await postOrder(
                 clobClient,
@@ -103,7 +103,7 @@ const doTrading = async (clobClient: ClobClient) => {
                 my_balance,
                 user_balance
             );
-            
+
             console.log(`Completed processing trade: ${trade.transactionHash}`);
         } catch (error) {
             console.error(`Error processing trade ${trade.transactionHash}:`, error);

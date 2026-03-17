@@ -14,12 +14,12 @@ export const main = async () => {
         console.log(`My Wallet address is: ${PROXY_WALLET}`);
 
         const clobClient = await createClobClient();
-        
+
         tradeMonitor().catch((error) => {
             console.error('Trade Monitor error:', error);
             process.exit(1);
         });
-        
+
         tradeExecutor(clobClient).catch((error) => {
             console.error('Trade Executor error:', error);
             process.exit(1);
