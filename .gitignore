@@ -48,3 +48,5 @@ jest-test-results.json
 
 # Readme.md
 README.md
+.env
+.env.live

@@ -9,13 +9,24 @@ const FETCH_INTERVAL = ENV.FETCH_INTERVAL;
 
 if (!USER_ADDRESS) {
     throw new Error('USER_ADDRESS is not defined');
-    console.log('USER_ADDRESS is not defined');
 }
 
 const UserActivity = getUserActivityModel(USER_ADDRESS);
 const UserPosition = getUserPositionModel(USER_ADDRESS);
 
 let temp_trades: UserActivityInterface[] = [];
+const MILLISECOND_TIMESTAMP_THRESHOLD = 1_000_000_000_000;
+
+const normalizeTimestamp = (rawTimestamp: number): number | null => {
+    if (!Number.isFinite(rawTimestamp) || rawTimestamp <= 0) {
+        return null;
+    }
+
+    const parsedTimestamp = Math.trunc(rawTimestamp);
+    return parsedTimestamp < MILLISECOND_TIMESTAMP_THRESHOLD
+        ? parsedTimestamp * 1000
+        : parsedTimestamp;
+};
 
 const init = async () => {
     const trades = await UserActivity.find().exec();
@@ -27,7 +38,7 @@ const fetchTradeData = async () => {
     try {
         // Fetch user activities from Polymarket API
         const activities_raw = await fetchData(
-            `https://data-api.polymarket.com/activities?user=${USER_ADDRESS}`
+            `https://data-api.polymarket.com/activity?user=${USER_ADDRESS}`
         );
 
         // Validate API response is an array
@@ -41,6 +52,7 @@ const fetchTradeData = async () => {
         }
 
         if (activities_raw.length === 0) {
+            console.warn('API returned response is empty');
             return;
         }
 
@@ -48,6 +60,22 @@ const fetchTradeData = async () => {
 
         // Filter for TRADE type activities only
         const trades = activities.filter((activity) => activity.type === 'TRADE');
+        const normalizedTrades = trades
+            .map((trade) => {
+                const normalizedTimestamp = normalizeTimestamp(trade.timestamp);
+                if (normalizedTimestamp === null) {
+                    console.warn(
+                        `Skip trade with invalid timestamp: ${trade.transactionHash || 'unknown-hash'}`
+                    );
+                    return null;
+                }
+
+                return {
+                    ...trade,
+                    timestamp: normalizedTimestamp,
+                };
+            })
+            .filter((trade): trade is UserActivityInterface => trade !== null);
 
         // Get existing transaction hashes from database to avoid duplicates
         const existingDocs = await UserActivity.find({}, { transactionHash: 1 }).exec();
@@ -61,7 +89,7 @@ const fetchTradeData = async () => {
         const cutoffTimestamp = Date.now() - TOO_OLD_TIMESTAMP * 60 * 60 * 1000;
 
         // Filter new trades that aren't too old
-        const newTrades = trades.filter((trade: UserActivityInterface) => {
+        const newTrades = normalizedTrades.filter((trade: UserActivityInterface) => {
             const isNew = !existingHashes.has(trade.transactionHash);
             const isRecent = trade.timestamp >= cutoffTimestamp;
             return isNew && isRecent;

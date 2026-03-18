@@ -1,12 +1,27 @@
 import * as dotenv from 'dotenv';
-dotenv.config();
+import { existsSync } from 'fs';
+import { dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+const PROJECT_ROOT_DIR = resolve(__dirname, '../../');
+const ENV_PATH_CANDIDATES = Array.from(
+    new Set([resolve(process.cwd(), '.env'), resolve(PROJECT_ROOT_DIR, '.env')])
+);
+const ENV_FILE_PATH =
+    ENV_PATH_CANDIDATES.find((candidate) => existsSync(candidate)) ||
+    resolve(PROJECT_ROOT_DIR, '.env');
+
+dotenv.config({ path: ENV_FILE_PATH });
 
 type ExecutionMode = 'live' | 'trace';
 
 const requireEnv = (name: string): string => {
     const value = process.env[name];
     if (!value) {
-        throw new Error(`${name} is not defined`);
+        throw new Error(`${name} is not defined (loaded from ${ENV_FILE_PATH})`);
     }
 
     return value;
