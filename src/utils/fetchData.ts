@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const fetchData = async (url: string, retries = 3, delay = 2000) => {
+const fetchData = async <T>(url: string, retries = 3, delay = 2000): Promise<T | null> => {
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
             console.log(`Fetching data from: ${url} (attempt ${attempt}/${retries})`);
@@ -12,22 +12,28 @@ const fetchData = async (url: string, retries = 3, delay = 2000) => {
                 },
             });
 
-            return response.data;
+            return response.data as T;
         } catch (error: unknown) {
             const isLastAttempt = attempt === retries;
             const errorCode = (error as { code?: string })?.code;
             const errorMessage =
                 (error as { message?: string })?.message || errorCode || 'Unknown error';
             const isTimeout = errorCode === 'ETIMEDOUT' || errorCode === 'ECONNABORTED';
-            const isNetworkError = errorCode === 'ECONNREFUSED' || errorCode === 'ENOTFOUND';
+            const isNetworkError =
+                errorCode === 'ECONNREFUSED' ||
+                errorCode === 'ENOTFOUND' ||
+                errorCode === 'ECONNRESET' ||
+                errorCode === 'EAI_AGAIN';
+            const statusCode = (error as { response?: { status?: number } })?.response?.status;
+            const isServerError = typeof statusCode === 'number' && statusCode >= 500;
+            const isRateLimit = statusCode === 429;
 
             if (isLastAttempt) {
                 console.error(`Failed to fetch data after ${retries} attempts:`, errorMessage);
-                // Return empty array instead of throwing to prevent bot crash
-                return [];
+                return null;
             }
 
-            if (isTimeout || isNetworkError) {
+            if (isTimeout || isNetworkError || isServerError || isRateLimit) {
                 console.warn(
                     `Network error (attempt ${attempt}/${retries}): ${errorMessage}. Retrying in ${delay}ms...`
                 );
@@ -37,12 +43,12 @@ const fetchData = async (url: string, retries = 3, delay = 2000) => {
             } else {
                 // For other errors, don't retry
                 console.error('Error fetching data:', errorMessage);
-                return [];
+                return null;
             }
         }
     }
 
-    return [];
+    return null;
 };
 
 export default fetchData;

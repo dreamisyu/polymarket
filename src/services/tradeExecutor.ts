@@ -3,24 +3,38 @@ import { UserActivityInterface, UserPositionInterface } from '../interfaces/User
 import { ENV } from '../config/env';
 import { getUserActivityModel } from '../models/userHistory';
 import fetchData from '../utils/fetchData';
-import spinner from '../utils/spinner';
 import getMyBalance from '../utils/getMyBalance';
-import postOrder from '../utils/postOrder';
+import postOrder, { PostOrderResult } from '../utils/postOrder';
 import resolveTradeCondition from '../utils/resolveTradeCondition';
+import spinner from '../utils/spinner';
 
 const USER_ADDRESS = ENV.USER_ADDRESS;
-const RETRY_LIMIT = ENV.RETRY_LIMIT;
 const PROXY_WALLET = ENV.PROXY_WALLET;
-
-let temp_trades: UserActivityInterface[] = [];
+const RETRY_LIMIT = ENV.RETRY_LIMIT;
 
 const UserActivity = getUserActivityModel(USER_ADDRESS);
 
-const readTempTrade = async () => {
-    temp_trades = (await UserActivity.find({
+const findPositionForTrade = (
+    positions: UserPositionInterface[],
+    trade: UserActivityInterface
+): UserPositionInterface | undefined =>
+    positions.find((position) => position.asset === trade.asset) ||
+    positions.find(
+        (position) =>
+            position.conditionId === trade.conditionId &&
+            position.outcomeIndex === trade.outcomeIndex
+    ) ||
+    positions.find((position) => position.conditionId === trade.conditionId);
+
+const readPendingTrades = async () =>
+    (await UserActivity.find({
         $and: [
             { type: 'TRADE' },
-            { bot: false },
+            { transactionHash: { $exists: true, $ne: '' } },
+            { bot: { $ne: true } },
+            {
+                $or: [{ botStatus: { $exists: false } }, { botStatus: 'PENDING' }],
+            },
             {
                 $or: [
                     { botExcutedTime: { $exists: false } },
@@ -28,89 +42,185 @@ const readTempTrade = async () => {
                 ],
             },
         ],
-    }).exec()) as UserActivityInterface[];
+    })
+        .sort({ timestamp: 1 })
+        .exec()) as UserActivityInterface[];
+
+const claimTrade = async (trade: UserActivityInterface) => {
+    const result = await UserActivity.updateOne(
+        {
+            _id: trade._id,
+            bot: { $ne: true },
+            $or: [{ botStatus: { $exists: false } }, { botStatus: 'PENDING' }],
+        },
+        {
+            $set: {
+                botStatus: 'PROCESSING',
+                botClaimedAt: Date.now(),
+                botLastError: '',
+            },
+        }
+    );
+
+    return result.modifiedCount === 1;
 };
 
-const doTrading = async (clobClient: ClobClient) => {
-    for (const trade of temp_trades) {
-        try {
-            console.log('Trade to copy:', trade);
+const finalizeTrade = async (trade: UserActivityInterface, result: PostOrderResult) => {
+    if (result.status === 'RETRYABLE_ERROR') {
+        const nextRetryCount = Number(trade.botExcutedTime || 0) + 1;
 
-            // Fetch current positions for both wallets
-            const my_positions_raw = await fetchData(
-                `https://data-api.polymarket.com/positions?user=${PROXY_WALLET}`
-            );
-            const user_positions_raw = await fetchData(
-                `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}`
-            );
-
-            // Validate API responses are arrays
-            const my_positions: UserPositionInterface[] = Array.isArray(my_positions_raw)
-                ? my_positions_raw
-                : [];
-            const user_positions: UserPositionInterface[] = Array.isArray(user_positions_raw)
-                ? user_positions_raw
-                : [];
-
-            // Find positions for this specific condition
-            const my_position = my_positions.find(
-                (position: UserPositionInterface) => position.conditionId === trade.conditionId
-            );
-            const user_position = user_positions.find(
-                (position: UserPositionInterface) => position.conditionId === trade.conditionId
-            );
-
-            // Get balances
-            const my_balance = await getMyBalance(PROXY_WALLET);
-            const user_balance = await getMyBalance(USER_ADDRESS);
-
-            console.log('My current balance:', my_balance);
-            console.log('User current balance:', user_balance);
-            console.log('My position:', my_position);
-            console.log('User position:', user_position);
-
-            const condition = resolveTradeCondition(trade.side, my_position, user_position);
-
-            console.log(`Determined condition: ${condition} for trade ${trade.transactionHash}`);
-
-            // Execute the trade using postOrder
-            await postOrder(
-                clobClient,
-                condition,
-                my_position,
-                user_position,
-                trade,
-                my_balance,
-                user_balance
-            );
-
-            console.log(`Completed processing trade: ${trade.transactionHash}`);
-        } catch (error) {
-            console.error(`Error processing trade ${trade.transactionHash}:`, error);
-            // Mark trade as processed with error to prevent infinite retries
+        if (nextRetryCount >= RETRY_LIMIT) {
             await UserActivity.updateOne(
                 { _id: trade._id },
-                { bot: true, botExcutedTime: RETRY_LIMIT }
+                {
+                    $set: {
+                        bot: true,
+                        botStatus: 'FAILED',
+                        botExecutedAt: Date.now(),
+                        botClaimedAt: 0,
+                        botLastError: result.reason,
+                    },
+                    $inc: {
+                        botExcutedTime: 1,
+                    },
+                }
             );
+            return;
+        }
+
+        await UserActivity.updateOne(
+            { _id: trade._id },
+            {
+                $set: {
+                    bot: false,
+                    botStatus: 'PENDING',
+                    botClaimedAt: 0,
+                    botLastError: result.reason,
+                },
+                $inc: {
+                    botExcutedTime: 1,
+                },
+            }
+        );
+        return;
+    }
+
+    await UserActivity.updateOne(
+        { _id: trade._id },
+        {
+            $set: {
+                bot: true,
+                botStatus:
+                    result.status === 'COMPLETED'
+                        ? 'COMPLETED'
+                        : result.status === 'SKIPPED'
+                          ? 'SKIPPED'
+                          : 'FAILED',
+                botExecutedAt: Date.now(),
+                botClaimedAt: 0,
+                botLastError: result.reason,
+            },
+        }
+    );
+};
+
+const buildRetryableResult = (reason: string): PostOrderResult => ({
+    status: 'RETRYABLE_ERROR',
+    reason,
+});
+
+const doTrading = async (clobClient: ClobClient, trades: UserActivityInterface[]) => {
+    for (const trade of trades) {
+        const claimed = await claimTrade(trade);
+        if (!claimed) {
+            continue;
+        }
+
+        try {
+            console.log('待复制交易:', trade);
+
+            const myPositionsRaw = await fetchData<UserPositionInterface[]>(
+                `https://data-api.polymarket.com/positions?user=${PROXY_WALLET}`
+            );
+            if (!Array.isArray(myPositionsRaw)) {
+                await finalizeTrade(trade, buildRetryableResult('代理钱包持仓接口不可用'));
+                continue;
+            }
+
+            const myBalance = await getMyBalance(PROXY_WALLET);
+            if (myBalance === null) {
+                await finalizeTrade(trade, buildRetryableResult('代理钱包余额接口不可用'));
+                continue;
+            }
+
+            if (!Number.isFinite(trade.sourceBalanceAfterTrade)) {
+                await finalizeTrade(trade, buildRetryableResult('缺少源账户余额快照'));
+                continue;
+            }
+
+            if (!Number.isFinite(trade.sourcePositionSizeAfterTrade)) {
+                await finalizeTrade(trade, buildRetryableResult('缺少源账户持仓快照'));
+                continue;
+            }
+
+            const myPosition = findPositionForTrade(myPositionsRaw, trade);
+            const sourcePositionAfterTrade = {
+                size: trade.sourcePositionSizeAfterTrade,
+            };
+
+            console.log('代理钱包当前余额:', myBalance);
+            console.log('代理钱包当前持仓:', myPosition);
+            console.log('源账户成交后余额快照:', trade.sourceBalanceAfterTrade);
+            console.log('源账户成交后持仓快照:', sourcePositionAfterTrade);
+
+            const condition = resolveTradeCondition(
+                trade.side,
+                myPosition,
+                sourcePositionAfterTrade
+            );
+            console.log(`交易 ${trade.transactionHash} 的执行条件为: ${condition}`);
+
+            const result = await postOrder(
+                clobClient,
+                condition,
+                myPosition,
+                sourcePositionAfterTrade,
+                trade,
+                myBalance,
+                trade.sourceBalanceAfterTrade
+            );
+
+            await finalizeTrade(trade, result);
+            console.log(`交易 ${trade.transactionHash} 处理完成，状态 ${result.status}`);
+        } catch (error) {
+            console.error(`处理交易 ${trade.transactionHash} 时发生错误:`, error);
+            await finalizeTrade(trade, buildRetryableResult('执行链路发生未预期异常'));
         }
     }
 };
 
-const tradeExcutor = async (clobClient: ClobClient) => {
-    console.log(`Executing Copy Trading`);
+const tradeExecutor = async (clobClient: ClobClient) => {
+    console.log('开始执行真实跟单');
+    const processingCount = await UserActivity.countDocuments({ botStatus: 'PROCESSING' });
+    if (processingCount > 0) {
+        console.warn(
+            `检测到 ${processingCount} 条仍处于 PROCESSING 的交易。` +
+                `为避免真实重复下单，这些记录已保持锁定，请人工确认。`
+        );
+    }
 
     while (true) {
-        await readTempTrade();
-        if (temp_trades.length > 0) {
-            console.log(`💥 ${temp_trades.length} new transaction(s) found 💥`);
+        const pendingTrades = await readPendingTrades();
+        if (pendingTrades.length > 0) {
+            console.log(`💥 发现 ${pendingTrades.length} 条待处理交易 💥`);
             spinner.stop();
-            await doTrading(clobClient);
+            await doTrading(clobClient, pendingTrades);
         } else {
-            await spinner.start('Waiting for new transactions');
+            await spinner.start('等待新交易');
         }
-        // Add a small delay to prevent tight loop
+
         await new Promise((resolve) => setTimeout(resolve, 1000));
     }
 };
 
-export default tradeExcutor;
+export default tradeExecutor;

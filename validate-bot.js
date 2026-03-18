@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports */
 /**
  * Simple validation script to check bot code structure
  * Run with: node validate-bot.js
@@ -23,11 +24,11 @@ const requiredFiles = [
     'src/utils/fetchData.ts',
     'src/utils/getMyBalance.ts',
     'package.json',
-    'tsconfig.json'
+    'tsconfig.json',
 ];
 
 console.log('📁 Checking required files...');
-requiredFiles.forEach(file => {
+requiredFiles.forEach((file) => {
     const exists = fs.existsSync(file);
     checks.push({ file, exists });
     if (exists) {
@@ -91,9 +92,9 @@ try {
         'dotenv',
         'ethers',
         'mongoose',
-        'ora'
+        'ora',
     ];
-    requiredDeps.forEach(dep => {
+    requiredDeps.forEach((dep) => {
         const hasDep = packageJson.dependencies && packageJson.dependencies[dep];
         if (hasDep) {
             console.log(`  ✅ ${dep}`);
@@ -112,16 +113,25 @@ if (fs.existsSync('.env')) {
     console.log('  ✅ .env file exists');
     try {
         const envContent = fs.readFileSync('.env', 'utf8');
-        const requiredVars = [
-            'USER_ADDRESS',
-            'PROXY_WALLET',
-            'PRIVATE_KEY',
-            'CLOB_HTTP_URL',
-            'MONGO_URI',
-            'RPC_URL',
-            'USDC_CONTRACT_ADDRESS'
-        ];
-        requiredVars.forEach(variable => {
+        const executionModeMatch = envContent.match(/^EXECUTION_MODE=(.+)$/m);
+        const executionMode =
+            executionModeMatch && executionModeMatch[1].trim() === 'trace' ? 'trace' : 'live';
+        const requiredVars =
+            executionMode === 'trace'
+                ? ['EXECUTION_MODE', 'USER_ADDRESS', 'MONGO_URI']
+                : [
+                      'EXECUTION_MODE',
+                      'USER_ADDRESS',
+                      'PROXY_WALLET',
+                      'PRIVATE_KEY',
+                      'CLOB_HTTP_URL',
+                      'MONGO_URI',
+                      'RPC_URL',
+                      'USDC_CONTRACT_ADDRESS',
+                  ];
+
+        console.log(`  ℹ️  EXECUTION_MODE=${executionMode}`);
+        requiredVars.forEach((variable) => {
             if (envContent.includes(variable)) {
                 console.log(`  ✅ ${variable}`);
             } else {
@@ -149,4 +159,3 @@ if (hasErrors) {
     console.log('  4. Run the bot: npm run dev');
     process.exit(0);
 }
-

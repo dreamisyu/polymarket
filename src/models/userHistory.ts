@@ -31,7 +31,6 @@ const positionSchema = new Schema({
     oppositeAsset: { type: String, required: false },
     endDate: { type: String, required: false },
     negativeRisk: { type: Boolean, required: false },
-
 });
 
 const activitySchema = new Schema({
@@ -62,9 +61,17 @@ const activitySchema = new Schema({
     profileImage: { type: String, required: false },
     profileImageOptimized: { type: String, required: false },
     bot: { type: Boolean, required: false },
-
     botExcutedTime: { type: Number, required: false },
-
+    botStatus: { type: String, required: false },
+    botClaimedAt: { type: Number, required: false },
+    botExecutedAt: { type: Number, required: false },
+    botLastError: { type: String, required: false },
+    sourceBalanceAfterTrade: { type: Number, required: false },
+    sourceBalanceBeforeTrade: { type: Number, required: false },
+    sourcePositionSizeAfterTrade: { type: Number, required: false },
+    sourcePositionSizeBeforeTrade: { type: Number, required: false },
+    sourcePositionPriceAfterTrade: { type: Number, required: false },
+    sourceSnapshotCapturedAt: { type: Number, required: false },
 });
 
 const getUserPositionModel = (walletAddress: string) => {

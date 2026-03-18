@@ -1,5 +1,7 @@
 import mongoose from 'mongoose';
 
+export type BotExecutionStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'SKIPPED' | 'FAILED';
+
 export interface UserActivityInterface {
     _id: mongoose.Types.ObjectId;
     proxyWallet: string;
@@ -25,7 +27,16 @@ export interface UserActivityInterface {
     profileImageOptimized: string;
     bot: boolean;
     botExcutedTime: number;
-
+    botStatus?: BotExecutionStatus;
+    botClaimedAt?: number;
+    botExecutedAt?: number;
+    botLastError?: string;
+    sourceBalanceAfterTrade?: number;
+    sourceBalanceBeforeTrade?: number;
+    sourcePositionSizeAfterTrade?: number;
+    sourcePositionSizeBeforeTrade?: number;
+    sourcePositionPriceAfterTrade?: number;
+    sourceSnapshotCapturedAt?: number;
 }
 
 export interface UserPositionInterface {

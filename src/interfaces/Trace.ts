@@ -10,7 +10,7 @@ export interface TraceExecutionInterface {
     sourceTimestamp: number;
     sourceSide: string;
     executionCondition: string;
-    status: 'FILLED' | 'SKIPPED';
+    status: 'PROCESSING' | 'FILLED' | 'SKIPPED' | 'FAILED';
     reason: string;
     asset: string;
     conditionId: string;
@@ -29,6 +29,8 @@ export interface TraceExecutionInterface {
     realizedPnlTotal: number;
     unrealizedPnlAfter: number;
     totalEquityAfter: number;
+    claimedAt?: number;
+    completedAt?: number;
 }
 
 export interface TracePositionInterface {

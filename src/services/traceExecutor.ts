@@ -44,6 +44,8 @@ interface ExecutionResult {
     unrealizedPnlAfter: number;
 }
 
+class RetryableTraceError extends Error {}
+
 const toSafeNumber = (value: unknown, fallback = 0) => {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
@@ -61,18 +63,6 @@ const updatePositionMark = (position: TracePositionDocument, marketPrice: number
     position.unrealizedPnl = position.marketValue - position.costBasis;
     position.avgPrice = position.size > 0 ? position.costBasis / position.size : 0;
 };
-
-const findUserPosition = (
-    positions: UserPositionInterface[],
-    trade: UserActivityInterface
-): UserPositionInterface | undefined =>
-    positions.find((position) => position.asset === trade.asset) ||
-    positions.find(
-        (position) =>
-            position.conditionId === trade.conditionId &&
-            position.outcomeIndex === trade.outcomeIndex
-    ) ||
-    positions.find((position) => position.conditionId === trade.conditionId);
 
 const ensurePortfolio = async (): Promise<TracePortfolioDocument> => {
     let portfolio = (await TracePortfolio.findOne({}).exec()) as TracePortfolioDocument | null;
@@ -150,6 +140,46 @@ const loadPendingTrades = async () => {
     );
 
     return trades.filter((trade) => !executedHashes.has(trade.transactionHash));
+};
+
+const claimTradeExecution = async (trade: UserActivityInterface) => {
+    const result = await TraceExecution.updateOne(
+        {
+            sourceTransactionHash: trade.transactionHash,
+        },
+        {
+            $setOnInsert: {
+                traceId: TRACE_ID,
+                traceLabel: TRACE_LABEL,
+                sourceWallet: USER_ADDRESS,
+                sourceActivityId: trade._id,
+                sourceTransactionHash: trade.transactionHash,
+                sourceTimestamp: trade.timestamp,
+                sourceSide: trade.side,
+                executionCondition: '',
+                status: 'PROCESSING',
+                reason: '',
+                asset: trade.asset,
+                conditionId: trade.conditionId,
+                title: trade.title,
+                outcome: trade.outcome,
+                claimedAt: Date.now(),
+                completedAt: 0,
+            },
+        },
+        {
+            upsert: true,
+        }
+    );
+
+    return result.upsertedCount === 1;
+};
+
+const releaseTradeClaim = async (trade: UserActivityInterface) => {
+    await TraceExecution.deleteOne({
+        sourceTransactionHash: trade.transactionHash,
+        status: 'PROCESSING',
+    });
 };
 
 const createEmptyPosition = (trade: UserActivityInterface): TracePositionDocument =>
@@ -296,7 +326,7 @@ const simulateSellLike = async (
     portfolio: TracePortfolioDocument,
     position: TracePositionDocument,
     trade: UserActivityInterface,
-    userPosition: UserPositionInterface | undefined,
+    userPosition: { size?: number } | undefined,
     condition: string
 ) => {
     const cashBefore = toSafeNumber(portfolio.cashBalance);
@@ -446,7 +476,7 @@ const syncPortfolio = async (
     portfolio.filledExecutions =
         toSafeNumber(portfolio.filledExecutions) + (status === 'FILLED' ? 1 : 0);
     portfolio.skippedExecutions =
-        toSafeNumber(portfolio.skippedExecutions) + (status === 'SKIPPED' ? 1 : 0);
+        toSafeNumber(portfolio.skippedExecutions) + (status === 'FILLED' ? 0 : 1);
     portfolio.lastSourceTransactionHash = trade.transactionHash;
     portfolio.lastUpdatedAt = trade.timestamp;
 
@@ -461,52 +491,58 @@ const recordExecution = async (
     portfolio: TracePortfolioDocument,
     result: ExecutionResult
 ) => {
-    await TraceExecution.create({
-        traceId: TRACE_ID,
-        traceLabel: TRACE_LABEL,
-        sourceWallet: USER_ADDRESS,
-        sourceActivityId: trade._id,
-        sourceTransactionHash: trade.transactionHash,
-        sourceTimestamp: trade.timestamp,
-        sourceSide: trade.side,
-        executionCondition: condition,
-        status: result.status,
-        reason: result.reason,
-        asset: trade.asset,
-        conditionId: trade.conditionId,
-        title: trade.title,
-        outcome: trade.outcome,
-        requestedSize: result.requestedSize,
-        executedSize: result.executedSize,
-        requestedUsdc: result.requestedUsdc,
-        executedUsdc: result.executedUsdc,
-        executionPrice: result.executionPrice,
-        cashBefore: result.cashBefore,
-        cashAfter: result.cashAfter,
-        positionSizeBefore: result.positionSizeBefore,
-        positionSizeAfter: result.positionSizeAfter,
-        realizedPnlDelta: result.realizedPnlDelta,
-        realizedPnlTotal: toSafeNumber(portfolio.realizedPnl),
-        unrealizedPnlAfter: toSafeNumber(portfolio.unrealizedPnl),
-        totalEquityAfter: toSafeNumber(portfolio.totalEquity),
-    });
+    await TraceExecution.updateOne(
+        {
+            sourceTransactionHash: trade.transactionHash,
+        },
+        {
+            $set: {
+                traceId: TRACE_ID,
+                traceLabel: TRACE_LABEL,
+                sourceWallet: USER_ADDRESS,
+                sourceActivityId: trade._id,
+                sourceTimestamp: trade.timestamp,
+                sourceSide: trade.side,
+                executionCondition: condition,
+                status: result.status,
+                reason: result.reason,
+                asset: trade.asset,
+                conditionId: trade.conditionId,
+                title: trade.title,
+                outcome: trade.outcome,
+                requestedSize: result.requestedSize,
+                executedSize: result.executedSize,
+                requestedUsdc: result.requestedUsdc,
+                executedUsdc: result.executedUsdc,
+                executionPrice: result.executionPrice,
+                cashBefore: result.cashBefore,
+                cashAfter: result.cashAfter,
+                positionSizeBefore: result.positionSizeBefore,
+                positionSizeAfter: result.positionSizeAfter,
+                realizedPnlDelta: result.realizedPnlDelta,
+                realizedPnlTotal: toSafeNumber(portfolio.realizedPnl),
+                unrealizedPnlAfter: toSafeNumber(portfolio.unrealizedPnl),
+                totalEquityAfter: toSafeNumber(portfolio.totalEquity),
+                completedAt: Date.now(),
+            },
+        }
+    );
 };
 
 const processTrade = async (trade: UserActivityInterface) => {
+    if (!Number.isFinite(trade.sourcePositionSizeAfterTrade)) {
+        throw new RetryableTraceError('缺少源账户持仓快照');
+    }
+
     const portfolio = await ensurePortfolio();
     const existingPosition =
         ((await TracePosition.findOne({
             asset: trade.asset,
         }).exec()) as TracePositionDocument | null) || createEmptyPosition(trade);
-
-    const userPositionsRaw = await fetchData(
-        `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}`
-    );
-    const userPositions: UserPositionInterface[] = Array.isArray(userPositionsRaw)
-        ? userPositionsRaw
-        : [];
-    const userPosition = findUserPosition(userPositions, trade);
-    const condition = resolveTradeCondition(trade.side, existingPosition, userPosition);
+    const sourcePositionAfterTrade = {
+        size: trade.sourcePositionSizeAfterTrade,
+    };
+    const condition = resolveTradeCondition(trade.side, existingPosition, sourcePositionAfterTrade);
 
     let resultWithPosition;
     if (condition === 'buy') {
@@ -516,7 +552,7 @@ const processTrade = async (trade: UserActivityInterface) => {
             portfolio,
             existingPosition,
             trade,
-            userPosition,
+            sourcePositionAfterTrade,
             condition
         );
     } else {
@@ -545,7 +581,15 @@ const processTrade = async (trade: UserActivityInterface) => {
         };
     }
 
-    await refreshOpenPositionMarks(userPositions);
+    const userPositionsRaw = await fetchData<UserPositionInterface[]>(
+        `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}`
+    );
+    if (Array.isArray(userPositionsRaw)) {
+        await refreshOpenPositionMarks(userPositionsRaw);
+    } else {
+        console.warn(`[trace:${TRACE_ID}] 源账户持仓接口不可用，跳过本轮市值刷新`);
+    }
+
     await syncPortfolio(portfolio, trade, resultWithPosition.result.status);
     await recordExecution(trade, condition, portfolio, resultWithPosition.result);
 
@@ -556,26 +600,46 @@ const processTrade = async (trade: UserActivityInterface) => {
 };
 
 const traceExecutor = async () => {
-    console.log(`Executing Trace Trading (${TRACE_LABEL})`);
+    console.log(`开始执行模拟跟单 (${TRACE_LABEL})`);
+    const processingCount = await TraceExecution.countDocuments({ status: 'PROCESSING' });
+    if (processingCount > 0) {
+        console.warn(
+            `[trace:${TRACE_ID}] 检测到 ${processingCount} 条仍处于 PROCESSING 的记录，` +
+                `为避免重复记账，本次不会自动重放，请人工确认。`
+        );
+    }
 
     while (true) {
         const pendingTrades = await loadPendingTrades();
         if (pendingTrades.length > 0) {
-            console.log(`🧪 ${pendingTrades.length} new trace transaction(s) found 🧪`);
+            console.log(`🧪 发现 ${pendingTrades.length} 条待处理的模拟交易 🧪`);
             spinner.stop();
 
             for (const trade of pendingTrades) {
+                const claimed = await claimTradeExecution(trade);
+                if (!claimed) {
+                    continue;
+                }
+
                 try {
                     await processTrade(trade);
                 } catch (error) {
+                    if (error instanceof RetryableTraceError) {
+                        await releaseTradeClaim(trade);
+                        console.warn(
+                            `[trace:${TRACE_ID}] 交易 ${trade.transactionHash} 稍后重试: ${error.message}`
+                        );
+                        continue;
+                    }
+
                     console.error(
-                        `[trace:${TRACE_ID}] Error processing trade ${trade.transactionHash}:`,
+                        `[trace:${TRACE_ID}] 处理交易 ${trade.transactionHash} 时发生错误:`,
                         error
                     );
                 }
             }
         } else {
-            await spinner.start(`Waiting for new trace transactions (${TRACE_LABEL})`);
+            await spinner.start(`等待新的模拟交易 (${TRACE_LABEL})`);
         }
 
         await new Promise((resolve) => setTimeout(resolve, 1000));

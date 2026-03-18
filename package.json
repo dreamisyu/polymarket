@@ -14,6 +14,7 @@
         "audit:osv": "node scripts/osv-audit.mjs",
         "audit:osv:all": "node scripts/osv-audit.mjs --include-dev",
         "audit:all": "npm run audit:npm:all && npm run audit:osv:all",
+        "report:summary": "node scripts/execution-summary.mjs",
         "test": "echo \"Error: no test specified\" && exit 1"
     },
     "keywords": [],

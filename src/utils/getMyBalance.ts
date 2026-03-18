@@ -6,7 +6,7 @@ const USDC_CONTRACT_ADDRESS = ENV.USDC_CONTRACT_ADDRESS;
 
 const USDC_ABI = ['function balanceOf(address owner) view returns (uint256)'];
 
-const getMyBalance = async (address: string): Promise<number> => {
+const getMyBalance = async (address: string): Promise<number | null> => {
     try {
         const rpcProvider = new JsonRpcProvider(RPC_URL);
         const usdcContract = new Contract(USDC_CONTRACT_ADDRESS, USDC_ABI, rpcProvider);
@@ -14,8 +14,7 @@ const getMyBalance = async (address: string): Promise<number> => {
         return parseFloat(formatUnits(balanceUsdc, 6));
     } catch (error) {
         console.error(`Error fetching balance for ${address}:`, error);
-        // Return 0 as fallback to prevent crashes
-        return 0;
+        return null;
     }
 };
 
