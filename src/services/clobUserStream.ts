@@ -1,10 +1,12 @@
 import { ApiKeyCreds } from '@polymarket/clob-client';
 import { ENV } from '../config/env';
+import createLogger from '../utils/logger';
 
 const USER_WS_URL = ENV.USER_WS_URL;
 const USER_WS_RECONNECT_MS = ENV.USER_WS_RECONNECT_MS;
 const ORDER_CONFIRMATION_TIMEOUT_MS = ENV.ORDER_CONFIRMATION_TIMEOUT_MS;
 const MILLISECOND_TIMESTAMP_THRESHOLD = 1_000_000_000_000;
+const logger = createLogger('user-ws');
 
 type ConfirmationStatus = 'PENDING' | 'CONFIRMED' | 'FAILED';
 export type UserTradeStatus =
@@ -176,7 +178,7 @@ const safeInvoke = async (callback: (() => void | Promise<void>) | undefined) =>
     try {
         await callback();
     } catch (error) {
-        console.error('执行 User Channel 状态回调失败:', error);
+        logger.error('执行 User Channel 状态回调失败', error);
     }
 };
 
@@ -216,7 +218,7 @@ export class ClobUserStream {
             this.handleMessage(event.data);
         };
         ws.onerror = (error) => {
-            console.error('User Channel WebSocket 发生错误:', error);
+            logger.error('User Channel WebSocket 异常', error);
         };
         ws.onclose = () => {
             this.ws = null;
@@ -486,7 +488,6 @@ export class ClobUserStream {
             }
 
             if (!normalizedData.startsWith('{') && !normalizedData.startsWith('[')) {
-                console.warn(`收到非 JSON User Channel 消息: ${normalizedData}`);
                 return;
             }
 
@@ -501,7 +502,7 @@ export class ClobUserStream {
                 this.handleTradeMessage(message);
             }
         } catch (error) {
-            console.error('解析 User Channel 消息失败:', error);
+            logger.error('解析 User Channel 消息失败', error);
         }
     }
 

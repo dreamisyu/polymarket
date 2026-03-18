@@ -2,6 +2,7 @@ import { ClobClient, OrderType, Side, TickSize } from '@polymarket/clob-client';
 import { UserActivityInterface, UserPositionInterface } from '../interfaces/User';
 import ClobMarketStream from '../services/clobMarketStream';
 import { ENV } from '../config/env';
+import createLogger from './logger';
 import {
     buildChunkExecutionPlan,
     cloneMarketSnapshot,
@@ -9,6 +10,7 @@ import {
 } from './executionPlanning';
 
 const RETRY_LIMIT = ENV.RETRY_LIMIT;
+const logger = createLogger('order');
 
 export type PostOrderStatus = 'SUBMITTED' | 'SKIPPED' | 'RETRYABLE_ERROR' | 'FAILED';
 
@@ -26,6 +28,15 @@ const dedupeStrings = (values: string[]) =>
     [...new Set(values.map((value) => value.trim()))].filter(Boolean);
 
 const mergeReasons = (...reasons: string[]) => dedupeStrings(reasons).join('；');
+const getTradeRef = (trade: Pick<UserActivityInterface, 'transactionHash' | 'asset'>) =>
+    `tx=${trade.transactionHash} asset=${trade.asset}`;
+const extractResponseReason = (response: unknown) =>
+    String(
+        (response as { errorMsg?: string })?.errorMsg ||
+            (response as { error?: string })?.error ||
+            (response as { message?: string })?.message ||
+            '下单接口返回失败'
+    );
 
 const buildResult = (
     status: PostOrderStatus,
@@ -118,8 +129,6 @@ const postOrder = async (
             price: plan.executionPrice,
         };
 
-        console.log('下单参数:', orderArgs);
-
         try {
             const response = await clobClient.createAndPostMarketOrder(
                 orderArgs,
@@ -183,17 +192,22 @@ const postOrder = async (
                     }
                 }
 
-                console.log('下单成功:', response);
                 await sleep(500);
                 continue;
             }
 
             retry += 1;
-            console.log(`下单失败，准备重试... (${retry}/${RETRY_LIMIT})`, response);
+            logger.warn(
+                `${getTradeRef(trade)} 下单失败，准备重试 (${retry}/${RETRY_LIMIT}) ` +
+                    `reason=${extractResponseReason(response)}`
+            );
             await sleep(2000);
         } catch (error) {
             retry += 1;
-            console.error(`下单异常，准备重试... (${retry}/${RETRY_LIMIT})`, error);
+            logger.error(
+                `${getTradeRef(trade)} 下单异常，准备重试 (${retry}/${RETRY_LIMIT})`,
+                error
+            );
             await sleep(2000);
         }
     }

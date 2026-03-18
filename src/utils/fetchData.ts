@@ -1,12 +1,24 @@
 import axios from 'axios';
+import createLogger from './logger';
+
+const logger = createLogger('http');
+
+const buildRequestLabel = (url: string) => {
+    try {
+        const parsedUrl = new URL(url);
+        return `${parsedUrl.origin}${parsedUrl.pathname}`;
+    } catch {
+        return url;
+    }
+};
 
 const fetchData = async <T>(url: string, retries = 3, delay = 2000): Promise<T | null> => {
+    const requestLabel = buildRequestLabel(url);
+
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
-            console.log(`Fetching data from: ${url} (attempt ${attempt}/${retries})`);
-
             const response = await axios.get(url, {
-                timeout: 10000, // 10 second timeout
+                timeout: 10000,
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 },
@@ -29,20 +41,20 @@ const fetchData = async <T>(url: string, retries = 3, delay = 2000): Promise<T |
             const isRateLimit = statusCode === 429;
 
             if (isLastAttempt) {
-                console.error(`Failed to fetch data after ${retries} attempts:`, errorMessage);
+                logger.error(
+                    `请求失败 url=${requestLabel} attempts=${retries} reason=${errorMessage}`
+                );
                 return null;
             }
 
             if (isTimeout || isNetworkError || isServerError || isRateLimit) {
-                console.warn(
-                    `Network error (attempt ${attempt}/${retries}): ${errorMessage}. Retrying in ${delay}ms...`
+                logger.warn(
+                    `请求重试 ${attempt}/${retries} url=${requestLabel} delay=${delay}ms reason=${errorMessage}`
                 );
                 await new Promise((resolve) => setTimeout(resolve, delay));
-                // Exponential backoff
                 delay *= 1.5;
             } else {
-                // For other errors, don't retry
-                console.error('Error fetching data:', errorMessage);
+                logger.error(`请求失败 url=${requestLabel} reason=${errorMessage}`);
                 return null;
             }
         }

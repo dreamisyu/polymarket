@@ -1,5 +1,8 @@
 import { AssetType, ClobClient } from '@polymarket/clob-client';
 import getMyBalance from './getMyBalance';
+import createLogger from './logger';
+
+const logger = createLogger('guard');
 
 interface TradingGuardState {
     availableBalance: number | null;
@@ -85,7 +88,7 @@ const getTradingGuardState = async (clobClient: ClobClient): Promise<TradingGuar
             skipReason: '',
         };
     } catch (error) {
-        console.error('获取真实交易风控上下文失败:', error);
+        logger.error('读取真实交易风控上下文失败', error);
         return {
             availableBalance: null,
             allowance: null,

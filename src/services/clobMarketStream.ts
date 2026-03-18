@@ -6,12 +6,14 @@ import {
     buildMarketBookSnapshot,
     sortBookLevels,
 } from '../utils/executionPlanning';
+import createLogger from '../utils/logger';
 
 const CLOB_WS_URL = ENV.CLOB_WS_URL;
 const MARKET_CACHE_TTL_MS = ENV.MARKET_CACHE_TTL_MS;
 const MARKET_WS_RECONNECT_MS = ENV.MARKET_WS_RECONNECT_MS;
 const MARKET_WS_SNAPSHOT_WAIT_MS = ENV.MARKET_WS_SNAPSHOT_WAIT_MS;
 const MARKET_WS_ENABLED = ENV.MARKET_WS_ENABLED;
+const logger = createLogger('market-ws');
 
 type FetchBook = (assetId: string) => Promise<OrderBookSummary>;
 
@@ -73,7 +75,7 @@ export class ClobMarketStream {
             this.handleMessage(event.data);
         };
         ws.onerror = (error) => {
-            console.error('市场 WebSocket 发生错误:', error);
+            logger.error('市场 WebSocket 异常', error);
         };
         ws.onclose = () => {
             this.ws = null;
@@ -192,7 +194,6 @@ export class ClobMarketStream {
             }
 
             if (!normalizedData.startsWith('{') && !normalizedData.startsWith('[')) {
-                console.warn(`收到非 JSON 市场 WebSocket 消息: ${normalizedData}`);
                 return;
             }
 
@@ -300,7 +301,7 @@ export class ClobMarketStream {
                 }
             }
         } catch (error) {
-            console.error('解析市场 WebSocket 消息失败:', error);
+            logger.error('解析市场 WebSocket 消息失败', error);
         }
     }
 
@@ -340,7 +341,7 @@ export class ClobMarketStream {
             this.snapshots.set(assetId, snapshot);
             return snapshot;
         } catch (error) {
-            console.error(`获取 ${assetId} 市场快照失败:`, error);
+            logger.error(`获取市场快照失败 asset=${assetId}`, error);
             return this.snapshots.get(assetId) || null;
         }
     }

@@ -8,6 +8,7 @@ import paperTradeExecutor from './paperTradeExecutor';
 
 interface ExecutorRuntime {
     label: string;
+    name: string;
     run: () => Promise<void>;
 }
 
@@ -19,6 +20,7 @@ const createExecutor = async (): Promise<ExecutorRuntime> => {
         );
         return {
             label: ENV.TRACE_LABEL,
+            name: '模拟执行器',
             run: () => paperTradeExecutor(marketStream),
         };
     }
@@ -29,6 +31,7 @@ const createExecutor = async (): Promise<ExecutorRuntime> => {
 
     return {
         label: ENV.PROXY_WALLET,
+        name: '实盘执行器',
         run: () => tradeExecutor(clobClient, marketStream, userStream),
     };
 };

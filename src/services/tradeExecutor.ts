@@ -10,12 +10,14 @@ import getTradingGuardState from '../utils/getTradingGuardState';
 import postOrder, { PostOrderResult } from '../utils/postOrder';
 import resolveTradeCondition from '../utils/resolveTradeCondition';
 import spinner from '../utils/spinner';
+import createLogger from '../utils/logger';
 
 const USER_ADDRESS = ENV.USER_ADDRESS;
 const PROXY_WALLET = ENV.PROXY_WALLET;
 const RETRY_LIMIT = ENV.RETRY_LIMIT;
 const PROCESSING_LEASE_MS = ENV.PROCESSING_LEASE_MS;
 const PROXY_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${PROXY_WALLET}&sizeThreshold=0`;
+const logger = createLogger('live');
 
 const UserActivity = getUserActivityModel(USER_ADDRESS);
 
@@ -35,6 +37,15 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const mergeReasons = (...reasons: string[]) =>
     [...new Set(reasons.map((reason) => String(reason || '').trim()))].filter(Boolean).join('；');
+const toSafeNumber = (value: unknown, fallback = 0) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+};
+const formatAmount = (value: unknown) => toSafeNumber(value).toFixed(4);
+const formatTradeRef = (trade: Pick<UserActivityInterface, 'transactionHash' | 'asset' | 'side'>) =>
+    `tx=${trade.transactionHash} side=${String(trade.side || '').toUpperCase()} asset=${trade.asset}`;
+const formatTerminalStatus = (status: 'CONFIRMED' | 'SKIPPED' | 'FAILED') =>
+    status === 'CONFIRMED' ? '已确认' : status === 'SKIPPED' ? '已跳过' : '已失败';
 
 const buildLeaseCutoff = () => Date.now() - PROCESSING_LEASE_MS;
 
@@ -213,6 +224,42 @@ const finalizeTerminalTrade = async (
     );
 };
 
+const finalizeRetryableTradeWithLog = async (trade: UserActivityInterface, reason: string) => {
+    const nextRetryCount = Number(trade.botExcutedTime || 0) + 1;
+    await finalizeRetryableTrade(trade, reason);
+
+    if (nextRetryCount >= RETRY_LIMIT) {
+        logger.error(`${formatTradeRef(trade)} 已失败 reason=${reason}`);
+        return;
+    }
+
+    logger.warn(`${formatTradeRef(trade)} 待重试 reason=${reason}`);
+};
+
+const finalizeTerminalTradeWithLog = async (
+    trade: UserActivityInterface,
+    status: 'CONFIRMED' | 'SKIPPED' | 'FAILED',
+    reason: string,
+    confirmedAt?: number
+) => {
+    await finalizeTerminalTrade(trade, status, reason, confirmedAt);
+
+    const message = [
+        `${formatTradeRef(trade)} ${formatTerminalStatus(status)}`,
+        reason ? `reason=${reason}` : '',
+        confirmedAt ? `confirmedAt=${confirmedAt}` : '',
+    ]
+        .filter(Boolean)
+        .join(' ');
+
+    if (status === 'FAILED') {
+        logger.error(message);
+        return;
+    }
+
+    logger.info(message);
+};
+
 const syncSubmittedTradeProgress = async (
     trade: UserActivityInterface,
     update: UserChannelStatusUpdate
@@ -316,15 +363,14 @@ const confirmSubmittedTrade = async (
         }
 
         if (normalizedConfirmation.confirmationStatus === 'PENDING') {
-            await releaseSubmittedTrade(
-                trade,
-                mergeReasons(trade.botLastError || '', normalizedConfirmation.reason)
-            );
+            const reason = mergeReasons(trade.botLastError || '', normalizedConfirmation.reason);
+            await releaseSubmittedTrade(trade, reason);
+            logger.warn(`${formatTradeRef(trade)} 等待确认，稍后重试 reason=${reason}`);
             return;
         }
 
         if (normalizedConfirmation.confirmationStatus === 'FAILED') {
-            await finalizeTerminalTrade(
+            await finalizeTerminalTradeWithLog(
                 trade,
                 'FAILED',
                 mergeReasons(trade.botLastError || '', normalizedConfirmation.reason)
@@ -336,14 +382,14 @@ const confirmSubmittedTrade = async (
             normalizedConfirmation.status === 'FAILED' || trade.botSubmissionStatus === 'FAILED'
                 ? 'FAILED'
                 : 'CONFIRMED';
-        await finalizeTerminalTrade(
+        await finalizeTerminalTradeWithLog(
             trade,
             finalStatus,
             normalizedConfirmation.reason,
             normalizedConfirmation.confirmedAt
         );
     } catch (error) {
-        console.error(`确认交易 ${trade.transactionHash} 时发生错误:`, error);
+        logger.error(`${formatTradeRef(trade)} 确认异常`, error);
         await releaseSubmittedTrade(trade, 'User Channel 确认查询失败，稍后重试');
     }
 };
@@ -354,7 +400,7 @@ const syncSubmittedTrades = async (userStream: ClobUserStream | null) => {
         return;
     }
 
-    console.log(`检测到 ${submittedTrades.length} 条等待最终确认的交易，开始补偿确认`);
+    logger.info(`检测到 ${submittedTrades.length} 条待确认交易，开始补偿确认`);
 
     for (const trade of submittedTrades) {
         const claimed = await claimSubmittedTrade(trade);
@@ -379,39 +425,37 @@ const doTrading = async (
         }
 
         try {
-            console.log('待复制交易:', trade);
-
             const [myPositionsRaw, tradingGuardState] = await Promise.all([
                 fetchData<UserPositionInterface[]>(PROXY_POSITIONS_URL),
                 getTradingGuardState(clobClient),
             ]);
             if (!Array.isArray(myPositionsRaw)) {
-                await finalizeRetryableTrade(trade, '代理钱包持仓接口不可用');
+                await finalizeRetryableTradeWithLog(trade, '代理钱包持仓接口不可用');
                 continue;
             }
 
             if (tradingGuardState.skipReason) {
-                await finalizeTerminalTrade(trade, 'SKIPPED', tradingGuardState.skipReason);
+                await finalizeTerminalTradeWithLog(trade, 'SKIPPED', tradingGuardState.skipReason);
                 continue;
             }
 
             if (tradingGuardState.availableBalance === null) {
-                await finalizeRetryableTrade(trade, '代理钱包可用余额接口不可用');
+                await finalizeRetryableTradeWithLog(trade, '代理钱包可用余额接口不可用');
                 continue;
             }
 
             if (!Number.isFinite(trade.sourceBalanceAfterTrade)) {
-                await finalizeRetryableTrade(trade, '缺少源账户余额快照');
+                await finalizeRetryableTradeWithLog(trade, '缺少源账户余额快照');
                 continue;
             }
 
             if (!Number.isFinite(trade.sourcePositionSizeAfterTrade)) {
-                await finalizeRetryableTrade(trade, '缺少源账户持仓快照');
+                await finalizeRetryableTradeWithLog(trade, '缺少源账户持仓快照');
                 continue;
             }
 
             if (trade.snapshotStatus && trade.snapshotStatus !== 'COMPLETE') {
-                await finalizeTerminalTrade(
+                await finalizeTerminalTradeWithLog(
                     trade,
                     'SKIPPED',
                     trade.sourceSnapshotReason ||
@@ -424,18 +468,17 @@ const doTrading = async (
             const sourcePositionAfterTrade = {
                 size: trade.sourcePositionSizeAfterTrade,
             };
-
-            console.log('代理钱包当前可用余额:', tradingGuardState.availableBalance);
-            console.log('代理钱包当前持仓:', myPosition);
-            console.log('源账户成交后余额快照:', trade.sourceBalanceAfterTrade);
-            console.log('源账户成交后持仓快照:', sourcePositionAfterTrade);
-
             const condition = resolveTradeCondition(
                 trade.side,
                 myPosition,
                 sourcePositionAfterTrade
             );
-            console.log(`交易 ${trade.transactionHash} 的执行条件为: ${condition}`);
+            logger.info(
+                `${formatTradeRef(trade)} 执行=${condition} ` +
+                    `balance=${formatAmount(tradingGuardState.availableBalance)} ` +
+                    `proxySize=${formatAmount(myPosition?.size)} ` +
+                    `sourceSize=${formatAmount(sourcePositionAfterTrade.size)}`
+            );
 
             const result = await postOrder(
                 clobClient,
@@ -449,12 +492,16 @@ const doTrading = async (
             );
 
             if (result.status === 'RETRYABLE_ERROR') {
-                await finalizeRetryableTrade(trade, result.reason);
+                await finalizeRetryableTradeWithLog(trade, result.reason);
                 continue;
             }
 
             if (result.orderIds.length > 0 || result.transactionHashes.length > 0) {
                 await markTradeSubmitted(trade, result);
+                logger.info(
+                    `${formatTradeRef(trade)} 已提交 orderIds=${result.orderIds.length} ` +
+                        `txHashes=${result.transactionHashes.length}`
+                );
                 await confirmSubmittedTrade(
                     {
                         ...trade,
@@ -467,19 +514,17 @@ const doTrading = async (
                     },
                     userStream
                 );
-                console.log(`交易 ${trade.transactionHash} 已提交，等待 User Channel 最终确认`);
                 continue;
             }
 
-            await finalizeTerminalTrade(
+            await finalizeTerminalTradeWithLog(
                 trade,
                 result.status === 'SKIPPED' ? 'SKIPPED' : 'FAILED',
                 result.reason
             );
-            console.log(`交易 ${trade.transactionHash} 处理完成，状态 ${result.status}`);
         } catch (error) {
-            console.error(`处理交易 ${trade.transactionHash} 时发生错误:`, error);
-            await finalizeRetryableTrade(trade, '执行链路发生未预期异常');
+            logger.error(`${formatTradeRef(trade)} 执行异常`, error);
+            await finalizeRetryableTradeWithLog(trade, '执行链路发生未预期异常');
         }
     }
 };
@@ -489,20 +534,14 @@ const tradeExecutor = async (
     marketStream: ClobMarketStream,
     userStream: ClobUserStream | null
 ) => {
-    console.log('开始执行真实跟单');
+    logger.info('启动真实跟单');
     const processingCount = await UserActivity.countDocuments({ botStatus: 'PROCESSING' });
     const submittedCount = await UserActivity.countDocuments({ botStatus: 'SUBMITTED' });
     if (processingCount > 0) {
-        console.warn(
-            `检测到 ${processingCount} 条仍处于 PROCESSING 的交易。` +
-                `超出租约的记录会自动回收并重新执行。`
-        );
+        logger.warn(`检测到 ${processingCount} 条 PROCESSING 交易，超出租约的记录会自动回收`);
     }
     if (submittedCount > 0) {
-        console.warn(
-            `检测到 ${submittedCount} 条仍处于 SUBMITTED 的交易。` +
-                `本次启动会优先补偿 User Channel 最终确认。`
-        );
+        logger.warn(`检测到 ${submittedCount} 条 SUBMITTED 交易，本次启动会优先补偿最终确认`);
     }
 
     while (true) {
@@ -510,8 +549,8 @@ const tradeExecutor = async (
 
         const pendingTrades = await readPendingTrades();
         if (pendingTrades.length > 0) {
-            console.log(`💥 发现 ${pendingTrades.length} 条待处理交易 💥`);
             spinner.stop();
+            logger.info(`发现 ${pendingTrades.length} 条待处理交易`);
             await doTrading(clobClient, marketStream, userStream, pendingTrades);
         } else {
             await spinner.start('等待新交易');

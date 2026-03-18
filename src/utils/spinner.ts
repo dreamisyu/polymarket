@@ -29,32 +29,12 @@ const getSpinner = async () => {
     return spinnerInstance;
 };
 
-// Create a synchronous wrapper that initializes on first use
 const spinner = {
-    start: async (text?: string) => {
-        const s = await getSpinner();
-        return s.start(text);
-    },
+    start: async (text?: string) => (await getSpinner()).start(text),
     stop: () => {
         if (spinnerInstance) {
             spinnerInstance.stop();
         }
-    },
-    succeed: async (text?: string) => {
-        const s = await getSpinner();
-        return s.succeed(text);
-    },
-    fail: async (text?: string) => {
-        const s = await getSpinner();
-        return s.fail(text);
-    },
-    warn: async (text?: string) => {
-        const s = await getSpinner();
-        return s.warn(text);
-    },
-    info: async (text?: string) => {
-        const s = await getSpinner();
-        return s.info(text);
     },
 };
 

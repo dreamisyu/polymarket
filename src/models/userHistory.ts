@@ -8,39 +8,6 @@ const getModel = <T>(modelName: string, schema: Schema, collectionName: string):
     return mongoose.model<T>(modelName, schema, collectionName);
 };
 
-const positionSchema = new Schema({
-    _id: {
-        type: Schema.Types.ObjectId,
-        required: true,
-        auto: true,
-    },
-    proxyWallet: { type: String, required: false },
-    asset: { type: String, required: false },
-    conditionId: { type: String, required: false },
-    size: { type: Number, required: false },
-    avgPrice: { type: Number, required: false },
-    initialValue: { type: Number, required: false },
-    currentValue: { type: Number, required: false },
-    cashPnl: { type: Number, required: false },
-    percentPnl: { type: Number, required: false },
-    totalBought: { type: Number, required: false },
-    realizedPnl: { type: Number, required: false },
-    percentRealizedPnl: { type: Number, required: false },
-    curPrice: { type: Number, required: false },
-    redeemable: { type: Boolean, required: false },
-    mergeable: { type: Boolean, required: false },
-    title: { type: String, required: false },
-    slug: { type: String, required: false },
-    icon: { type: String, required: false },
-    eventSlug: { type: String, required: false },
-    outcome: { type: String, required: false },
-    outcomeIndex: { type: Number, required: false },
-    oppositeOutcome: { type: String, required: false },
-    oppositeAsset: { type: String, required: false },
-    endDate: { type: String, required: false },
-    negativeRisk: { type: Boolean, required: false },
-});
-
 const activitySchema = new Schema({
     _id: {
         type: Schema.Types.ObjectId,
@@ -110,11 +77,6 @@ const syncStateSchema = new Schema({
     updatedAt: { type: Number, required: true, default: 0 },
 });
 
-const getUserPositionModel = (walletAddress: string) => {
-    const collectionName = `user_positions_${walletAddress}`;
-    return getModel(collectionName, positionSchema, collectionName);
-};
-
 const getUserActivityModel = (walletAddress: string) => {
     const collectionName = `user_activities_${walletAddress}`;
     return getModel(collectionName, activitySchema, collectionName);
@@ -125,4 +87,4 @@ const getUserActivitySyncStateModel = (walletAddress: string) => {
     return getModel(collectionName, syncStateSchema, collectionName);
 };
 
-export { getUserPositionModel, getUserActivityModel, getUserActivitySyncStateModel };
+export { getUserActivityModel, getUserActivitySyncStateModel };

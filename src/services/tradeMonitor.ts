@@ -11,6 +11,7 @@ import buildTradeSnapshots, { TradeSnapshotFields } from '../utils/buildTradeSna
 import buildActivityKey from '../utils/buildActivityKey';
 import fetchData from '../utils/fetchData';
 import getMyBalance from '../utils/getMyBalance';
+import createLogger from '../utils/logger';
 
 const USER_ADDRESS = ENV.USER_ADDRESS;
 const FETCH_INTERVAL = ENV.FETCH_INTERVAL;
@@ -21,6 +22,7 @@ const MILLISECOND_TIMESTAMP_THRESHOLD = 1_000_000_000_000;
 const TRACKED_ACTIVITY_TYPES = new Set(['TRADE', 'MERGE', 'REDEEM']);
 const SOURCE_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}&sizeThreshold=0`;
 const INITIAL_SYNC_LOOKBACK_MS = TOO_OLD_TIMESTAMP * 1000;
+const logger = createLogger('monitor');
 
 if (!USER_ADDRESS) {
     throw new Error('USER_ADDRESS is not defined');
@@ -84,7 +86,7 @@ const normalizeTrade = (trade: UserActivityInterface): UserActivityInterface | n
         .toUpperCase();
 
     if (normalizedTimestamp === null) {
-        console.warn(`跳过时间戳无效的活动: ${transactionHash || 'unknown-hash'}`);
+        logger.warn(`跳过时间戳无效的活动 tx=${transactionHash || 'unknown-hash'}`);
         return null;
     }
 
@@ -156,7 +158,7 @@ const fetchActivityWindow = async (startTimestamp: number, endTimestamp: number)
         normalizedEndTimestamp === null ||
         normalizedStartTimestamp > normalizedEndTimestamp
     ) {
-        console.warn('活动抓取窗口无效，跳过本轮抓取');
+        logger.warn('活动抓取窗口无效，已跳过本轮同步');
         return [];
     }
 
@@ -175,7 +177,7 @@ const fetchActivityWindow = async (startTimestamp: number, endTimestamp: number)
         );
 
         if (!Array.isArray(activitiesRaw)) {
-            console.warn('活动接口暂不可用，跳过本轮抓取');
+            logger.warn('活动接口暂不可用，已跳过本轮同步');
             return [];
         }
 
@@ -214,7 +216,7 @@ const fetchActivityWindow = async (startTimestamp: number, endTimestamp: number)
 
         const nextCursor = lastRawTimestamp + 1;
         if (nextCursor <= cursor) {
-            console.warn('活动分页游标未能前进，提前结束本轮抓取以避免死循环');
+            logger.warn('活动分页游标未推进，已提前结束本轮同步');
             break;
         }
 
@@ -412,17 +414,17 @@ const fetchTradeData = async () => {
         ).length;
         const syncOnlyCount = fetchedTrades.length - executeCount;
         if (executeCount > 0 || syncOnlyCount > 0) {
-            console.log(
-                `同步活动 ${fetchedTrades.length} 条，其中待执行 ${executeCount} 条，仅校准 ${syncOnlyCount} 条`
+            logger.info(
+                `同步活动 ${fetchedTrades.length} 条，待执行 ${executeCount} 条，仅校准 ${syncOnlyCount} 条`
             );
         }
     } catch (error) {
-        console.error('抓取交易数据时发生错误:', error);
+        logger.error('同步活动失败', error);
     }
 };
 
 const tradeMonitor = async () => {
-    console.log('交易监控已启动，轮询间隔', FETCH_INTERVAL, '秒');
+    logger.info(`启动，轮询间隔=${FETCH_INTERVAL}s`);
 
     while (true) {
         await fetchTradeData();

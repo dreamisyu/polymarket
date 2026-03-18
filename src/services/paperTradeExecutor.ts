@@ -18,11 +18,13 @@ import {
     cloneMarketSnapshot,
     consumeMarketLiquidity,
 } from '../utils/executionPlanning';
+import createLogger from '../utils/logger';
 
 const USER_ADDRESS = ENV.USER_ADDRESS;
 const TRACE_ID = ENV.TRACE_ID;
 const TRACE_LABEL = ENV.TRACE_LABEL;
 const TRACE_INITIAL_BALANCE = ENV.TRACE_INITIAL_BALANCE;
+const logger = createLogger(TRACE_LABEL);
 
 const SourceActivity = getUserActivityModel(USER_ADDRESS);
 const TraceExecution = getTraceExecutionModel(USER_ADDRESS, TRACE_ID);
@@ -61,6 +63,9 @@ const toSafeNumber = (value: unknown, fallback = 0) => {
 };
 
 const normalizeSize = (value: number) => (Math.abs(value) < EPSILON ? 0 : value);
+const formatAmount = (value: unknown) => toSafeNumber(value).toFixed(4);
+const formatTradeRef = (trade: Pick<UserActivityInterface, 'transactionHash' | 'asset' | 'side'>) =>
+    `tx=${trade.transactionHash} side=${String(trade.side || '').toUpperCase()} asset=${trade.asset}`;
 const getSourceExecutionKey = (
     trade: Pick<UserActivityInterface, 'activityKey' | 'transactionHash'>
 ) => String(trade.activityKey || trade.transactionHash || '').trim();
@@ -259,7 +264,7 @@ const matchUserPosition = (
 const fetchSourcePositions = async () => {
     const userPositionsRaw = await fetchData<UserPositionInterface[]>(SOURCE_POSITIONS_URL);
     if (!Array.isArray(userPositionsRaw)) {
-        console.warn(`[trace:${TRACE_ID}] 源账户持仓接口不可用，跳过本轮市值刷新`);
+        logger.warn('源账户持仓接口不可用，已跳过本轮市值刷新');
         return null;
     }
 
@@ -582,21 +587,16 @@ const autoSettleRedeemablePositions = async (
 
         settledCount += 1;
 
-        console.log(
-            `[trace:${TRACE_ID}] 自动结算 ${tracePosition.asset} ` +
-                `size=${positionSizeBefore.toFixed(4)} payout=${executedUsdc.toFixed(4)}`
+        logger.info(
+            `自动结算 asset=${tracePosition.asset} ` +
+                `size=${formatAmount(positionSizeBefore)} payout=${formatAmount(executedUsdc)}`
         );
     }
 
     return settledCount;
 };
 
-const syncTracePortfolioWithPolymarket = async (
-    portfolio: TracePortfolioDocument,
-    options: {
-        allowSettlement: boolean;
-    }
-) => {
+const syncTracePortfolioWithPolymarket = async (portfolio: TracePortfolioDocument) => {
     const userPositions = await fetchSourcePositions();
     if (!userPositions) {
         return;
@@ -604,11 +604,9 @@ const syncTracePortfolioWithPolymarket = async (
 
     await refreshOpenPositionMarks(userPositions);
 
-    if (options.allowSettlement) {
-        const settledCount = await autoSettleRedeemablePositions(portfolio, userPositions);
-        if (settledCount > 0) {
-            return;
-        }
+    const settledCount = await autoSettleRedeemablePositions(portfolio, userPositions);
+    if (settledCount > 0) {
+        return;
     }
 
     await refreshPortfolioState(portfolio);
@@ -729,27 +727,28 @@ const processTrade = async (trade: UserActivityInterface, marketStream: ClobMark
     );
     await recordExecution(trade, condition, portfolio, resultWithPosition.result);
 
-    console.log(
-        `[trace:${TRACE_ID}] ${trade.transactionHash} ${resultWithPosition.result.status} ` +
-            `cash=${portfolio.cashBalance.toFixed(4)} equity=${portfolio.totalEquity.toFixed(4)}`
+    logger.info(
+        `${formatTradeRef(trade)} status=${resultWithPosition.result.status} ` +
+            `cash=${formatAmount(portfolio.cashBalance)} ` +
+            `equity=${formatAmount(portfolio.totalEquity)}` +
+            (resultWithPosition.result.reason ? ` reason=${resultWithPosition.result.reason}` : '')
     );
 };
 
 const paperTradeExecutor = async (marketStream: ClobMarketStream) => {
-    console.log(`开始执行模拟跟单 (${TRACE_LABEL})`);
+    logger.info('启动模拟跟单');
     const processingCount = await TraceExecution.countDocuments({ status: 'PROCESSING' });
     if (processingCount > 0) {
-        console.warn(
-            `[trace:${TRACE_ID}] 检测到 ${processingCount} 条仍处于 PROCESSING 的记录，` +
-                `为避免重复记账，本次不会自动重放，请人工确认。`
+        logger.warn(
+            `检测到 ${processingCount} 条 PROCESSING 记录，为避免重复记账，本次不会自动重放`
         );
     }
 
     while (true) {
         const pendingTrades = await loadPendingTrades();
         if (pendingTrades.length > 0) {
-            console.log(`🧪 发现 ${pendingTrades.length} 条待处理的模拟交易 🧪`);
             spinner.stop();
+            logger.info(`发现 ${pendingTrades.length} 条待处理模拟交易`);
 
             for (const trade of pendingTrades) {
                 const claimed = await claimTradeExecution(trade);
@@ -762,24 +761,17 @@ const paperTradeExecutor = async (marketStream: ClobMarketStream) => {
                 } catch (error) {
                     if (error instanceof RetryableTraceError) {
                         await releaseTradeClaim(trade);
-                        console.warn(
-                            `[trace:${TRACE_ID}] 交易 ${trade.transactionHash} 稍后重试: ${error.message}`
-                        );
+                        logger.warn(`${formatTradeRef(trade)} 稍后重试 reason=${error.message}`);
                         continue;
                     }
 
-                    console.error(
-                        `[trace:${TRACE_ID}] 处理交易 ${trade.transactionHash} 时发生错误:`,
-                        error
-                    );
+                    logger.error(`${formatTradeRef(trade)} 执行异常`, error);
                 }
             }
         } else {
             const portfolio = await ensurePortfolio();
-            await syncTracePortfolioWithPolymarket(portfolio, {
-                allowSettlement: true,
-            });
-            await spinner.start(`等待新的模拟交易 (${TRACE_LABEL})`);
+            await syncTracePortfolioWithPolymarket(portfolio);
+            await spinner.start('等待新的模拟交易');
         }
 
         await new Promise((resolve) => setTimeout(resolve, 1000));

@@ -2,30 +2,31 @@ import connectDB from './config/db';
 import { ENV } from './config/env';
 import tradeMonitor from './services/tradeMonitor';
 import createExecutor from './services/createExecutor';
+import createLogger from './utils/logger';
 
-const USER_ADDRESS = ENV.USER_ADDRESS;
+const logger = createLogger('app');
+
+const startWorker = (name: string, run: () => Promise<void>) => {
+    run().catch((error) => {
+        logger.error(`${name} 已退出`, error);
+        process.exit(1);
+    });
+};
+
 export const main = async () => {
     try {
         await connectDB();
-
-        console.log(`Target User Wallet address is: ${USER_ADDRESS}`);
         const executor = await createExecutor();
-        console.log(`Execution mode is: ${ENV.EXECUTION_MODE}`);
-        console.log(`Execution target is: ${executor.label}`);
+        logger.info(
+            `启动完成 mode=${ENV.EXECUTION_MODE} source=${ENV.USER_ADDRESS} target=${executor.label}`
+        );
 
-        tradeMonitor().catch((error) => {
-            console.error('Trade Monitor error:', error);
-            process.exit(1);
-        });
-
-        executor.run().catch((error) => {
-            console.error('Trade Executor error:', error);
-            process.exit(1);
-        });
+        startWorker('监视器', tradeMonitor);
+        startWorker(executor.name, executor.run);
     } catch (error) {
-        console.error('Failed to start bot:', error);
+        logger.error('启动失败', error);
         process.exit(1);
     }
 };
 
-main();
+void main();
