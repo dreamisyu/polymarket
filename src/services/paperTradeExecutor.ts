@@ -1,7 +1,9 @@
+import { Side } from '@polymarket/clob-client';
 import { HydratedDocument } from 'mongoose';
 import { UserActivityInterface, UserPositionInterface } from '../interfaces/User';
 import { TracePortfolioInterface, TracePositionInterface } from '../interfaces/Trace';
 import { ENV } from '../config/env';
+import ClobMarketStream from './clobMarketStream';
 import { getUserActivityModel } from '../models/userHistory';
 import {
     getTraceExecutionModel,
@@ -11,6 +13,11 @@ import {
 import fetchData from '../utils/fetchData';
 import spinner from '../utils/spinner';
 import resolveTradeCondition from '../utils/resolveTradeCondition';
+import {
+    buildChunkExecutionPlan,
+    cloneMarketSnapshot,
+    consumeMarketLiquidity,
+} from '../utils/executionPlanning';
 
 const USER_ADDRESS = ENV.USER_ADDRESS;
 const TRACE_ID = ENV.TRACE_ID;
@@ -24,7 +31,7 @@ const TracePosition = getTracePositionModel(USER_ADDRESS, TRACE_ID);
 
 const EPSILON = 1e-8;
 const SETTLEMENT_PRICE = 1;
-const SOURCE_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}`;
+const SOURCE_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}&sizeThreshold=0`;
 
 type ExecutionStatus = 'FILLED' | 'SKIPPED';
 type TracePortfolioDocument = HydratedDocument<TracePortfolioInterface>;
@@ -54,6 +61,9 @@ const toSafeNumber = (value: unknown, fallback = 0) => {
 };
 
 const normalizeSize = (value: number) => (Math.abs(value) < EPSILON ? 0 : value);
+const getSourceExecutionKey = (
+    trade: Pick<UserActivityInterface, 'activityKey' | 'transactionHash'>
+) => String(trade.activityKey || trade.transactionHash || '').trim();
 
 const updatePositionMark = (position: TracePositionDocument, marketPrice: number) => {
     if (!position || marketPrice <= 0) {
@@ -141,31 +151,37 @@ const refreshPortfolioState = async (portfolio: TracePortfolioDocument) => {
 
 const loadPendingTrades = async () => {
     const trades = (await SourceActivity.find({
-        type: 'TRADE',
-        transactionHash: { $exists: true, $ne: '' },
+        $and: [
+            { type: 'TRADE' },
+            { $or: [{ executionIntent: 'EXECUTE' }, { executionIntent: { $exists: false } }] },
+            { $or: [{ snapshotStatus: 'COMPLETE' }, { snapshotStatus: { $exists: false } }] },
+            { transactionHash: { $exists: true, $ne: '' } },
+        ],
     })
         .sort({ timestamp: 1 })
         .exec()) as UserActivityInterface[];
 
     const executedDocs = (await TraceExecution.find(
         {},
-        { sourceTransactionHash: 1 }
+        { sourceActivityKey: 1, sourceTransactionHash: 1 }
     ).exec()) as Array<{
+        sourceActivityKey?: string;
         sourceTransactionHash?: string;
     }>;
     const executedHashes = new Set(
         executedDocs
-            .map((doc) => doc.sourceTransactionHash)
-            .filter((hash): hash is string => Boolean(hash))
+            .map((doc) => String(doc.sourceActivityKey || doc.sourceTransactionHash || '').trim())
+            .filter(Boolean)
     );
 
-    return trades.filter((trade) => !executedHashes.has(trade.transactionHash));
+    return trades.filter((trade) => !executedHashes.has(getSourceExecutionKey(trade)));
 };
 
 const claimTradeExecution = async (trade: UserActivityInterface) => {
+    const sourceExecutionKey = getSourceExecutionKey(trade);
     const result = await TraceExecution.updateOne(
         {
-            sourceTransactionHash: trade.transactionHash,
+            sourceActivityKey: sourceExecutionKey,
         },
         {
             $setOnInsert: {
@@ -173,6 +189,7 @@ const claimTradeExecution = async (trade: UserActivityInterface) => {
                 traceLabel: TRACE_LABEL,
                 sourceWallet: USER_ADDRESS,
                 sourceActivityId: trade._id,
+                sourceActivityKey: sourceExecutionKey,
                 sourceTransactionHash: trade.transactionHash,
                 sourceTimestamp: trade.timestamp,
                 sourceSide: trade.side,
@@ -197,7 +214,7 @@ const claimTradeExecution = async (trade: UserActivityInterface) => {
 
 const releaseTradeClaim = async (trade: UserActivityInterface) => {
     await TraceExecution.deleteOne({
-        sourceTransactionHash: trade.transactionHash,
+        sourceActivityKey: getSourceExecutionKey(trade),
         status: 'PROCESSING',
     });
 };
@@ -270,206 +287,147 @@ const refreshOpenPositionMarks = async (userPositions: UserPositionInterface[]) 
     }
 };
 
-const simulateBuy = async (
-    portfolio: TracePortfolioDocument,
-    position: TracePositionDocument,
-    trade: UserActivityInterface
-) => {
-    const cashBefore = toSafeNumber(portfolio.cashBalance);
-    const requestedUsdc = Math.max(toSafeNumber(trade.usdcSize), 0);
-    const price = toSafeNumber(trade.price);
-    const positionSizeBefore = toSafeNumber(position.size);
-
-    if (cashBefore <= 0) {
-        return {
-            result: {
-                status: 'SKIPPED',
-                reason: '模拟资金不足',
-                requestedSize: Math.max(toSafeNumber(trade.size), 0),
-                executedSize: 0,
-                requestedUsdc,
-                executedUsdc: 0,
-                executionPrice: price,
-                cashBefore,
-                cashAfter: cashBefore,
-                positionSizeBefore,
-                positionSizeAfter: positionSizeBefore,
-                realizedPnlDelta: 0,
-                unrealizedPnlAfter: toSafeNumber(position.unrealizedPnl),
-            } satisfies ExecutionResult,
-            position,
-        };
-    }
-
-    if (requestedUsdc <= 0 || price <= 0) {
-        return {
-            result: {
-                status: 'SKIPPED',
-                reason: '买入价格或金额无效',
-                requestedSize: Math.max(toSafeNumber(trade.size), 0),
-                executedSize: 0,
-                requestedUsdc,
-                executedUsdc: 0,
-                executionPrice: price,
-                cashBefore,
-                cashAfter: cashBefore,
-                positionSizeBefore,
-                positionSizeAfter: positionSizeBefore,
-                realizedPnlDelta: 0,
-                unrealizedPnlAfter: toSafeNumber(position.unrealizedPnl),
-            } satisfies ExecutionResult,
-            position,
-        };
-    }
-
-    const executedUsdc = Math.min(requestedUsdc, cashBefore);
-    const executedSize = executedUsdc / price;
-
-    portfolio.cashBalance = cashBefore - executedUsdc;
-
-    position.conditionId = trade.conditionId;
-    position.title = trade.title;
-    position.outcome = trade.outcome;
-    position.side = trade.side;
-    position.size = normalizeSize(toSafeNumber(position.size) + executedSize);
-    position.costBasis = toSafeNumber(position.costBasis) + executedUsdc;
-    position.totalBoughtSize = toSafeNumber(position.totalBoughtSize) + executedSize;
-    position.totalBoughtUsdc = toSafeNumber(position.totalBoughtUsdc) + executedUsdc;
-    position.lastSourceTransactionHash = trade.transactionHash;
-    position.lastTradedAt = trade.timestamp;
-    position.closedAt = undefined;
-
-    updatePositionMark(position, price);
-    await position.save();
-
-    return {
-        result: {
-            status: 'FILLED',
-            reason: executedUsdc < requestedUsdc ? '余额不足，已按可用资金部分成交' : '',
-            requestedSize: Math.max(toSafeNumber(trade.size), 0),
-            executedSize,
-            requestedUsdc,
-            executedUsdc,
-            executionPrice: price,
-            cashBefore,
-            cashAfter: toSafeNumber(portfolio.cashBalance),
-            positionSizeBefore,
-            positionSizeAfter: toSafeNumber(position.size),
-            realizedPnlDelta: 0,
-            unrealizedPnlAfter: toSafeNumber(position.unrealizedPnl),
-        } satisfies ExecutionResult,
-        position,
-    };
-};
-
-const simulateSellLike = async (
+const simulateTradeAgainstMarket = async (
     portfolio: TracePortfolioDocument,
     position: TracePositionDocument,
     trade: UserActivityInterface,
     userPosition: { size?: number } | undefined,
-    condition: string
+    condition: string,
+    marketStream: ClobMarketStream
 ) => {
+    const marketSnapshot = await marketStream.getSnapshot(trade.asset);
+    if (!marketSnapshot) {
+        throw new RetryableTraceError('市场快照不可用');
+    }
+
+    const workingSnapshot = cloneMarketSnapshot(marketSnapshot);
     const cashBefore = toSafeNumber(portfolio.cashBalance);
     const positionSizeBefore = toSafeNumber(position.size);
-    const fallbackPrice = toSafeNumber(position.marketPrice) || toSafeNumber(position.avgPrice);
-    const price = toSafeNumber(trade.price, fallbackPrice);
-
-    if (positionSizeBefore <= 0) {
-        return {
-            result: {
-                status: 'SKIPPED',
-                reason: '本地模拟仓位为空，无法卖出',
-                requestedSize: Math.max(toSafeNumber(trade.size), 0),
-                executedSize: 0,
-                requestedUsdc: Math.max(toSafeNumber(trade.usdcSize), 0),
-                executedUsdc: 0,
-                executionPrice: price,
-                cashBefore,
-                cashAfter: cashBefore,
-                positionSizeBefore,
-                positionSizeAfter: positionSizeBefore,
-                realizedPnlDelta: 0,
-                unrealizedPnlAfter: toSafeNumber(position.unrealizedPnl),
-            } satisfies ExecutionResult,
-            position,
-        };
-    }
-
-    if (price <= 0) {
-        return {
-            result: {
-                status: 'SKIPPED',
-                reason: '缺少可用价格，无法计算卖出结果',
-                requestedSize: Math.max(toSafeNumber(trade.size), 0),
-                executedSize: 0,
-                requestedUsdc: Math.max(toSafeNumber(trade.usdcSize), 0),
-                executedUsdc: 0,
-                executionPrice: price,
-                cashBefore,
-                cashAfter: cashBefore,
-                positionSizeBefore,
-                positionSizeAfter: positionSizeBefore,
-                realizedPnlDelta: 0,
-                unrealizedPnlAfter: toSafeNumber(position.unrealizedPnl),
-            } satisfies ExecutionResult,
-            position,
-        };
-    }
-
-    let requestedSize = positionSizeBefore;
-    if (condition === 'sell' && userPosition) {
-        const denominator = toSafeNumber(userPosition.size) + Math.max(toSafeNumber(trade.size), 0);
-        requestedSize =
-            denominator > 0 ? positionSizeBefore * (toSafeNumber(trade.size) / denominator) : 0;
-    }
-
-    requestedSize = Math.min(positionSizeBefore, Math.max(requestedSize, 0));
-
-    if (requestedSize <= 0) {
-        updatePositionMark(position, price);
-        await position.save();
-
-        return {
-            result: {
-                status: 'SKIPPED',
-                reason: '没有可卖出的模拟数量',
-                requestedSize,
-                executedSize: 0,
-                requestedUsdc: requestedSize * price,
-                executedUsdc: 0,
-                executionPrice: price,
-                cashBefore,
-                cashAfter: cashBefore,
-                positionSizeBefore,
-                positionSizeAfter: positionSizeBefore,
-                realizedPnlDelta: 0,
-                unrealizedPnlAfter: toSafeNumber(position.unrealizedPnl),
-            } satisfies ExecutionResult,
-            position,
-        };
-    }
-
-    const costBasisReleased =
-        positionSizeBefore > 0
-            ? toSafeNumber(position.costBasis) * (requestedSize / positionSizeBefore)
-            : 0;
-    const executedUsdc = requestedSize * price;
-    const realizedPnlDelta = executedUsdc - costBasisReleased;
-
-    portfolio.cashBalance = cashBefore + executedUsdc;
-    portfolio.realizedPnl = toSafeNumber(portfolio.realizedPnl) + realizedPnlDelta;
+    let remainingRequestedUsdc: number | undefined;
+    let remainingRequestedSize: number | undefined;
+    let totalExecutedUsdc = 0;
+    let totalExecutedSize = 0;
+    let totalRealizedPnlDelta = 0;
+    let lastExecutionPrice = toSafeNumber(trade.price);
+    let finalReason = '';
 
     position.conditionId = trade.conditionId;
     position.title = trade.title;
     position.outcome = trade.outcome;
     position.side = trade.side;
-    position.size = normalizeSize(positionSizeBefore - requestedSize);
-    position.costBasis = normalizeSize(toSafeNumber(position.costBasis) - costBasisReleased);
-    position.realizedPnl = toSafeNumber(position.realizedPnl) + realizedPnlDelta;
-    position.totalSoldSize = toSafeNumber(position.totalSoldSize) + requestedSize;
-    position.totalSoldUsdc = toSafeNumber(position.totalSoldUsdc) + executedUsdc;
     position.lastSourceTransactionHash = trade.transactionHash;
     position.lastTradedAt = trade.timestamp;
+    position.closedAt = undefined;
+
+    while (true) {
+        const plan = buildChunkExecutionPlan({
+            condition,
+            trade,
+            myPositionSize: Math.max(toSafeNumber(position.size), 0),
+            sourcePositionAfterTradeSize: Math.max(toSafeNumber(userPosition?.size), 0),
+            availableBalance: Math.max(toSafeNumber(portfolio.cashBalance), 0),
+            sourceBalanceAfterTrade: Math.max(toSafeNumber(trade.sourceBalanceAfterTrade), 0),
+            marketSnapshot: workingSnapshot,
+            remainingRequestedUsdc,
+            remainingRequestedSize,
+        });
+
+        if (plan.note) {
+            finalReason = plan.note;
+        }
+
+        if (plan.status !== 'READY') {
+            if (totalExecutedSize <= 0) {
+                if (plan.status === 'RETRYABLE_ERROR') {
+                    throw new RetryableTraceError(plan.reason);
+                }
+
+                updatePositionMark(position, lastExecutionPrice);
+                if (!position.isNew || position.size > 0) {
+                    await position.save();
+                }
+
+                return {
+                    result: {
+                        status: 'SKIPPED',
+                        reason: plan.reason,
+                        requestedSize: plan.requestedSize,
+                        executedSize: 0,
+                        requestedUsdc: plan.requestedUsdc,
+                        executedUsdc: 0,
+                        executionPrice: plan.executionPrice,
+                        cashBefore,
+                        cashAfter: cashBefore,
+                        positionSizeBefore,
+                        positionSizeAfter: positionSizeBefore,
+                        realizedPnlDelta: 0,
+                        unrealizedPnlAfter: toSafeNumber(position.unrealizedPnl),
+                    } satisfies ExecutionResult,
+                    position,
+                };
+            }
+
+            finalReason = [finalReason, plan.reason].filter(Boolean).join('；');
+            break;
+        }
+
+        lastExecutionPrice = plan.executionPrice;
+        if (plan.side === 'BUY') {
+            const executedUsdc = plan.orderAmount;
+            const executedSize = executedUsdc / plan.executionPrice;
+
+            portfolio.cashBalance = toSafeNumber(portfolio.cashBalance) - executedUsdc;
+            position.size = normalizeSize(toSafeNumber(position.size) + executedSize);
+            position.costBasis = toSafeNumber(position.costBasis) + executedUsdc;
+            position.totalBoughtSize = toSafeNumber(position.totalBoughtSize) + executedSize;
+            position.totalBoughtUsdc = toSafeNumber(position.totalBoughtUsdc) + executedUsdc;
+
+            totalExecutedUsdc += executedUsdc;
+            totalExecutedSize += executedSize;
+            remainingRequestedUsdc = Math.max(
+                (remainingRequestedUsdc ?? plan.requestedUsdc) - executedUsdc,
+                0
+            );
+            consumeMarketLiquidity(workingSnapshot, Side.BUY, executedUsdc, plan.executionPrice);
+
+            if (remainingRequestedUsdc <= 0) {
+                break;
+            }
+        } else {
+            const positionSizeBeforeChunk = Math.max(toSafeNumber(position.size), 0);
+            const executedSize = plan.orderAmount;
+            const costBasisReleased =
+                positionSizeBeforeChunk > 0
+                    ? toSafeNumber(position.costBasis) * (executedSize / positionSizeBeforeChunk)
+                    : 0;
+            const executedUsdc = executedSize * plan.executionPrice;
+            const realizedPnlDelta = executedUsdc - costBasisReleased;
+
+            portfolio.cashBalance = toSafeNumber(portfolio.cashBalance) + executedUsdc;
+            portfolio.realizedPnl = toSafeNumber(portfolio.realizedPnl) + realizedPnlDelta;
+
+            position.size = normalizeSize(positionSizeBeforeChunk - executedSize);
+            position.costBasis = normalizeSize(
+                toSafeNumber(position.costBasis) - costBasisReleased
+            );
+            position.realizedPnl = toSafeNumber(position.realizedPnl) + realizedPnlDelta;
+            position.totalSoldSize = toSafeNumber(position.totalSoldSize) + executedSize;
+            position.totalSoldUsdc = toSafeNumber(position.totalSoldUsdc) + executedUsdc;
+
+            totalExecutedUsdc += executedUsdc;
+            totalExecutedSize += executedSize;
+            totalRealizedPnlDelta += realizedPnlDelta;
+            remainingRequestedSize = Math.max(
+                (remainingRequestedSize ?? plan.requestedSize) - executedSize,
+                0
+            );
+            consumeMarketLiquidity(workingSnapshot, Side.SELL, executedSize, plan.executionPrice);
+
+            if (remainingRequestedSize <= 0) {
+                break;
+            }
+        }
+    }
 
     if (position.size === 0) {
         position.costBasis = 0;
@@ -477,23 +435,30 @@ const simulateSellLike = async (
         position.closedAt = trade.timestamp;
     }
 
-    updatePositionMark(position, price);
+    updatePositionMark(position, lastExecutionPrice);
     await position.save();
 
     return {
         result: {
             status: 'FILLED',
-            reason: '',
-            requestedSize,
-            executedSize: requestedSize,
-            requestedUsdc: requestedSize * price,
-            executedUsdc,
-            executionPrice: price,
+            reason: finalReason,
+            requestedSize:
+                condition === 'buy'
+                    ? Math.max(toSafeNumber(trade.size), 0)
+                    : totalExecutedSize + Math.max(remainingRequestedSize || 0, 0),
+            executedSize: totalExecutedSize,
+            requestedUsdc:
+                condition === 'buy'
+                    ? totalExecutedUsdc + Math.max(remainingRequestedUsdc || 0, 0)
+                    : (totalExecutedSize + Math.max(remainingRequestedSize || 0, 0)) *
+                      Math.max(lastExecutionPrice, 0),
+            executedUsdc: totalExecutedUsdc,
+            executionPrice: lastExecutionPrice,
             cashBefore,
             cashAfter: toSafeNumber(portfolio.cashBalance),
             positionSizeBefore,
             positionSizeAfter: toSafeNumber(position.size),
-            realizedPnlDelta,
+            realizedPnlDelta: totalRealizedPnlDelta,
             unrealizedPnlAfter: toSafeNumber(position.unrealizedPnl),
         } satisfies ExecutionResult,
         position,
@@ -576,13 +541,14 @@ const autoSettleRedeemablePositions = async (
 
         await TraceExecution.updateOne(
             {
-                sourceTransactionHash: settlementExecutionId,
+                sourceActivityKey: settlementExecutionId,
             },
             {
                 $set: {
                     traceId: TRACE_ID,
                     traceLabel: TRACE_LABEL,
                     sourceWallet: USER_ADDRESS,
+                    sourceActivityKey: settlementExecutionId,
                     sourceTimestamp: settledAt,
                     sourceSide: 'SETTLE',
                     executionCondition: 'settle',
@@ -656,7 +622,7 @@ const recordExecution = async (
 ) => {
     await TraceExecution.updateOne(
         {
-            sourceTransactionHash: trade.transactionHash,
+            sourceActivityKey: getSourceExecutionKey(trade),
         },
         {
             $set: {
@@ -664,6 +630,7 @@ const recordExecution = async (
                 traceLabel: TRACE_LABEL,
                 sourceWallet: USER_ADDRESS,
                 sourceActivityId: trade._id,
+                sourceActivityKey: getSourceExecutionKey(trade),
                 sourceTimestamp: trade.timestamp,
                 sourceSide: trade.side,
                 executionCondition: condition,
@@ -692,7 +659,11 @@ const recordExecution = async (
     );
 };
 
-const processTrade = async (trade: UserActivityInterface) => {
+const processTrade = async (trade: UserActivityInterface, marketStream: ClobMarketStream) => {
+    if (trade.snapshotStatus && trade.snapshotStatus !== 'COMPLETE') {
+        throw new RetryableTraceError(trade.sourceSnapshotReason || '源账户快照尚未完整');
+    }
+
     if (!Number.isFinite(trade.sourcePositionSizeAfterTrade)) {
         throw new RetryableTraceError('缺少源账户持仓快照');
     }
@@ -708,15 +679,14 @@ const processTrade = async (trade: UserActivityInterface) => {
     const condition = resolveTradeCondition(trade.side, existingPosition, sourcePositionAfterTrade);
 
     let resultWithPosition;
-    if (condition === 'buy') {
-        resultWithPosition = await simulateBuy(portfolio, existingPosition, trade);
-    } else if (condition === 'sell' || condition === 'merge') {
-        resultWithPosition = await simulateSellLike(
+    if (condition === 'buy' || condition === 'sell' || condition === 'merge') {
+        resultWithPosition = await simulateTradeAgainstMarket(
             portfolio,
             existingPosition,
             trade,
             sourcePositionAfterTrade,
-            condition
+            condition,
+            marketStream
         );
     } else {
         updatePositionMark(existingPosition, toSafeNumber(trade.price));
@@ -765,7 +735,7 @@ const processTrade = async (trade: UserActivityInterface) => {
     );
 };
 
-const paperTradeExecutor = async () => {
+const paperTradeExecutor = async (marketStream: ClobMarketStream) => {
     console.log(`开始执行模拟跟单 (${TRACE_LABEL})`);
     const processingCount = await TraceExecution.countDocuments({ status: 'PROCESSING' });
     if (processingCount > 0) {
@@ -788,7 +758,7 @@ const paperTradeExecutor = async () => {
                 }
 
                 try {
-                    await processTrade(trade);
+                    await processTrade(trade, marketStream);
                 } catch (error) {
                     if (error instanceof RetryableTraceError) {
                         await releaseTradeClaim(trade);

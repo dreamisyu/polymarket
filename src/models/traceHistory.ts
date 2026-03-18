@@ -51,6 +51,7 @@ const executionSchema = new Schema<TraceExecutionInterface>(
         traceLabel: { type: String, required: true },
         sourceWallet: { type: String, required: true },
         sourceActivityId: { type: Schema.Types.ObjectId, required: false },
+        sourceActivityKey: { type: String, required: false },
         sourceTransactionHash: { type: String, required: true },
         sourceTimestamp: { type: Number, required: true, default: 0 },
         sourceSide: { type: String, required: false, default: '' },
@@ -84,7 +85,8 @@ const executionSchema = new Schema<TraceExecutionInterface>(
     { timestamps: true }
 );
 
-executionSchema.index({ sourceTransactionHash: 1 }, { unique: true });
+executionSchema.index({ sourceActivityKey: 1 }, { unique: true, sparse: true });
+executionSchema.index({ sourceTransactionHash: 1 });
 
 const portfolioSchema = new Schema<TracePortfolioInterface>(
     {

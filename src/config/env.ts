@@ -36,6 +36,32 @@ const parsePositiveNumber = (rawValue: string, name: string): number => {
     return parsed;
 };
 
+const parseNonNegativeNumber = (rawValue: string, name: string): number => {
+    const parsed = Number(rawValue);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+        throw new Error(`${name} must be a non-negative number`);
+    }
+
+    return parsed;
+};
+
+const parsePositiveInteger = (rawValue: string, name: string): number => {
+    const parsed = Number.parseInt(rawValue, 10);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+        throw new Error(`${name} must be a positive integer`);
+    }
+
+    return parsed;
+};
+
+const parseBoolean = (rawValue: string | undefined, fallback: boolean) => {
+    if (rawValue === undefined) {
+        return fallback;
+    }
+
+    return rawValue === '1' || rawValue.toLowerCase() === 'true';
+};
+
 const EXECUTION_MODE: ExecutionMode = process.env.EXECUTION_MODE === 'trace' ? 'trace' : 'live';
 const TRACE_ID = process.env.TRACE_ID || 'default';
 const TRACE_INITIAL_BALANCE = parsePositiveNumber(
@@ -78,14 +104,19 @@ const liveOnlyEnv =
               PRIVATE_KEY: requireEnv('PRIVATE_KEY'),
               CLOB_HTTP_URL: requireEnv('CLOB_HTTP_URL'),
               CLOB_WS_URL: requireEnv('CLOB_WS_URL'),
+              USER_WS_URL:
+                  process.env.USER_WS_URL || 'wss://ws-subscriptions-clob.polymarket.com/ws/user',
               RPC_URL: requireEnv('RPC_URL'),
               USDC_CONTRACT_ADDRESS: requireEnv('USDC_CONTRACT_ADDRESS'),
           }
         : {
               PROXY_WALLET: process.env.PROXY_WALLET || '',
               PRIVATE_KEY: process.env.PRIVATE_KEY || '',
-              CLOB_HTTP_URL: process.env.CLOB_HTTP_URL || '',
-              CLOB_WS_URL: process.env.CLOB_WS_URL || '',
+              CLOB_HTTP_URL: process.env.CLOB_HTTP_URL || 'https://clob.polymarket.com',
+              CLOB_WS_URL:
+                  process.env.CLOB_WS_URL || 'wss://ws-subscriptions-clob.polymarket.com/ws/market',
+              USER_WS_URL:
+                  process.env.USER_WS_URL || 'wss://ws-subscriptions-clob.polymarket.com/ws/user',
               RPC_URL: process.env.RPC_URL || '',
               USDC_CONTRACT_ADDRESS: process.env.USDC_CONTRACT_ADDRESS || '',
           };
@@ -105,9 +136,60 @@ export const ENV = {
     PRIVATE_KEY: liveOnlyEnv.PRIVATE_KEY,
     CLOB_HTTP_URL: liveOnlyEnv.CLOB_HTTP_URL,
     CLOB_WS_URL: liveOnlyEnv.CLOB_WS_URL,
+    USER_WS_URL: liveOnlyEnv.USER_WS_URL,
     FETCH_INTERVAL: parseInt(process.env.FETCH_INTERVAL || '1', 10),
     TOO_OLD_TIMESTAMP: parseInt(process.env.TOO_OLD_TIMESTAMP || '24', 10),
     RETRY_LIMIT: parseInt(process.env.RETRY_LIMIT || '3', 10),
+    MAX_SLIPPAGE_BPS: parseNonNegativeNumber(
+        process.env.MAX_SLIPPAGE_BPS || '300',
+        'MAX_SLIPPAGE_BPS'
+    ),
+    MAX_ORDER_USDC: parseNonNegativeNumber(process.env.MAX_ORDER_USDC || '0', 'MAX_ORDER_USDC'),
+    PROCESSING_LEASE_MS: parsePositiveInteger(
+        process.env.PROCESSING_LEASE_MS || '30000',
+        'PROCESSING_LEASE_MS'
+    ),
+    ORDER_CONFIRMATION_TIMEOUT_MS: parsePositiveInteger(
+        process.env.ORDER_CONFIRMATION_TIMEOUT_MS || '45000',
+        'ORDER_CONFIRMATION_TIMEOUT_MS'
+    ),
+    ORDER_CONFIRMATION_POLL_MS: parsePositiveInteger(
+        process.env.ORDER_CONFIRMATION_POLL_MS || '2000',
+        'ORDER_CONFIRMATION_POLL_MS'
+    ),
+    ORDER_CONFIRMATION_BLOCKS: parsePositiveInteger(
+        process.env.ORDER_CONFIRMATION_BLOCKS || '2',
+        'ORDER_CONFIRMATION_BLOCKS'
+    ),
+    ACTIVITY_SYNC_LIMIT: parsePositiveInteger(
+        process.env.ACTIVITY_SYNC_LIMIT || '500',
+        'ACTIVITY_SYNC_LIMIT'
+    ),
+    ACTIVITY_SYNC_OVERLAP_MS: parsePositiveInteger(
+        process.env.ACTIVITY_SYNC_OVERLAP_MS || '30000',
+        'ACTIVITY_SYNC_OVERLAP_MS'
+    ),
+    SNAPSHOT_STALE_AFTER_MS: parsePositiveInteger(
+        process.env.SNAPSHOT_STALE_AFTER_MS || '30000',
+        'SNAPSHOT_STALE_AFTER_MS'
+    ),
+    MARKET_CACHE_TTL_MS: parsePositiveInteger(
+        process.env.MARKET_CACHE_TTL_MS || '3000',
+        'MARKET_CACHE_TTL_MS'
+    ),
+    MARKET_WS_RECONNECT_MS: parsePositiveInteger(
+        process.env.MARKET_WS_RECONNECT_MS || '1000',
+        'MARKET_WS_RECONNECT_MS'
+    ),
+    USER_WS_RECONNECT_MS: parsePositiveInteger(
+        process.env.USER_WS_RECONNECT_MS || '1000',
+        'USER_WS_RECONNECT_MS'
+    ),
+    MARKET_WS_SNAPSHOT_WAIT_MS: parsePositiveInteger(
+        process.env.MARKET_WS_SNAPSHOT_WAIT_MS || '750',
+        'MARKET_WS_SNAPSHOT_WAIT_MS'
+    ),
+    MARKET_WS_ENABLED: parseBoolean(process.env.MARKET_WS_ENABLED, true),
     RPC_URL: liveOnlyEnv.RPC_URL,
     USDC_CONTRACT_ADDRESS: liveOnlyEnv.USDC_CONTRACT_ADDRESS,
 };

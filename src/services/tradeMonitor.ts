@@ -1,24 +1,33 @@
 import { ENV } from '../config/env';
 import {
     BotExecutionStatus,
+    ExecutionIntent,
     UserActivityInterface,
+    UserActivitySyncStateInterface,
     UserPositionInterface,
 } from '../interfaces/User';
-import { getUserActivityModel } from '../models/userHistory';
+import { getUserActivityModel, getUserActivitySyncStateModel } from '../models/userHistory';
 import buildTradeSnapshots, { TradeSnapshotFields } from '../utils/buildTradeSnapshots';
+import buildActivityKey from '../utils/buildActivityKey';
 import fetchData from '../utils/fetchData';
 import getMyBalance from '../utils/getMyBalance';
 
 const USER_ADDRESS = ENV.USER_ADDRESS;
-const TOO_OLD_TIMESTAMP = ENV.TOO_OLD_TIMESTAMP;
 const FETCH_INTERVAL = ENV.FETCH_INTERVAL;
+const TOO_OLD_TIMESTAMP = ENV.TOO_OLD_TIMESTAMP;
+const ACTIVITY_SYNC_LIMIT = ENV.ACTIVITY_SYNC_LIMIT;
+const ACTIVITY_SYNC_OVERLAP_MS = ENV.ACTIVITY_SYNC_OVERLAP_MS;
 const MILLISECOND_TIMESTAMP_THRESHOLD = 1_000_000_000_000;
+const TRACKED_ACTIVITY_TYPES = new Set(['TRADE', 'MERGE', 'REDEEM']);
+const SOURCE_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}&sizeThreshold=0`;
+const INITIAL_SYNC_LOOKBACK_MS = TOO_OLD_TIMESTAMP * 60 * 60 * 1000;
 
 if (!USER_ADDRESS) {
     throw new Error('USER_ADDRESS is not defined');
 }
 
 const UserActivity = getUserActivityModel(USER_ADDRESS);
+const UserActivitySyncState = getUserActivitySyncStateModel(USER_ADDRESS);
 
 const normalizeTimestamp = (rawTimestamp: number): number | null => {
     if (!Number.isFinite(rawTimestamp) || rawTimestamp <= 0) {
@@ -31,49 +40,70 @@ const normalizeTimestamp = (rawTimestamp: number): number | null => {
         : parsedTimestamp;
 };
 
-const normalizeTrade = (trade: UserActivityInterface): UserActivityInterface | null => {
-    const baseTrade =
-        typeof (trade as { toObject?: () => UserActivityInterface }).toObject === 'function'
-            ? (trade as { toObject: () => UserActivityInterface }).toObject()
-            : trade;
-    const normalizedTimestamp = normalizeTimestamp(Number(trade.timestamp));
-    const transactionHash = String(trade.transactionHash || '').trim();
+const resolveExecutionIntent = (trade: UserActivityInterface): ExecutionIntent =>
+    String(trade.type || '').toUpperCase() === 'TRADE' ? 'EXECUTE' : 'SYNC_ONLY';
 
-    if (normalizedTimestamp === null) {
-        console.warn(`Skip trade with invalid timestamp: ${transactionHash || 'unknown-hash'}`);
-        return null;
+const getDefaultBotStatus = (trade: UserActivityInterface): BotExecutionStatus => {
+    if (resolveExecutionIntent(trade) === 'SYNC_ONLY') {
+        return 'SKIPPED';
     }
 
-    if (!transactionHash) {
-        console.warn(`Skip trade without transaction hash at timestamp ${normalizedTimestamp}`);
-        return null;
+    if (trade.botStatus) {
+        return trade.botStatus;
     }
 
-    return {
-        ...baseTrade,
-        transactionHash,
-        timestamp: normalizedTimestamp,
-    };
+    return trade.bot ? 'CONFIRMED' : 'PENDING';
 };
 
-const getDefaultBotStatus = (trade: UserActivityInterface): BotExecutionStatus =>
-    trade.bot ? 'COMPLETED' : 'PENDING';
-
-const hasSnapshot = (trade: UserActivityInterface) =>
+const hasCompleteSnapshot = (trade: UserActivityInterface) =>
+    trade.snapshotStatus === 'COMPLETE' &&
     Number.isFinite(trade.sourceBalanceAfterTrade) &&
     Number.isFinite(trade.sourceBalanceBeforeTrade) &&
     Number.isFinite(trade.sourcePositionSizeAfterTrade) &&
     Number.isFinite(trade.sourcePositionSizeBeforeTrade);
 
-const mergeTradesByHash = (trades: UserActivityInterface[]) => {
+const normalizeTrade = (trade: UserActivityInterface): UserActivityInterface | null => {
+    const baseTrade =
+        typeof (trade as { toObject?: () => UserActivityInterface }).toObject === 'function'
+            ? (trade as { toObject: () => UserActivityInterface }).toObject()
+            : trade;
+    const normalizedTimestamp = normalizeTimestamp(Number(baseTrade.timestamp));
+    const transactionHash = String(baseTrade.transactionHash || '').trim();
+    const type = String(baseTrade.type || '')
+        .trim()
+        .toUpperCase();
+
+    if (normalizedTimestamp === null) {
+        console.warn(`跳过时间戳无效的活动: ${transactionHash || 'unknown-hash'}`);
+        return null;
+    }
+
+    if (!TRACKED_ACTIVITY_TYPES.has(type)) {
+        return null;
+    }
+
+    const normalizedTrade = {
+        ...baseTrade,
+        type,
+        transactionHash,
+        timestamp: normalizedTimestamp,
+    };
+
+    return {
+        ...normalizedTrade,
+        activityKey: buildActivityKey(normalizedTrade),
+    };
+};
+
+const dedupeTradesByActivityKey = (trades: UserActivityInterface[]) => {
     const tradeMap = new Map<string, UserActivityInterface>();
 
     for (const trade of trades) {
-        if (!trade.transactionHash) {
+        if (!trade.activityKey) {
             continue;
         }
 
-        tradeMap.set(trade.transactionHash, trade);
+        tradeMap.set(trade.activityKey, trade);
     }
 
     return [...tradeMap.values()];
@@ -84,15 +114,182 @@ const prepareSnapshotData = (
     snapshots: Map<string, TradeSnapshotFields>,
     capturedAt: number
 ) => ({
-    ...(snapshots.get(trade.transactionHash) || {
-        sourceBalanceAfterTrade: 0,
-        sourceBalanceBeforeTrade: 0,
-        sourcePositionSizeAfterTrade: 0,
-        sourcePositionSizeBeforeTrade: 0,
-        sourcePositionPriceAfterTrade: Math.max(Number(trade.price) || 0, 0),
+    ...(snapshots.get(trade.activityKey || '') || {
         sourceSnapshotCapturedAt: capturedAt,
+        snapshotStatus: 'PARTIAL' as const,
+        sourceSnapshotReason: '监控轮次未生成该笔活动的快照',
     }),
 });
+
+const shouldUpdateSnapshot = (
+    trade: UserActivityInterface,
+    snapshotData: TradeSnapshotFields | undefined
+) => {
+    if (!snapshotData) {
+        return false;
+    }
+
+    if (!trade.snapshotStatus || trade.snapshotStatus !== 'COMPLETE') {
+        return true;
+    }
+
+    return snapshotData.snapshotStatus === 'COMPLETE';
+};
+
+const fetchActivityWindow = async (startTimestamp: number, endTimestamp: number) => {
+    const tradeMap = new Map<string, UserActivityInterface>();
+    let cursor = startTimestamp;
+
+    while (cursor <= endTimestamp) {
+        const params = new URLSearchParams({
+            user: USER_ADDRESS,
+            start: String(cursor),
+            end: String(endTimestamp),
+            limit: String(ACTIVITY_SYNC_LIMIT),
+            sortDirection: 'ASC',
+        });
+        const activitiesRaw = await fetchData<UserActivityInterface[]>(
+            `https://data-api.polymarket.com/activity?${params.toString()}`
+        );
+
+        if (!Array.isArray(activitiesRaw)) {
+            console.warn('活动接口暂不可用，跳过本轮抓取');
+            return [];
+        }
+
+        const normalizedTrades = dedupeTradesByActivityKey(
+            activitiesRaw
+                .map(normalizeTrade)
+                .filter((trade): trade is UserActivityInterface => trade !== null)
+                .sort((left, right) =>
+                    left.timestamp === right.timestamp
+                        ? String(left.activityKey || '').localeCompare(
+                              String(right.activityKey || '')
+                          )
+                        : left.timestamp - right.timestamp
+                )
+        );
+
+        for (const trade of normalizedTrades) {
+            if (!trade.activityKey) {
+                continue;
+            }
+
+            tradeMap.set(trade.activityKey, trade);
+        }
+
+        if (activitiesRaw.length < ACTIVITY_SYNC_LIMIT) {
+            break;
+        }
+
+        const lastRawTimestamp = [...activitiesRaw]
+            .reverse()
+            .map((activity) => normalizeTimestamp(Number(activity.timestamp)))
+            .find((timestamp): timestamp is number => timestamp !== null);
+        if (!lastRawTimestamp) {
+            break;
+        }
+
+        const nextCursor = lastRawTimestamp + 1;
+        if (nextCursor <= cursor) {
+            console.warn('活动分页游标未能前进，提前结束本轮抓取以避免死循环');
+            break;
+        }
+
+        cursor = nextCursor;
+    }
+
+    return [...tradeMap.values()].sort((left, right) =>
+        left.timestamp === right.timestamp
+            ? String(left.activityKey || '').localeCompare(String(right.activityKey || ''))
+            : left.timestamp - right.timestamp
+    );
+};
+
+const readSyncState = async (): Promise<UserActivitySyncStateInterface | null> =>
+    (await UserActivitySyncState.findOne({
+        walletAddress: USER_ADDRESS,
+    }).exec()) as UserActivitySyncStateInterface | null;
+
+const writeSyncState = async (lastTrade: UserActivityInterface | null, endTimestamp: number) => {
+    await UserActivitySyncState.updateOne(
+        { walletAddress: USER_ADDRESS },
+        {
+            $set: {
+                walletAddress: USER_ADDRESS,
+                lastSyncedTimestamp: lastTrade?.timestamp || endTimestamp,
+                lastSyncedActivityKey: lastTrade?.activityKey || '',
+                updatedAt: Date.now(),
+            },
+        },
+        {
+            upsert: true,
+        }
+    );
+};
+
+const upsertTrades = async (
+    fetchedTrades: UserActivityInterface[],
+    storedTrades: UserActivityInterface[],
+    snapshots: Map<string, TradeSnapshotFields>,
+    snapshotCapturedAt: number
+) => {
+    const storedTradeMap = new Map(
+        storedTrades
+            .filter((trade): trade is UserActivityInterface => Boolean(trade.activityKey))
+            .map((trade) => [trade.activityKey as string, trade])
+    );
+    const bulkOps = fetchedTrades.map((trade) => {
+        const existingTrade = storedTradeMap.get(trade.activityKey || '');
+        const snapshotData = prepareSnapshotData(trade, snapshots, snapshotCapturedAt);
+        const updateSet: Record<string, unknown> = {
+            ...trade,
+            executionIntent: resolveExecutionIntent(trade),
+        };
+
+        if (existingTrade && shouldUpdateSnapshot(existingTrade, snapshotData)) {
+            Object.assign(updateSet, snapshotData);
+        }
+
+        if (!existingTrade) {
+            Object.assign(updateSet, snapshotData);
+        }
+
+        const baseDefaults =
+            resolveExecutionIntent(trade) === 'EXECUTE'
+                ? {
+                      bot: false,
+                      botExcutedTime: 0,
+                      botStatus: 'PENDING',
+                      botClaimedAt: 0,
+                      botExecutedAt: 0,
+                      botLastError: '',
+                  }
+                : {
+                      bot: true,
+                      botExcutedTime: 0,
+                      botStatus: 'SKIPPED',
+                      botClaimedAt: 0,
+                      botExecutedAt: Date.now(),
+                      botLastError: '仅用于持仓校准，不触发自动执行',
+                  };
+
+        return {
+            updateOne: {
+                filter: { activityKey: trade.activityKey },
+                update: {
+                    $set: updateSet,
+                    $setOnInsert: baseDefaults,
+                },
+                upsert: true,
+            },
+        };
+    });
+
+    if (bulkOps.length > 0) {
+        await UserActivity.bulkWrite(bulkOps);
+    }
+};
 
 const syncStoredTrades = async (
     storedTrades: UserActivityInterface[],
@@ -102,18 +299,28 @@ const syncStoredTrades = async (
         .map((trade) => {
             const normalizedTimestamp = normalizeTimestamp(Number(trade.timestamp));
             const nextStatus = trade.botStatus || getDefaultBotStatus(trade);
+            const nextActivityKey = trade.activityKey || buildActivityKey(trade);
+            const snapshotData = snapshots.get(nextActivityKey);
             const updateSet: Record<string, unknown> = {};
 
             if (normalizedTimestamp !== null && normalizedTimestamp !== trade.timestamp) {
                 updateSet.timestamp = normalizedTimestamp;
             }
 
+            if (!trade.activityKey) {
+                updateSet.activityKey = nextActivityKey;
+            }
+
             if (!trade.botStatus) {
                 updateSet.botStatus = nextStatus;
             }
 
-            if (!hasSnapshot(trade) && trade.transactionHash) {
-                Object.assign(updateSet, prepareSnapshotData(trade, snapshots, Date.now()));
+            if (!trade.executionIntent) {
+                updateSet.executionIntent = resolveExecutionIntent(trade);
+            }
+
+            if (!hasCompleteSnapshot(trade) && shouldUpdateSnapshot(trade, snapshotData)) {
+                Object.assign(updateSet, snapshotData);
             }
 
             if (Object.keys(updateSet).length === 0) {
@@ -136,86 +343,56 @@ const syncStoredTrades = async (
 
 const fetchTradeData = async () => {
     try {
-        const activitiesRaw = await fetchData<UserActivityInterface[]>(
-            `https://data-api.polymarket.com/activity?user=${USER_ADDRESS}`
+        const syncState = await readSyncState();
+        const endTimestamp = Date.now();
+        const startTimestamp = Math.max(
+            0,
+            (syncState?.lastSyncedTimestamp || endTimestamp - INITIAL_SYNC_LOOKBACK_MS) -
+                ACTIVITY_SYNC_OVERLAP_MS
         );
 
-        if (!Array.isArray(activitiesRaw)) {
-            console.warn('活动接口暂不可用，跳过本轮抓取');
-            return;
-        }
-
-        if (activitiesRaw.length === 0) {
-            console.warn('活动接口返回为空');
-            return;
-        }
-
-        const normalizedTrades = activitiesRaw
-            .filter((activity) => activity.type === 'TRADE')
-            .map(normalizeTrade)
-            .filter((trade): trade is UserActivityInterface => trade !== null);
-
-        if (normalizedTrades.length === 0) {
-            return;
-        }
-
-        const currentPositionsRaw = await fetchData<UserPositionInterface[]>(
-            `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}`
-        );
-        if (!Array.isArray(currentPositionsRaw)) {
-            console.warn('源账户持仓接口不可用，跳过本轮以避免写入不完整快照');
-            return;
-        }
-
-        const currentBalance = await getMyBalance(USER_ADDRESS);
-        if (currentBalance === null) {
-            console.warn('源账户余额接口不可用，跳过本轮以避免写入不完整快照');
-            return;
-        }
-
+        const fetchedTrades = await fetchActivityWindow(startTimestamp, endTimestamp);
         const storedTrades = (await UserActivity.find({
-            type: 'TRADE',
-        }).exec()) as UserActivityInterface[];
+            timestamp: { $gte: startTimestamp },
+            type: { $in: [...TRACKED_ACTIVITY_TYPES] },
+        })
+            .sort({ timestamp: 1 })
+            .exec()) as UserActivityInterface[];
         const normalizedStoredTrades = storedTrades
             .map(normalizeTrade)
             .filter((trade): trade is UserActivityInterface => trade !== null);
-        const cutoffTimestamp = Date.now() - TOO_OLD_TIMESTAMP * 60 * 60 * 1000;
-        const storedHashes = new Set(normalizedStoredTrades.map((trade) => trade.transactionHash));
-        const newTrades = normalizedTrades.filter((trade) => {
-            const isNew = !storedHashes.has(trade.transactionHash);
-            const isRecent = trade.timestamp >= cutoffTimestamp;
-            return isNew && isRecent;
-        });
+
+        const [currentPositionsRaw, currentBalance] = await Promise.all([
+            fetchData<UserPositionInterface[]>(SOURCE_POSITIONS_URL),
+            getMyBalance(USER_ADDRESS),
+        ]);
         const snapshotCapturedAt = Date.now();
-        const snapshotSourceTrades = mergeTradesByHash([...normalizedStoredTrades, ...newTrades]);
+        const snapshotSourceTrades = dedupeTradesByActivityKey([
+            ...normalizedStoredTrades,
+            ...fetchedTrades,
+        ]);
         const snapshotMap = buildTradeSnapshots(
             snapshotSourceTrades,
-            currentPositionsRaw,
+            Array.isArray(currentPositionsRaw) ? currentPositionsRaw : null,
             currentBalance,
             snapshotCapturedAt
         );
 
         await syncStoredTrades(normalizedStoredTrades, snapshotMap);
+        await upsertTrades(fetchedTrades, normalizedStoredTrades, snapshotMap, snapshotCapturedAt);
+        await writeSyncState(
+            fetchedTrades.length > 0 ? fetchedTrades[fetchedTrades.length - 1] : null,
+            endTimestamp
+        );
 
-        if (newTrades.length === 0) {
-            return;
-        }
-
-        console.log(`发现 ${newTrades.length} 条待处理的新交易`);
-
-        for (const trade of newTrades) {
-            await UserActivity.create({
-                ...trade,
-                proxyWallet: USER_ADDRESS,
-                bot: false,
-                botExcutedTime: 0,
-                botStatus: 'PENDING',
-                botClaimedAt: 0,
-                botExecutedAt: 0,
-                botLastError: '',
-                ...prepareSnapshotData(trade, snapshotMap, snapshotCapturedAt),
-            });
-            console.log(`已保存新交易: ${trade.transactionHash}`);
+        const executeCount = fetchedTrades.filter(
+            (trade) => resolveExecutionIntent(trade) === 'EXECUTE'
+        ).length;
+        const syncOnlyCount = fetchedTrades.length - executeCount;
+        if (executeCount > 0 || syncOnlyCount > 0) {
+            console.log(
+                `同步活动 ${fetchedTrades.length} 条，其中待执行 ${executeCount} 条，仅校准 ${syncOnlyCount} 条`
+            );
         }
     } catch (error) {
         console.error('抓取交易数据时发生错误:', error);

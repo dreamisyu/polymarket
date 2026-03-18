@@ -137,7 +137,7 @@ const fetchPolymarketPositions = async (walletAddress) => {
 
     try {
         const response = await axios.get(
-            `https://data-api.polymarket.com/positions?user=${walletAddress}`,
+            `https://data-api.polymarket.com/positions?user=${walletAddress}&sizeThreshold=0`,
             {
                 timeout: 10000,
                 headers: {
@@ -198,9 +198,11 @@ const resolveLiveStatus = (activity) => {
     return 'PENDING';
 };
 
+const isCompletedLiveStatus = (status) => ['CONFIRMED', 'COMPLETED'].includes(status);
+
 const buildFailureItems = (items, statusResolver) =>
     items
-        .filter((item) => ['FAILED', 'PROCESSING'].includes(statusResolver(item)))
+        .filter((item) => ['FAILED', 'PROCESSING', 'SUBMITTED'].includes(statusResolver(item)))
         .sort((left, right) => toSafeNumber(right.timestamp) - toSafeNumber(left.timestamp))
         .slice(0, 10)
         .map((item) => ({
@@ -222,8 +224,8 @@ const summarizeLiveMode = async ({ userAddress, settlementWallet }) => {
     const positionSummary = Array.isArray(settlement.positions)
         ? summarizePolymarketPositions(settlement.positions)
         : null;
-    const completedActivities = activities.filter(
-        (activity) => resolveLiveStatus(activity) === 'COMPLETED'
+    const completedActivities = activities.filter((activity) =>
+        isCompletedLiveStatus(resolveLiveStatus(activity))
     );
 
     return {
@@ -232,8 +234,11 @@ const summarizeLiveMode = async ({ userAddress, settlementWallet }) => {
         settlementWallet: settlement.walletAddress,
         recordSummary: {
             totalTradesCaptured: activities.length,
-            completedCount: activities.filter(
-                (activity) => resolveLiveStatus(activity) === 'COMPLETED'
+            completedCount: activities.filter((activity) =>
+                isCompletedLiveStatus(resolveLiveStatus(activity))
+            ).length,
+            confirmedCount: activities.filter(
+                (activity) => resolveLiveStatus(activity) === 'CONFIRMED'
             ).length,
             skippedCount: activities.filter((activity) => resolveLiveStatus(activity) === 'SKIPPED')
                 .length,
@@ -241,6 +246,9 @@ const summarizeLiveMode = async ({ userAddress, settlementWallet }) => {
                 .length,
             processingCount: activities.filter(
                 (activity) => resolveLiveStatus(activity) === 'PROCESSING'
+            ).length,
+            submittedCount: activities.filter(
+                (activity) => resolveLiveStatus(activity) === 'SUBMITTED'
             ).length,
             pendingCount: activities.filter((activity) => resolveLiveStatus(activity) === 'PENDING')
                 .length,

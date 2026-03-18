@@ -1,9 +1,20 @@
 import mongoose from 'mongoose';
 
-export type BotExecutionStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'SKIPPED' | 'FAILED';
+export type BotExecutionStatus =
+    | 'PENDING'
+    | 'PROCESSING'
+    | 'SUBMITTED'
+    | 'CONFIRMED'
+    | 'COMPLETED'
+    | 'SKIPPED'
+    | 'FAILED';
+
+export type SnapshotStatus = 'COMPLETE' | 'PARTIAL' | 'STALE';
+export type ExecutionIntent = 'EXECUTE' | 'SYNC_ONLY';
 
 export interface UserActivityInterface {
     _id: mongoose.Types.ObjectId;
+    activityKey?: string;
     proxyWallet: string;
     timestamp: number;
     conditionId: string;
@@ -31,12 +42,22 @@ export interface UserActivityInterface {
     botClaimedAt?: number;
     botExecutedAt?: number;
     botLastError?: string;
+    botOrderIds?: string[];
+    botTransactionHashes?: string[];
+    botSubmittedAt?: number;
+    botConfirmedAt?: number;
+    botMatchedAt?: number;
+    botMinedAt?: number;
+    botSubmissionStatus?: 'SUBMITTED' | 'MATCHED' | 'MINED' | 'RETRYING' | 'CONFIRMED' | 'FAILED';
+    executionIntent?: ExecutionIntent;
     sourceBalanceAfterTrade?: number;
     sourceBalanceBeforeTrade?: number;
     sourcePositionSizeAfterTrade?: number;
     sourcePositionSizeBeforeTrade?: number;
     sourcePositionPriceAfterTrade?: number;
     sourceSnapshotCapturedAt?: number;
+    snapshotStatus?: SnapshotStatus;
+    sourceSnapshotReason?: string;
 }
 
 export interface UserPositionInterface {
@@ -66,4 +87,12 @@ export interface UserPositionInterface {
     oppositeAsset: string;
     endDate: string;
     negativeRisk: boolean;
+}
+
+export interface UserActivitySyncStateInterface {
+    _id: mongoose.Types.ObjectId;
+    walletAddress: string;
+    lastSyncedTimestamp: number;
+    lastSyncedActivityKey: string;
+    updatedAt: number;
 }

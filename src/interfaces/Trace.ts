@@ -6,6 +6,7 @@ export interface TraceExecutionInterface {
     traceLabel: string;
     sourceWallet: string;
     sourceActivityId: mongoose.Types.ObjectId;
+    sourceActivityKey?: string;
     sourceTransactionHash: string;
     sourceTimestamp: number;
     sourceSide: string;

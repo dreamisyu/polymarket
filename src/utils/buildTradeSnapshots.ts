@@ -1,15 +1,19 @@
-import { UserActivityInterface, UserPositionInterface } from '../interfaces/User';
+import { SnapshotStatus, UserActivityInterface, UserPositionInterface } from '../interfaces/User';
+import { ENV } from '../config/env';
 
 export interface TradeSnapshotFields {
-    sourceBalanceAfterTrade: number;
-    sourceBalanceBeforeTrade: number;
-    sourcePositionSizeAfterTrade: number;
-    sourcePositionSizeBeforeTrade: number;
-    sourcePositionPriceAfterTrade: number;
+    sourceBalanceAfterTrade?: number;
+    sourceBalanceBeforeTrade?: number;
+    sourcePositionSizeAfterTrade?: number;
+    sourcePositionSizeBeforeTrade?: number;
+    sourcePositionPriceAfterTrade?: number;
     sourceSnapshotCapturedAt: number;
+    snapshotStatus: SnapshotStatus;
+    sourceSnapshotReason: string;
 }
 
 const EPSILON = 1e-8;
+const SNAPSHOT_STALE_AFTER_MS = ENV.SNAPSHOT_STALE_AFTER_MS;
 
 const toSafeNumber = (value: unknown, fallback = 0) => {
     const parsed = Number(value);
@@ -29,11 +33,24 @@ const sortTradesDesc = (trades: UserActivityInterface[]) =>
 
 const buildTradeSnapshots = (
     trades: UserActivityInterface[],
-    currentPositions: UserPositionInterface[],
-    currentBalance: number,
+    currentPositions: UserPositionInterface[] | null,
+    currentBalance: number | null,
     capturedAt: number
 ) => {
     const snapshots = new Map<string, TradeSnapshotFields>();
+    if (!Array.isArray(currentPositions) || !Number.isFinite(currentBalance)) {
+        for (const trade of trades) {
+            const activityKey = trade.activityKey || trade.transactionHash || String(trade._id);
+            snapshots.set(activityKey, {
+                sourceSnapshotCapturedAt: capturedAt,
+                snapshotStatus: 'PARTIAL',
+                sourceSnapshotReason: '监控轮次缺少源账户余额或持仓，无法生成完整快照',
+            });
+        }
+
+        return snapshots;
+    }
+
     const rollingPositions = new Map(
         currentPositions.map((position) => [
             position.asset,
@@ -49,7 +66,7 @@ const buildTradeSnapshots = (
     let rollingBalance = toSafeNumber(currentBalance);
 
     for (const trade of sortTradesDesc(trades)) {
-        const activityKey = trade.transactionHash || String(trade._id);
+        const activityKey = trade.activityKey || trade.transactionHash || String(trade._id);
         const currentPosition = rollingPositions.get(trade.asset) || {
             size: 0,
             price: Math.max(toSafeNumber(trade.price), 0),
@@ -71,6 +88,8 @@ const buildTradeSnapshots = (
             beforeBalance = rollingBalance - tradeUsdc;
         }
 
+        const snapshotStatus: SnapshotStatus =
+            capturedAt - trade.timestamp > SNAPSHOT_STALE_AFTER_MS ? 'STALE' : 'COMPLETE';
         snapshots.set(activityKey, {
             sourceBalanceAfterTrade: rollingBalance,
             sourceBalanceBeforeTrade: beforeBalance,
@@ -78,6 +97,9 @@ const buildTradeSnapshots = (
             sourcePositionSizeBeforeTrade: beforePositionSize,
             sourcePositionPriceAfterTrade: afterPrice,
             sourceSnapshotCapturedAt: capturedAt,
+            snapshotStatus,
+            sourceSnapshotReason:
+                snapshotStatus === 'STALE' ? '快照生成时点距离源成交时间过长，已标记为陈旧' : '',
         });
 
         rollingBalance = beforeBalance;
