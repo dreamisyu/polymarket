@@ -188,6 +188,7 @@ export class ClobUserStream {
     private readonly waitersByOrderId = new Map<string, Set<UserChannelWaiter>>();
     private ws: RuntimeWebSocket | null = null;
     private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     private opening = false;
 
     constructor(creds: ApiKeyCreds) {
@@ -208,7 +209,8 @@ export class ClobUserStream {
         ws.onopen = () => {
             this.ws = ws;
             this.opening = false;
-            this.sendSubscription();
+            this.sendInitialSubscription();
+            this.startHeartbeat();
         };
         ws.onmessage = (event) => {
             this.handleMessage(event.data);
@@ -219,10 +221,32 @@ export class ClobUserStream {
         ws.onclose = () => {
             this.ws = null;
             this.opening = false;
+            this.stopHeartbeat();
             if (this.subscribedMarkets.size > 0 || this.waiters.size > 0) {
                 this.reconnect();
             }
         };
+    }
+
+    private startHeartbeat() {
+        if (this.heartbeatTimer) {
+            return;
+        }
+
+        this.heartbeatTimer = setInterval(() => {
+            if (this.ws && this.ws.readyState === 1) {
+                this.ws.send('PING');
+            }
+        }, 10_000);
+    }
+
+    private stopHeartbeat() {
+        if (!this.heartbeatTimer) {
+            return;
+        }
+
+        clearInterval(this.heartbeatTimer);
+        this.heartbeatTimer = null;
     }
 
     private reconnect() {
@@ -236,7 +260,7 @@ export class ClobUserStream {
         }, USER_WS_RECONNECT_MS);
     }
 
-    private sendSubscription() {
+    private sendInitialSubscription() {
         if (!this.ws || this.ws.readyState !== 1 || this.subscribedMarkets.size === 0) {
             return;
         }
@@ -254,15 +278,32 @@ export class ClobUserStream {
         );
     }
 
+    private sendIncrementalSubscription(markets: string[]) {
+        if (!this.ws || this.ws.readyState !== 1 || markets.length === 0) {
+            return;
+        }
+
+        this.ws.send(
+            JSON.stringify({
+                markets,
+                operation: 'subscribe',
+            })
+        );
+    }
+
     async ensureMarket(conditionId: string) {
         const normalizedConditionId = String(conditionId || '').trim();
         if (!normalizedConditionId) {
             return;
         }
 
+        const alreadySubscribed = this.subscribedMarkets.has(normalizedConditionId);
         this.subscribedMarkets.add(normalizedConditionId);
         this.connect();
-        this.sendSubscription();
+
+        if (!alreadySubscribed) {
+            this.sendIncrementalSubscription([normalizedConditionId]);
+        }
     }
 
     private updateOrderState(orderId: string, status: UserTradeStatus, message: UserTradeMessage) {
@@ -439,7 +480,17 @@ export class ClobUserStream {
 
     private handleMessage(rawData: string) {
         try {
-            const payload = JSON.parse(rawData) as UserTradeMessage | UserTradeMessage[];
+            const normalizedData = String(rawData || '').trim();
+            if (!normalizedData || normalizedData === 'PONG' || normalizedData === 'PING') {
+                return;
+            }
+
+            if (!normalizedData.startsWith('{') && !normalizedData.startsWith('[')) {
+                console.warn(`收到非 JSON User Channel 消息: ${normalizedData}`);
+                return;
+            }
+
+            const payload = JSON.parse(normalizedData) as UserTradeMessage | UserTradeMessage[];
             const messages = Array.isArray(payload) ? payload : [payload];
 
             for (const message of messages) {

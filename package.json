@@ -3,11 +3,11 @@
     "version": "1.0.0",
     "main": "dist/index.js",
     "scripts": {
-        "build": "node --max-old-space-size=4096 ./node_modules/typescript/bin/tsc --project tsconfig.json",
+        "build": "npm run build --workspaces --if-present",
         "start": "node dist/index.js",
         "dev": "tsx src/index.ts",
         "dev:watch": "tsx watch src/index.ts",
-        "typecheck": "node --max-old-space-size=4096 ./node_modules/typescript/bin/tsc --project tsconfig.json --noEmit",
+        "typecheck": "npm run typecheck --workspaces --if-present",
         "lint": "eslint .",
         "lint:fix": "eslint --fix .",
         "format": "prettier --write .",

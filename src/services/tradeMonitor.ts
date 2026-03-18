@@ -20,7 +20,7 @@ const ACTIVITY_SYNC_OVERLAP_MS = ENV.ACTIVITY_SYNC_OVERLAP_MS;
 const MILLISECOND_TIMESTAMP_THRESHOLD = 1_000_000_000_000;
 const TRACKED_ACTIVITY_TYPES = new Set(['TRADE', 'MERGE', 'REDEEM']);
 const SOURCE_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}&sizeThreshold=0`;
-const INITIAL_SYNC_LOOKBACK_MS = TOO_OLD_TIMESTAMP * 60 * 60 * 1000;
+const INITIAL_SYNC_LOOKBACK_MS = TOO_OLD_TIMESTAMP * 1000;
 
 if (!USER_ADDRESS) {
     throw new Error('USER_ADDRESS is not defined');
@@ -29,7 +29,7 @@ if (!USER_ADDRESS) {
 const UserActivity = getUserActivityModel(USER_ADDRESS);
 const UserActivitySyncState = getUserActivitySyncStateModel(USER_ADDRESS);
 
-const normalizeTimestamp = (rawTimestamp: number): number | null => {
+const normalizeTimestampToMilliseconds = (rawTimestamp: number): number | null => {
     if (!Number.isFinite(rawTimestamp) || rawTimestamp <= 0) {
         return null;
     }
@@ -38,6 +38,16 @@ const normalizeTimestamp = (rawTimestamp: number): number | null => {
     return parsedTimestamp < MILLISECOND_TIMESTAMP_THRESHOLD
         ? parsedTimestamp * 1000
         : parsedTimestamp;
+};
+
+const normalizeTimestampToSeconds = (rawTimestamp: number): number | null => {
+    const normalizedTimestamp = normalizeTimestampToMilliseconds(rawTimestamp);
+
+    if (normalizedTimestamp === null) {
+        return null;
+    }
+
+    return Math.trunc(normalizedTimestamp / 1000);
 };
 
 const resolveExecutionIntent = (trade: UserActivityInterface): ExecutionIntent =>
@@ -67,7 +77,7 @@ const normalizeTrade = (trade: UserActivityInterface): UserActivityInterface | n
         typeof (trade as { toObject?: () => UserActivityInterface }).toObject === 'function'
             ? (trade as { toObject: () => UserActivityInterface }).toObject()
             : trade;
-    const normalizedTimestamp = normalizeTimestamp(Number(baseTrade.timestamp));
+    const normalizedTimestamp = normalizeTimestampToMilliseconds(Number(baseTrade.timestamp));
     const transactionHash = String(baseTrade.transactionHash || '').trim();
     const type = String(baseTrade.type || '')
         .trim()
@@ -138,13 +148,25 @@ const shouldUpdateSnapshot = (
 
 const fetchActivityWindow = async (startTimestamp: number, endTimestamp: number) => {
     const tradeMap = new Map<string, UserActivityInterface>();
-    let cursor = startTimestamp;
+    const normalizedStartTimestamp = normalizeTimestampToSeconds(startTimestamp);
+    const normalizedEndTimestamp = normalizeTimestampToSeconds(endTimestamp);
 
-    while (cursor <= endTimestamp) {
+    if (
+        normalizedStartTimestamp === null ||
+        normalizedEndTimestamp === null ||
+        normalizedStartTimestamp > normalizedEndTimestamp
+    ) {
+        console.warn('活动抓取窗口无效，跳过本轮抓取');
+        return [];
+    }
+
+    let cursor = normalizedStartTimestamp;
+
+    while (cursor <= normalizedEndTimestamp) {
         const params = new URLSearchParams({
             user: USER_ADDRESS,
             start: String(cursor),
-            end: String(endTimestamp),
+            end: String(normalizedEndTimestamp),
             limit: String(ACTIVITY_SYNC_LIMIT),
             sortDirection: 'ASC',
         });
@@ -184,7 +206,7 @@ const fetchActivityWindow = async (startTimestamp: number, endTimestamp: number)
 
         const lastRawTimestamp = [...activitiesRaw]
             .reverse()
-            .map((activity) => normalizeTimestamp(Number(activity.timestamp)))
+            .map((activity) => normalizeTimestampToSeconds(Number(activity.timestamp)))
             .find((timestamp): timestamp is number => timestamp !== null);
         if (!lastRawTimestamp) {
             break;
@@ -297,7 +319,7 @@ const syncStoredTrades = async (
 ) => {
     const bulkOps = storedTrades
         .map((trade) => {
-            const normalizedTimestamp = normalizeTimestamp(Number(trade.timestamp));
+            const normalizedTimestamp = normalizeTimestampToMilliseconds(Number(trade.timestamp));
             const nextStatus = trade.botStatus || getDefaultBotStatus(trade);
             const nextActivityKey = trade.activityKey || buildActivityKey(trade);
             const snapshotData = snapshots.get(nextActivityKey);

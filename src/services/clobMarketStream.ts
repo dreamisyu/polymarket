@@ -66,7 +66,7 @@ export class ClobMarketStream {
         ws.onopen = () => {
             this.ws = ws;
             this.opening = false;
-            this.sendSubscription();
+            this.sendInitialSubscription();
             this.startHeartbeat();
         };
         ws.onmessage = (event) => {
@@ -117,7 +117,7 @@ export class ClobMarketStream {
         }, MARKET_WS_RECONNECT_MS);
     }
 
-    private sendSubscription() {
+    private sendInitialSubscription() {
         if (!this.ws || this.ws.readyState !== 1 || this.subscribedAssets.size === 0) {
             return;
         }
@@ -126,6 +126,20 @@ export class ClobMarketStream {
             JSON.stringify({
                 type: 'market',
                 assets_ids: [...this.subscribedAssets],
+                custom_feature_enabled: true,
+            })
+        );
+    }
+
+    private sendIncrementalSubscription(assetIds: string[]) {
+        if (!this.ws || this.ws.readyState !== 1 || assetIds.length === 0) {
+            return;
+        }
+
+        this.ws.send(
+            JSON.stringify({
+                assets_ids: assetIds,
+                operation: 'subscribe',
                 custom_feature_enabled: true,
             })
         );
@@ -172,7 +186,17 @@ export class ClobMarketStream {
 
     private handleMessage(rawData: string) {
         try {
-            const payload = JSON.parse(rawData) as
+            const normalizedData = String(rawData || '').trim();
+            if (!normalizedData || normalizedData === 'PONG' || normalizedData === 'PING') {
+                return;
+            }
+
+            if (!normalizedData.startsWith('{') && !normalizedData.startsWith('[')) {
+                console.warn(`收到非 JSON 市场 WebSocket 消息: ${normalizedData}`);
+                return;
+            }
+
+            const payload = JSON.parse(normalizedData) as
                 | {
                       event_type?: string;
                       asset_id?: string;
@@ -285,9 +309,13 @@ export class ClobMarketStream {
             return;
         }
 
+        const alreadySubscribed = this.subscribedAssets.has(assetId);
         this.subscribedAssets.add(assetId);
         this.connect();
-        this.sendSubscription();
+
+        if (!alreadySubscribed) {
+            this.sendIncrementalSubscription([assetId]);
+        }
     }
 
     async getSnapshot(assetId: string): Promise<MarketBookSnapshot | null> {
