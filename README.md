@@ -148,7 +148,7 @@ CLOB_WS_URL=wss://clob-ws.polymarket.com
 MONGO_URI=mongodb://localhost:27017/polymarket_copytrading
 
 # Polygon RPC URL (for checking balances)
-RPC_URL=https://polygon-rpc.com
+RPC_URL=https://polygon.drpc.org
 
 # USDC contract address on Polygon
 USDC_CONTRACT_ADDRESS=0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174

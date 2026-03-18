@@ -57,7 +57,7 @@ const normalizeTrade = (trade: UserActivityInterface): UserActivityInterface | n
 };
 
 const getDefaultBotStatus = (trade: UserActivityInterface): BotExecutionStatus =>
-    trade.bot === true ? 'COMPLETED' : 'PENDING';
+    trade.bot ? 'COMPLETED' : 'PENDING';
 
 const hasSnapshot = (trade: UserActivityInterface) =>
     Number.isFinite(trade.sourceBalanceAfterTrade) &&
