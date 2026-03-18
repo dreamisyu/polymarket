@@ -20,15 +20,14 @@ The Polymarket Copy Trading Bot continuously monitors target wallets and replica
 
 ### Core Capabilities
 
-* **Real-Time Trade Monitoring** – Continuously fetches and processes trades from target wallets
-* **Automatic Trade Execution** – Mirrors buy/sell/merge operations with intelligent position matching
-* **Advanced Risk Management** – Balance-based position sizing and retry mechanisms
-* **Flexible Order Execution** – Supports FOK (Fill-or-Kill) order types
-* **MongoDB Integration** – Persistent tracking of trades and positions
-* **Multi-Outcome Compatibility** – Works seamlessly with binary and multi-outcome markets
+- **Real-Time Trade Monitoring** – Continuously fetches and processes trades from target wallets
+- **Automatic Trade Execution** – Mirrors buy/sell/merge operations with intelligent position matching
+- **Advanced Risk Management** – Balance-based position sizing and retry mechanisms
+- **Flexible Order Execution** – Supports FOK (Fill-or-Kill) order types
+- **MongoDB Integration** – Persistent tracking of trades and positions
+- **Multi-Outcome Compatibility** – Works seamlessly with binary and multi-outcome markets
 
 ---
-
 
 > ⚠️ **Past performance does not guarantee future results.** Trading prediction markets involves significant risk. Use responsibly and only with capital you can afford to lose.
 
@@ -36,37 +35,31 @@ The Polymarket Copy Trading Bot continuously monitors target wallets and replica
 
 ## 📊 Trading History & Performance
 
-
-
 #### target address : https://polymarket.com/@k9Q2mX4L8A7ZP3R
 
-
-
-
 The bot has demonstrated profitable performance in testing. Below is a screenshot showing the profit/loss progression over a test period:
+
 ### Updated profit : 3 / 11 / 2026
 
-
 <img width="508" height="244" alt="image" src="https://github.com/user-attachments/assets/76fbdbe7-e205-4066-bb94-1a3f9ed75309" />
-
 
 ![Trading History - Profit/Loss Progression](./test/one.jpg)]
 
 **Test Results Summary:**
+
 - **Initial Profit:** $28.08 (Dec 20, 2025 6:00 PM)
 - **Final Profit:** $923.41 (Dec 22, 2025 6:00 AM)
 - **Time Period:** ~36 hours
 - **Performance:** Consistent upward trend with significant profit accumulation
 - **Growth:** Over 3,200% increase in profit during the test period
 
-
-----------
+---
 
 <img width="651" height="830" alt="image" src="https://github.com/user-attachments/assets/79eafc8f-6133-4eed-a275-2d692774b056" />
 <img width="651" height="830" alt="image" src="https://github.com/user-attachments/assets/e79fac4f-9aa2-407d-97fe-49a673edac11" />
 <img width="900" height="808" alt="image" src="https://github.com/user-attachments/assets/ff115671-3621-4cd1-9684-be13c3b11ffe" />
 
-*Note: These results are from a test environment. Real-world performance may vary based on market conditions, wallet selection, and configuration parameters.*
+_Note: These results are from a test environment. Real-world performance may vary based on market conditions, wallet selection, and configuration parameters._
 
 ---
 
@@ -74,15 +67,15 @@ The bot has demonstrated profitable performance in testing. Below is a screensho
 
 ### Technology Stack
 
-* **Runtime**: Node.js 18+
-* **Language**: TypeScript (v5.7+)
-* **Blockchain**: Polygon (Ethereum-compatible L2)
-* **Web3**: Ethers.js v5
-* **Database**: MongoDB
-* **APIs**:
-  * `@polymarket/clob-client` - Polymarket CLOB trading client
-  * Polymarket Data API - For fetching activities and positions
-* **Utilities**: Axios, Mongoose, Ora (spinners)
+- **Runtime**: Node.js 20.10+（推荐 24.x，开发脚本按 `tsx` 方式运行）
+- **Language**: TypeScript (v5.7+)
+- **Blockchain**: Polygon (Ethereum-compatible L2)
+- **Web3**: Ethers.js v6
+- **Database**: MongoDB
+- **APIs**:
+    - `@polymarket/clob-client` - Polymarket CLOB trading client
+    - Polymarket Data API - For fetching activities and positions
+- **Utilities**: Axios, Mongoose, Ora (spinners)
 
 ### High-Level Flow
 
@@ -108,29 +101,36 @@ Order Execution (Buy/Sell/Merge Strategies)
 
 ### Prerequisites
 
-* **Node.js** 18+ and **npm**
-* **MongoDB** (running locally or remote)
-* **Polygon Wallet** funded with USDC
-* **Polymarket Account** with API access
+- **Node.js** 20.10 到 24.x 以及 **npm** 10+
+- **MongoDB** (running locally or remote)
+- **Polygon Wallet** funded with USDC
+- **Polymarket Account** with API access
 
 ### Setup Steps
 
 1. **Clone the repository:**
+
 ```bash
 git clone https://github.com/BlackSkyorg/polymarket-copytrading-bot.git
 cd Polymarket-copy-trading-bot-2025-12
 ```
 
 2. **Install dependencies:**
+
 ```bash
 npm install
 ```
 
 3. **Create environment configuration:**
 
-Create a `.env` file in the root directory:
+建议直接复制 `.env-example` 为 `.env`，再按你的钱包和运行模式修改。下面是最小可运行示例：
 
 ```env
+# 建议先用 trace 做本地模拟验证
+EXECUTION_MODE=trace
+TRACE_ID=default
+TRACE_INITIAL_BALANCE=1000
+
 # Target user wallet address to copy trades from
 USER_ADDRESS=0xYourTargetWalletAddress
 
@@ -142,7 +142,8 @@ PRIVATE_KEY=your_private_key_here
 
 # Polymarket CLOB API URLs
 CLOB_HTTP_URL=https://clob.polymarket.com
-CLOB_WS_URL=wss://clob-ws.polymarket.com
+CLOB_WS_URL=wss://ws-subscriptions-clob.polymarket.com/ws/market
+USER_WS_URL=wss://ws-subscriptions-clob.polymarket.com/ws/user
 
 # MongoDB connection string
 MONGO_URI=mongodb://localhost:27017/polymarket_copytrading
@@ -157,9 +158,15 @@ USDC_CONTRACT_ADDRESS=0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
 FETCH_INTERVAL=1
 TOO_OLD_TIMESTAMP=24
 RETRY_LIMIT=3
+MAX_SLIPPAGE_BPS=300
+MAX_ORDER_USDC=0
+MARKET_WS_ENABLED=true
 ```
 
+完整配置项请以 [`.env-example`](./.env-example) 为准。
+
 4. **Start MongoDB:**
+
 ```bash
 # Windows
 net start MongoDB
@@ -171,9 +178,16 @@ mongod
 ```
 
 5. **Start the bot:**
+
 ```bash
-# Development mode (with ts-node)
+# Development mode (with tsx)
 npm run dev
+
+# Type check
+npm run typecheck
+
+# Basic validation
+npm run validate:basic
 
 # Or build and run
 npm run build
@@ -186,19 +200,28 @@ On first launch, API credentials are automatically created/derived from your wal
 
 ## ⚙️ Configuration Reference
 
-| Variable              | Description                                    | Required |
-| --------------------- | ---------------------------------------------- | -------- |
-| `USER_ADDRESS`        | Target wallet address to copy trades from      | Yes      |
-| `PROXY_WALLET`        | Your wallet address that executes trades       | Yes      |
-| `PRIVATE_KEY`         | Your wallet private key (64 hex, no 0x)        | Yes      |
-| `CLOB_HTTP_URL`       | Polymarket CLOB HTTP API endpoint              | Yes      |
-| `CLOB_WS_URL`         | Polymarket WebSocket endpoint                  | Yes      |
-| `MONGO_URI`           | MongoDB connection string                      | Yes      |
-| `RPC_URL`             | Polygon RPC endpoint                           | Yes      |
-| `USDC_CONTRACT_ADDRESS` | USDC token contract on Polygon              | Yes      |
-| `FETCH_INTERVAL`      | Trade monitoring interval (seconds)             | No (default: 1) |
-| `TOO_OLD_TIMESTAMP`   | Ignore trades older than X hours                | No (default: 24) |
-| `RETRY_LIMIT`         | Maximum retry attempts for failed trades        | No (default: 3) |
+| Variable                | Description                               | Required      |
+| ----------------------- | ----------------------------------------- | ------------- |
+| `EXECUTION_MODE`        | `trace` 为本地模拟，`live` 为真实下单     | No            |
+| `TRACE_ID`              | 模拟执行标识，决定 trace 集合名与报表标签 | No            |
+| `TRACE_INITIAL_BALANCE` | 模拟模式初始资金（USDC）                  | No            |
+| `USER_ADDRESS`          | 被跟单的钱包地址                          | Yes           |
+| `PROXY_WALLET`          | 你的执行钱包地址                          | Live 模式必填 |
+| `PRIVATE_KEY`           | 执行钱包私钥，64 位十六进制且不带 `0x`    | Live 模式必填 |
+| `CLOB_HTTP_URL`         | Polymarket CLOB HTTP 接口                 | Live 模式必填 |
+| `CLOB_WS_URL`           | 市场数据 WebSocket                        | Live 模式必填 |
+| `USER_WS_URL`           | 用户订单状态 WebSocket                    | No            |
+| `MONGO_URI`             | MongoDB 连接串                            | Yes           |
+| `RPC_URL`               | Polygon RPC                               | Live 模式必填 |
+| `USDC_CONTRACT_ADDRESS` | Polygon 上的 USDC 合约地址                | Live 模式必填 |
+| `FETCH_INTERVAL`        | 监控轮询间隔（秒）                        | No            |
+| `TOO_OLD_TIMESTAMP`     | 冷启动时忽略多少小时前的活动              | No            |
+| `RETRY_LIMIT`           | 执行失败后的最大重试次数                  | No            |
+| `MAX_SLIPPAGE_BPS`      | 最大允许滑点，单位 bps                    | No            |
+| `MAX_ORDER_USDC`        | 单笔最大下单金额，`0` 表示不限制          | No            |
+| `MARKET_WS_ENABLED`     | 是否启用市场 WebSocket 缓存               | No            |
+
+更多配置项和默认值请直接查看 [`.env-example`](./.env-example) 与 [`src/config/env.ts`](./src/config/env.ts)。
 
 ---
 
@@ -221,6 +244,7 @@ The bot will:
 ### Expected Output
 
 When running successfully, you should see:
+
 ```
 MongoDB connected
 Target User Wallet address is: 0x...
@@ -261,10 +285,10 @@ Waiting for new transactions...
 
 ### Trading Strategies
 
-* **Buy Strategy**: When target wallet buys, calculate position size based on balance ratio
-* **Sell Strategy**: When target wallet sells, match the sell proportionally
-* **Merge Strategy**: When target wallet closes position but you still hold, sell your position
-* **Error Handling**: Retry failed orders up to RETRY_LIMIT, then mark as failed
+- **Buy Strategy**: When target wallet buys, calculate position size based on balance ratio
+- **Sell Strategy**: When target wallet sells, match the sell proportionally
+- **Merge Strategy**: When target wallet closes position but you still hold, sell your position
+- **Error Handling**: Retry failed orders up to RETRY_LIMIT, then mark as failed
 
 ---
 
@@ -296,30 +320,30 @@ src/
 
 ---
 
-##  Logging & Monitoring
+## Logging & Monitoring
 
-* Trade detection and execution
-* Balance and allowance checks
-* Redemption outcomes
-* Structured logs for debugging and audits
+- Trade detection and execution
+- Balance and allowance checks
+- Redemption outcomes
+- Structured logs for debugging and audits
 
 Log levels: `info`, `success`, `warning`, `error`
 
 ---
 
-##  Risk Disclosure
+## Risk Disclosure
 
-* Copy trading amplifies both profits and losses
-* Liquidity and slippage risks apply
-* Gas fees incurred on every transaction
-* WebSocket or API outages may impact execution
+- Copy trading amplifies both profits and losses
+- Liquidity and slippage risks apply
+- Gas fees incurred on every transaction
+- WebSocket or API outages may impact execution
 
 **Best Practices**:
 
-* Start with low multipliers
-* Enforce strict max order sizes
-* Monitor balances regularly
-* Test using dry-run modes
+- Start with low multipliers
+- Enforce strict max order sizes
+- Monitor balances regularly
+- Test using dry-run modes
 
 ---
 
@@ -327,10 +351,13 @@ Log levels: `info`, `success`, `warning`, `error`
 
 ```bash
 # Type check
-npm run build
+npm run typecheck
 
 # Run in development mode
 npm run dev
+
+# Basic validation
+npm run validate:basic
 
 # Lint code
 npm run lint
@@ -350,11 +377,11 @@ This copy trading bot was developed as part of a comprehensive Polymarket tradin
 
 ### Key Features
 
-* Real-time trade monitoring and execution
-* Intelligent position matching and sizing
-* Automatic retry mechanisms for failed orders
-* MongoDB-based trade history tracking
-* Support for multiple market types
+- Real-time trade monitoring and execution
+- Intelligent position matching and sizing
+- Automatic retry mechanisms for failed orders
+- MongoDB-based trade history tracking
+- Support for multiple market types
 
 ---
 
@@ -371,25 +398,26 @@ For deployment support, custom integrations, or professional inquiries:
 ### Common Issues
 
 1. **"USER_ADDRESS is not defined"**
-   - Check your `.env` file exists and has all required variables
+    - Check your `.env` file exists and has all required variables
 
 2. **"MongoDB connection error"**
-   - Ensure MongoDB is running
-   - Verify `MONGO_URI` is correct
+    - Ensure MongoDB is running
+    - Verify `MONGO_URI` is correct
 
 3. **"Cannot find module '@polymarket/clob-client'"**
-   - Run `npm install` to install dependencies
+    - Run `npm install` to install dependencies
 
 4. **"invalid hexlify value"**
-   - Check `PRIVATE_KEY` is 64 hex characters without `0x` prefix
+    - Check `PRIVATE_KEY` is 64 hex characters without `0x` prefix
 
 5. **"API Key creation failed"**
-   - Verify `PRIVATE_KEY` matches `PROXY_WALLET`
-   - Ensure wallet has proper permissions
+    - Verify `PRIVATE_KEY` matches `PROXY_WALLET`
+    - Ensure wallet has proper permissions
 
 ### Testing
 
 Before running in production:
+
 1. Monitor first few trades carefully
 2. Verify MongoDB is storing trades correctly
 3. Check order execution logs

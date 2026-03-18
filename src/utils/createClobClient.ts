@@ -14,11 +14,8 @@ const createSigner = () => {
     const wallet = new Wallet(normalizedPrivateKey);
 
     return {
-        _signTypedData: (
-            domain: TypedDataDomain,
-            types: TypedDataTypes,
-            value: TypedDataValue
-        ) => wallet.signTypedData(domain, types, value),
+        _signTypedData: (domain: TypedDataDomain, types: TypedDataTypes, value: TypedDataValue) =>
+            wallet.signTypedData(domain, types, value),
         getAddress: async () => wallet.address,
     };
 };

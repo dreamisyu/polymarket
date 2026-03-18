@@ -1,28 +1,31 @@
-let spinnerInstance: any = null;
+import type { Options, Ora } from 'ora';
+
+let spinnerInstance: Ora | null = null;
+
+type OraFactory = (options?: string | Options) => Ora;
+
+const getOraFactory = async (): Promise<OraFactory> => {
+    const oraModule = (await import('ora')) as unknown as OraFactory & {
+        default?: OraFactory;
+    };
+
+    return oraModule.default ?? oraModule;
+};
 
 const getSpinner = async () => {
     if (spinnerInstance) {
         return spinnerInstance;
     }
-    
-    const ora = await import('ora');
-    const defaultOra = ora.default || ora;
-    
-    spinnerInstance = defaultOra({
+
+    const createOra = await getOraFactory();
+
+    spinnerInstance = createOra({
         spinner: {
             interval: 200,
-            frames: [
-                '▰▱▱▱▱▱▱',
-                '▰▰▱▱▱▱▱',
-                '▰▰▰▱▱▱▱',
-                '▰▰▰▰▱▱▱',
-                '▰▰▰▰▰▱▱',
-                '▰▰▰▰▰▰▱',
-                '▰▰▰▰▰▰▰',
-            ],
+            frames: ['▰▱▱▱▱▱▱', '▰▰▱▱▱▱▱', '▰▰▰▱▱▱▱', '▰▰▰▰▱▱▱', '▰▰▰▰▰▱▱', '▰▰▰▰▰▰▱', '▰▰▰▰▰▰▰'],
         },
     });
-    
+
     return spinnerInstance;
 };
 

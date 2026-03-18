@@ -6,18 +6,26 @@ import prettierPlugin from 'eslint-plugin-prettier';
 
 /** @type {import('eslint').Linter.Config[]} */
 export default [
-    { files: ['**/*.{js,mjs,cjs,ts}'] },
-    { languageOptions: { globals: globals.node } },
+    {
+        ignores: ['dist/**', 'coverage/**', 'node_modules/**'],
+    },
+    {
+        files: ['**/*.{js,mjs,cjs,ts}'],
+        languageOptions: {
+            globals: globals.node,
+        },
+    },
     pluginJs.configs.recommended,
     ...tseslint.configs.recommended,
-    prettierConfig, {
+    prettierConfig,
+    {
+        files: ['**/*.{js,mjs,cjs,ts}'],
         plugins: {
-            prettier: prettierPlugin, 
+            prettier: prettierPlugin,
         },
-
         rules: {
-            'prettier/prettier': 'warn', 
-            '@typescript-eslint/no-unused-vars': 'off', 
+            'prettier/prettier': 'warn',
+            '@typescript-eslint/no-unused-vars': 'off',
         },
     },
 ];

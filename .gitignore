@@ -18,7 +18,8 @@ out/
 *.tsbuildinfo
 
 # Environment variables
-
+.env
+.env.live
 
 # Temporary files
 *.tmp
@@ -45,8 +46,3 @@ jest-test-results.json
 # Lint and formatting cache
 .eslintcache
 .prettiercache
-
-# Readme.md
-README.md
-.env
-.env.live

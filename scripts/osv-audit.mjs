@@ -48,7 +48,7 @@ const collectPackages = (lockfile, rootPackage, includeDev) => {
     const packages = lockfile.packages ?? {};
     const rootDependencies = {
         ...(rootPackage.dependencies ?? {}),
-        ...(includeDev ? rootPackage.devDependencies ?? {} : {}),
+        ...(includeDev ? (rootPackage.devDependencies ?? {}) : {}),
     };
     const queue = Object.keys(rootDependencies).map(
         (dependencyName) => `node_modules/${dependencyName}`
@@ -152,14 +152,18 @@ const main = async () => {
     const scopeLabel = includeDev ? '全部依赖' : '运行时依赖';
 
     if (vulnerabilities.length === 0) {
-        console.log(`OSV 审计通过，共检查 ${runtimePackages.length} 个${scopeLabel}，未发现已知漏洞。`);
+        console.log(
+            `OSV 审计通过，共检查 ${runtimePackages.length} 个${scopeLabel}，未发现已知漏洞。`
+        );
         return;
     }
 
     console.error(`OSV 审计失败，发现 ${vulnerabilities.length} 个存在漏洞的依赖：`);
     for (const item of vulnerabilities) {
         const ids = item.vulns.map((vuln) => vuln.id).join(', ');
-        console.error(`- ${item.package.name}@${item.package.version} (${item.package.path}) -> ${ids}`);
+        console.error(
+            `- ${item.package.name}@${item.package.version} (${item.package.path}) -> ${ids}`
+        );
     }
     process.exitCode = 1;
 };
