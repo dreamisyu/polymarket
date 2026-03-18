@@ -23,6 +23,8 @@ const TracePortfolio = getTracePortfolioModel(USER_ADDRESS, TRACE_ID);
 const TracePosition = getTracePositionModel(USER_ADDRESS, TRACE_ID);
 
 const EPSILON = 1e-8;
+const SETTLEMENT_PRICE = 1;
+const SOURCE_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}`;
 
 type ExecutionStatus = 'FILLED' | 'SKIPPED';
 type TracePortfolioDocument = HydratedDocument<TracePortfolioInterface>;
@@ -119,6 +121,24 @@ const collectPortfolioMetrics = async (portfolio: TracePortfolioDocument) => {
     };
 };
 
+const applyPortfolioMetrics = (
+    portfolio: TracePortfolioDocument,
+    metrics: Awaited<ReturnType<typeof collectPortfolioMetrics>>
+) => {
+    portfolio.positionsMarketValue = metrics.positionsMarketValue;
+    portfolio.unrealizedPnl = metrics.unrealizedPnl;
+    portfolio.totalEquity = metrics.totalEquity;
+    portfolio.netPnl = metrics.netPnl;
+    portfolio.returnPct = metrics.returnPct;
+};
+
+const refreshPortfolioState = async (portfolio: TracePortfolioDocument) => {
+    const metrics = await collectPortfolioMetrics(portfolio);
+    applyPortfolioMetrics(portfolio, metrics);
+    await portfolio.save();
+    return metrics;
+};
+
 const loadPendingTrades = async () => {
     const trades = (await SourceActivity.find({
         type: 'TRADE',
@@ -207,15 +227,35 @@ const createEmptyPosition = (trade: UserActivityInterface): TracePositionDocumen
         lastTradedAt: trade.timestamp,
     });
 
+const matchUserPosition = (
+    userPositions: UserPositionInterface[],
+    tracePosition: Pick<TracePositionInterface, 'asset' | 'conditionId' | 'outcome'>
+) =>
+    userPositions.find((userPosition) => userPosition.asset === tracePosition.asset) ||
+    userPositions.find(
+        (userPosition) =>
+            userPosition.conditionId === tracePosition.conditionId &&
+            userPosition.outcome === tracePosition.outcome
+    ) ||
+    userPositions.find((userPosition) => userPosition.conditionId === tracePosition.conditionId);
+
+const fetchSourcePositions = async () => {
+    const userPositionsRaw = await fetchData<UserPositionInterface[]>(SOURCE_POSITIONS_URL);
+    if (!Array.isArray(userPositionsRaw)) {
+        console.warn(`[trace:${TRACE_ID}] 源账户持仓接口不可用，跳过本轮市值刷新`);
+        return null;
+    }
+
+    return userPositionsRaw;
+};
+
 const refreshOpenPositionMarks = async (userPositions: UserPositionInterface[]) => {
     const activePositions = (await TracePosition.find({
         size: { $gt: 0 },
     }).exec()) as TracePositionDocument[];
 
     for (const tracePosition of activePositions) {
-        const matchedUserPosition = userPositions.find(
-            (userPosition) => userPosition.asset === tracePosition.asset
-        );
+        const matchedUserPosition = matchUserPosition(userPositions, tracePosition);
         const nextMarketPrice = toSafeNumber(
             matchedUserPosition?.curPrice,
             toSafeNumber(tracePosition.marketPrice)
@@ -460,29 +500,152 @@ const simulateSellLike = async (
     };
 };
 
-const syncPortfolio = async (
+const syncPortfolioAfterExecution = async (
     portfolio: TracePortfolioDocument,
-    trade: UserActivityInterface,
+    execution: {
+        referenceHash: string;
+        timestamp: number;
+    },
     status: ExecutionStatus
 ) => {
     const metrics = await collectPortfolioMetrics(portfolio);
 
-    portfolio.positionsMarketValue = metrics.positionsMarketValue;
-    portfolio.unrealizedPnl = metrics.unrealizedPnl;
-    portfolio.totalEquity = metrics.totalEquity;
-    portfolio.netPnl = metrics.netPnl;
-    portfolio.returnPct = metrics.returnPct;
+    applyPortfolioMetrics(portfolio, metrics);
     portfolio.totalExecutions = toSafeNumber(portfolio.totalExecutions) + 1;
     portfolio.filledExecutions =
         toSafeNumber(portfolio.filledExecutions) + (status === 'FILLED' ? 1 : 0);
     portfolio.skippedExecutions =
         toSafeNumber(portfolio.skippedExecutions) + (status === 'FILLED' ? 0 : 1);
-    portfolio.lastSourceTransactionHash = trade.transactionHash;
-    portfolio.lastUpdatedAt = trade.timestamp;
+    portfolio.lastSourceTransactionHash = execution.referenceHash;
+    portfolio.lastUpdatedAt = execution.timestamp;
 
     await portfolio.save();
 
     return metrics;
+};
+
+const autoSettleRedeemablePositions = async (
+    portfolio: TracePortfolioDocument,
+    userPositions: UserPositionInterface[]
+) => {
+    const activePositions = (await TracePosition.find({
+        size: { $gt: 0 },
+    }).exec()) as TracePositionDocument[];
+    let settledCount = 0;
+
+    for (const tracePosition of activePositions) {
+        const matchedUserPosition = matchUserPosition(userPositions, tracePosition);
+        if (!matchedUserPosition?.redeemable) {
+            continue;
+        }
+
+        const positionSizeBefore = toSafeNumber(tracePosition.size);
+        if (positionSizeBefore <= 0) {
+            continue;
+        }
+
+        const settledAt = Date.now();
+        const settlementExecutionId = `settlement:${tracePosition.asset}`;
+        const cashBefore = toSafeNumber(portfolio.cashBalance);
+        const executedUsdc = positionSizeBefore * SETTLEMENT_PRICE;
+        const realizedPnlDelta = executedUsdc - toSafeNumber(tracePosition.costBasis);
+
+        portfolio.cashBalance = cashBefore + executedUsdc;
+        portfolio.realizedPnl = toSafeNumber(portfolio.realizedPnl) + realizedPnlDelta;
+
+        tracePosition.marketPrice = SETTLEMENT_PRICE;
+        tracePosition.size = 0;
+        tracePosition.costBasis = 0;
+        tracePosition.marketValue = 0;
+        tracePosition.avgPrice = 0;
+        tracePosition.unrealizedPnl = 0;
+        tracePosition.realizedPnl = toSafeNumber(tracePosition.realizedPnl) + realizedPnlDelta;
+        tracePosition.lastSourceTransactionHash = settlementExecutionId;
+        tracePosition.lastTradedAt = settledAt;
+        tracePosition.closedAt = settledAt;
+        await tracePosition.save();
+
+        await syncPortfolioAfterExecution(
+            portfolio,
+            {
+                referenceHash: settlementExecutionId,
+                timestamp: settledAt,
+            },
+            'FILLED'
+        );
+
+        await TraceExecution.updateOne(
+            {
+                sourceTransactionHash: settlementExecutionId,
+            },
+            {
+                $set: {
+                    traceId: TRACE_ID,
+                    traceLabel: TRACE_LABEL,
+                    sourceWallet: USER_ADDRESS,
+                    sourceTimestamp: settledAt,
+                    sourceSide: 'SETTLE',
+                    executionCondition: 'settle',
+                    status: 'FILLED',
+                    reason: '根据 Polymarket redeemable 状态自动结算',
+                    asset: tracePosition.asset,
+                    conditionId: tracePosition.conditionId,
+                    title: tracePosition.title,
+                    outcome: tracePosition.outcome,
+                    requestedSize: positionSizeBefore,
+                    executedSize: positionSizeBefore,
+                    requestedUsdc: executedUsdc,
+                    executedUsdc,
+                    executionPrice: SETTLEMENT_PRICE,
+                    cashBefore,
+                    cashAfter: toSafeNumber(portfolio.cashBalance),
+                    positionSizeBefore,
+                    positionSizeAfter: 0,
+                    realizedPnlDelta,
+                    realizedPnlTotal: toSafeNumber(portfolio.realizedPnl),
+                    unrealizedPnlAfter: toSafeNumber(portfolio.unrealizedPnl),
+                    totalEquityAfter: toSafeNumber(portfolio.totalEquity),
+                    claimedAt: settledAt,
+                    completedAt: settledAt,
+                },
+            },
+            {
+                upsert: true,
+            }
+        );
+
+        settledCount += 1;
+
+        console.log(
+            `[trace:${TRACE_ID}] 自动结算 ${tracePosition.asset} ` +
+                `size=${positionSizeBefore.toFixed(4)} payout=${executedUsdc.toFixed(4)}`
+        );
+    }
+
+    return settledCount;
+};
+
+const syncTracePortfolioWithPolymarket = async (
+    portfolio: TracePortfolioDocument,
+    options: {
+        allowSettlement: boolean;
+    }
+) => {
+    const userPositions = await fetchSourcePositions();
+    if (!userPositions) {
+        return;
+    }
+
+    await refreshOpenPositionMarks(userPositions);
+
+    if (options.allowSettlement) {
+        const settledCount = await autoSettleRedeemablePositions(portfolio, userPositions);
+        if (settledCount > 0) {
+            return;
+        }
+    }
+
+    await refreshPortfolioState(portfolio);
 };
 
 const recordExecution = async (
@@ -581,16 +744,19 @@ const processTrade = async (trade: UserActivityInterface) => {
         };
     }
 
-    const userPositionsRaw = await fetchData<UserPositionInterface[]>(
-        `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}`
-    );
-    if (Array.isArray(userPositionsRaw)) {
+    const userPositionsRaw = await fetchSourcePositions();
+    if (userPositionsRaw) {
         await refreshOpenPositionMarks(userPositionsRaw);
-    } else {
-        console.warn(`[trace:${TRACE_ID}] 源账户持仓接口不可用，跳过本轮市值刷新`);
     }
 
-    await syncPortfolio(portfolio, trade, resultWithPosition.result.status);
+    await syncPortfolioAfterExecution(
+        portfolio,
+        {
+            referenceHash: trade.transactionHash,
+            timestamp: trade.timestamp,
+        },
+        resultWithPosition.result.status
+    );
     await recordExecution(trade, condition, portfolio, resultWithPosition.result);
 
     console.log(
@@ -599,7 +765,7 @@ const processTrade = async (trade: UserActivityInterface) => {
     );
 };
 
-const traceExecutor = async () => {
+const paperTradeExecutor = async () => {
     console.log(`开始执行模拟跟单 (${TRACE_LABEL})`);
     const processingCount = await TraceExecution.countDocuments({ status: 'PROCESSING' });
     if (processingCount > 0) {
@@ -639,6 +805,10 @@ const traceExecutor = async () => {
                 }
             }
         } else {
+            const portfolio = await ensurePortfolio();
+            await syncTracePortfolioWithPolymarket(portfolio, {
+                allowSettlement: true,
+            });
             await spinner.start(`等待新的模拟交易 (${TRACE_LABEL})`);
         }
 
@@ -646,4 +816,4 @@ const traceExecutor = async () => {
     }
 };
 
-export default traceExecutor;
+export default paperTradeExecutor;

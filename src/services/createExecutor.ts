@@ -1,7 +1,7 @@
 import { ENV } from '../config/env';
 import createClobClient from '../utils/createClobClient';
 import tradeExecutor from './tradeExecutor';
-import traceExecutor from './traceExecutor';
+import paperTradeExecutor from './paperTradeExecutor';
 
 interface ExecutorRuntime {
     label: string;
@@ -12,7 +12,7 @@ const createExecutor = async (): Promise<ExecutorRuntime> => {
     if (ENV.EXECUTION_MODE === 'trace') {
         return {
             label: ENV.TRACE_LABEL,
-            run: traceExecutor,
+            run: paperTradeExecutor,
         };
     }
 

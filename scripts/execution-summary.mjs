@@ -314,6 +314,23 @@ const summarizeTraceMode = async ({ userAddress, traceId, settlementWallet }) =>
     const positions = await fetchCollectionDocs(positionCollection, {}, { lastTradedAt: 1 });
     const portfolio = await fetchSingleDoc(portfolioCollection, {}, { updatedAt: -1 });
     const settlement = await fetchPolymarketPositions(settlementWallet);
+    const settlementExecutions = executions.filter(
+        (execution) => execution.status === 'FILLED' && execution.executionCondition === 'settle'
+    );
+    const settlementSummary = Array.isArray(settlement.positions)
+        ? summarizeTraceSettlement(positions, settlement.positions)
+        : {
+              localOpenCount: positions.filter((position) => toSafeNumber(position.size) > 0)
+                  .length,
+              localClosedCount: positions.filter(
+                  (position) => toSafeNumber(position.size) === 0 || Boolean(position.closedAt)
+              ).length,
+              matchedPolymarketCount: 0,
+              redeemableCount: 0,
+              mergeableCount: 0,
+              unmatchedCount: positions.filter((position) => toSafeNumber(position.size) > 0)
+                  .length,
+          };
 
     return {
         mode: 'trace',
@@ -339,11 +356,13 @@ const summarizeTraceMode = async ({ userAddress, traceId, settlementWallet }) =>
                 (execution) =>
                     execution.status === 'FILLED' && execution.executionCondition === 'merge'
             ).length,
+            settlementCount: settlementExecutions.length,
         },
         pnlSummary: portfolio
             ? {
                   initialBalance: toSafeNumber(portfolio.initialBalance),
                   cashBalance: toSafeNumber(portfolio.cashBalance),
+                  positionsMarketValue: toSafeNumber(portfolio.positionsMarketValue),
                   realizedPnl: toSafeNumber(portfolio.realizedPnl),
                   unrealizedPnl: toSafeNumber(portfolio.unrealizedPnl),
                   netPnl: toSafeNumber(portfolio.netPnl),
@@ -351,20 +370,11 @@ const summarizeTraceMode = async ({ userAddress, traceId, settlementWallet }) =>
                   returnPct: toSafeNumber(portfolio.returnPct),
               }
             : null,
-        settlementSummary: Array.isArray(settlement.positions)
-            ? summarizeTraceSettlement(positions, settlement.positions)
-            : {
-                  localOpenCount: positions.filter((position) => toSafeNumber(position.size) > 0)
-                      .length,
-                  localClosedCount: positions.filter(
-                      (position) => toSafeNumber(position.size) === 0 || Boolean(position.closedAt)
-                  ).length,
-                  matchedPolymarketCount: 0,
-                  redeemableCount: 0,
-                  mergeableCount: 0,
-                  unmatchedCount: positions.filter((position) => toSafeNumber(position.size) > 0)
-                      .length,
-              },
+        settlementSummary: {
+            ...settlementSummary,
+            autoSettledCount: settlementExecutions.length,
+            autoSettledValue: sumBy(settlementExecutions, (execution) => execution.executedUsdc),
+        },
         failedItems: buildFailureItems(executions, (execution) => execution.status || 'UNKNOWN'),
         warnings: settlement.error
             ? [
@@ -395,6 +405,9 @@ const printHumanReadable = (summary) => {
     lines.push(`- 买入次数: ${toSafeNumber(summary.recordSummary.buyCount)}`);
     lines.push(`- 卖出次数: ${toSafeNumber(summary.recordSummary.sellCount)}`);
     lines.push(`- Merge 次数: ${toSafeNumber(summary.recordSummary.mergeCount)}`);
+    if (summary.recordSummary.settlementCount !== undefined) {
+        lines.push(`- 自动结算次数: ${toSafeNumber(summary.recordSummary.settlementCount)}`);
+    }
     lines.push(
         `- 已完成/已跳过/失败/处理中: ` +
             `${toSafeNumber(summary.recordSummary.completedCount ?? summary.recordSummary.filledCount)}/` +
@@ -412,6 +425,8 @@ const printHumanReadable = (summary) => {
     if (!summary.pnlSummary) {
         lines.push('- 当前无法生成盈亏汇总');
     } else if (summary.mode === 'trace') {
+        lines.push(`- 可用资金: ${formatUsd(summary.pnlSummary.cashBalance)}`);
+        lines.push(`- 持仓市值: ${formatUsd(summary.pnlSummary.positionsMarketValue)}`);
         lines.push(`- 净盈亏: ${formatUsd(summary.pnlSummary.netPnl)}`);
         lines.push(`- 已实现盈亏: ${formatUsd(summary.pnlSummary.realizedPnl)}`);
         lines.push(`- 未实现盈亏: ${formatUsd(summary.pnlSummary.unrealizedPnl)}`);
