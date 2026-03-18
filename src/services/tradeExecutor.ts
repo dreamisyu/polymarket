@@ -6,6 +6,7 @@ import fetchData from '../utils/fetchData';
 import spinner from '../utils/spinner';
 import getMyBalance from '../utils/getMyBalance';
 import postOrder from '../utils/postOrder';
+import resolveTradeCondition from '../utils/resolveTradeCondition';
 
 const USER_ADDRESS = ENV.USER_ADDRESS;
 const RETRY_LIMIT = ENV.RETRY_LIMIT;
@@ -16,20 +17,18 @@ let temp_trades: UserActivityInterface[] = [];
 const UserActivity = getUserActivityModel(USER_ADDRESS);
 
 const readTempTrade = async () => {
-    temp_trades = (
-        await UserActivity.find({
-            $and: [
-                { type: 'TRADE' },
-                { bot: false },
-                {
-                    $or: [
-                        { botExcutedTime: { $exists: false } },
-                        { botExcutedTime: { $lt: RETRY_LIMIT } },
-                    ],
-                },
-            ],
-        }).exec()
-    ).map((trade: any) => trade as UserActivityInterface);
+    temp_trades = (await UserActivity.find({
+        $and: [
+            { type: 'TRADE' },
+            { bot: false },
+            {
+                $or: [
+                    { botExcutedTime: { $exists: false } },
+                    { botExcutedTime: { $lt: RETRY_LIMIT } },
+                ],
+            },
+        ],
+    }).exec()) as UserActivityInterface[];
 };
 
 const doTrading = async (clobClient: ClobClient) => {
@@ -70,26 +69,7 @@ const doTrading = async (clobClient: ClobClient) => {
             console.log('My position:', my_position);
             console.log('User position:', user_position);
 
-            // Determine trading condition based on trade side and positions
-            let condition: string;
-
-            if (trade.side === 'BUY') {
-                // If user is buying, we should buy too
-                condition = 'buy';
-            } else if (trade.side === 'SELL') {
-                // If user is selling, we should sell too
-                condition = 'sell';
-            } else {
-                // Check if we need to merge (user closed position but we still have it)
-                if (my_position && !user_position) {
-                    condition = 'merge';
-                } else if (trade.side === 'MERGE') {
-                    condition = 'merge';
-                } else {
-                    // Default: try to match the trade side
-                    condition = trade.side.toLowerCase();
-                }
-            }
+            const condition = resolveTradeCondition(trade.side, my_position, user_position);
 
             console.log(`Determined condition: ${condition} for trade ${trade.transactionHash}`);
 
