@@ -1,8 +1,11 @@
 import mongoose from 'mongoose';
+import type { ExecutionPolicyTrailEntry } from './Execution';
 
 export type BotExecutionStatus =
     | 'PENDING'
     | 'PROCESSING'
+    | 'BUFFERED'
+    | 'BATCHED'
     | 'SUBMITTED'
     | 'CONFIRMED'
     | 'COMPLETED'
@@ -49,6 +52,10 @@ export interface UserActivityInterface {
     botMatchedAt?: number;
     botMinedAt?: number;
     botSubmissionStatus?: 'SUBMITTED' | 'MATCHED' | 'MINED' | 'RETRYING' | 'CONFIRMED' | 'FAILED';
+    botBufferId?: mongoose.Types.ObjectId;
+    botExecutionBatchId?: mongoose.Types.ObjectId;
+    botBufferedAt?: number;
+    botPolicyTrail?: ExecutionPolicyTrailEntry[];
     executionIntent?: ExecutionIntent;
     sourceBalanceAfterTrade?: number;
     sourceBalanceBeforeTrade?: number;

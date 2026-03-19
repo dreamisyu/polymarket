@@ -4,6 +4,7 @@ import { UserActivityInterface } from '../interfaces/User';
 
 const MAX_SLIPPAGE_BPS = ENV.MAX_SLIPPAGE_BPS;
 const MAX_ORDER_USDC = ENV.MAX_ORDER_USDC;
+const BUY_DUST_RESIDUAL_MODE = ENV.BUY_DUST_RESIDUAL_MODE;
 const MIN_MARKET_BUY_USDC = 1;
 const MIN_LIMIT_ORDER_SIZE = 5;
 
@@ -207,7 +208,7 @@ const collectSellLiquidity = (
     };
 };
 
-const computeBuyTargetUsdc = (
+export const computeBuyTargetUsdc = (
     trade: UserActivityInterface,
     availableBalance: number,
     sourceBalanceAfterTrade: number
@@ -260,7 +261,7 @@ const computeBuyTargetUsdc = (
     };
 };
 
-const computeSellTargetSize = (
+export const computeSellTargetSize = (
     condition: string,
     myPositionSize: number,
     trade: UserActivityInterface,
@@ -313,6 +314,10 @@ export const buildChunkExecutionPlan = (params: {
     marketSnapshot: MarketBookSnapshot;
     remainingRequestedUsdc?: number;
     remainingRequestedSize?: number;
+    requestedUsdcOverride?: number;
+    requestedSizeOverride?: number;
+    sourcePriceOverride?: number;
+    noteOverride?: string;
 }): ChunkExecutionPlan => {
     const {
         condition,
@@ -324,8 +329,12 @@ export const buildChunkExecutionPlan = (params: {
         marketSnapshot,
         remainingRequestedUsdc,
         remainingRequestedSize,
+        requestedUsdcOverride,
+        requestedSizeOverride,
+        sourcePriceOverride,
+        noteOverride,
     } = params;
-    const sourcePrice = Math.max(toSafeNumber(trade.price), 0);
+    const sourcePrice = Math.max(toSafeNumber(sourcePriceOverride, trade.price), 0);
 
     if (sourcePrice <= 0) {
         return {
@@ -339,7 +348,26 @@ export const buildChunkExecutionPlan = (params: {
     }
 
     if (condition === 'buy') {
-        const buyTarget = computeBuyTargetUsdc(trade, availableBalance, sourceBalanceAfterTrade);
+        const buyTarget =
+            requestedUsdcOverride !== undefined
+                ? {
+                      status:
+                          Math.min(Math.max(requestedUsdcOverride, 0), availableBalance) > 0
+                              ? ('READY' as const)
+                              : ('SKIPPED' as const),
+                      reason:
+                          Math.min(Math.max(requestedUsdcOverride, 0), availableBalance) > 0
+                              ? ''
+                              : '裁剪后可用下单金额为 0',
+                      requestedUsdc: Math.min(Math.max(requestedUsdcOverride, 0), availableBalance),
+                      note:
+                          requestedUsdcOverride > availableBalance
+                              ? [noteOverride, '已按当前可用余额裁剪批次买单金额']
+                                    .filter(Boolean)
+                                    .join('；')
+                              : noteOverride || '',
+                  }
+                : computeBuyTargetUsdc(trade, availableBalance, sourceBalanceAfterTrade);
         if (buyTarget.status !== 'READY') {
             return {
                 status: buyTarget.status,
@@ -409,6 +437,47 @@ export const buildChunkExecutionPlan = (params: {
             };
         }
 
+        const residualBuyUsdc = Math.max(nextRequestedUsdc - buyLiquidity.availableUsdc, 0);
+        if (
+            BUY_DUST_RESIDUAL_MODE !== 'off' &&
+            residualBuyUsdc > 0 &&
+            residualBuyUsdc < MIN_MARKET_BUY_USDC
+        ) {
+            if (BUY_DUST_RESIDUAL_MODE === 'trim') {
+                const trimmedOrderAmount = Math.max(nextRequestedUsdc - MIN_MARKET_BUY_USDC, 0);
+                if (
+                    trimmedOrderAmount >= MIN_MARKET_BUY_USDC &&
+                    buyLiquidity.availableUsdc + 1e-8 >= trimmedOrderAmount
+                ) {
+                    return {
+                        status: 'READY',
+                        reason: '',
+                        requestedSize: buyTarget.requestedUsdc / buyLiquidity.executionPrice,
+                        requestedUsdc: buyTarget.requestedUsdc,
+                        orderAmount: trimmedOrderAmount,
+                        executionPrice: buyLiquidity.executionPrice,
+                        side: Side.BUY,
+                        tickSize: marketSnapshot.tickSize,
+                        negRisk: marketSnapshot.negRisk,
+                        note: [buyTarget.note, '已裁剪本次买单，避免产生小于 1 USDC 的尾单']
+                            .filter(Boolean)
+                            .join('；'),
+                    };
+                }
+            }
+
+            return {
+                status: 'RETRYABLE_ERROR',
+                reason: `当前可成交金额会留下小于 ${MIN_MARKET_BUY_USDC} USDC 的尾单，已暂缓执行`,
+                requestedSize: buyTarget.requestedUsdc / buyLiquidity.executionPrice,
+                requestedUsdc: buyTarget.requestedUsdc,
+                orderAmount: 0,
+                executionPrice: buyLiquidity.executionPrice,
+                note: buyTarget.note,
+                allowPartialCompletion: remainingRequestedUsdc !== undefined,
+            };
+        }
+
         return {
             status: 'READY',
             reason: '',
@@ -424,12 +493,20 @@ export const buildChunkExecutionPlan = (params: {
     }
 
     if (condition === 'sell' || condition === 'merge') {
-        const sellTarget = computeSellTargetSize(
-            condition,
-            myPositionSize,
-            trade,
-            sourcePositionAfterTradeSize
-        );
+        const sellTarget =
+            requestedSizeOverride !== undefined
+                ? {
+                      status:
+                          requestedSizeOverride > 0 ? ('READY' as const) : ('SKIPPED' as const),
+                      reason: requestedSizeOverride > 0 ? '' : '没有可卖出的数量',
+                      requestedSize: Math.max(requestedSizeOverride, 0),
+                  }
+                : computeSellTargetSize(
+                      condition,
+                      myPositionSize,
+                      trade,
+                      sourcePositionAfterTradeSize
+                  );
         if (sellTarget.status !== 'READY') {
             return {
                 status: sellTarget.status,

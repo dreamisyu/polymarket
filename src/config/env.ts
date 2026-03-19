@@ -19,6 +19,7 @@ dotenv.config({ path: ENV_FILE_PATH });
 type ExecutionMode = 'live' | 'trace';
 type RelayerTransactionMode = 'SAFE' | 'PROXY';
 type WsChannel = 'market' | 'user';
+type BuyDustResidualMode = 'off' | 'defer' | 'trim';
 
 const DEFAULT_CLOB_HTTP_URL = 'https://clob.polymarket.com';
 const DEFAULT_POLYMARKET_WS_BASE_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws';
@@ -108,6 +109,20 @@ const parseRelayerTransactionMode = (
     }
 
     throw new Error('POLYMARKET_RELAYER_TX_TYPE must be SAFE or PROXY');
+};
+
+const parseBuyDustResidualMode = (
+    rawValue: string | undefined,
+    fallback: BuyDustResidualMode
+): BuyDustResidualMode => {
+    const normalized = String(rawValue || fallback)
+        .trim()
+        .toLowerCase();
+    if (normalized === 'off' || normalized === 'defer' || normalized === 'trim') {
+        return normalized;
+    }
+
+    throw new Error('BUY_DUST_RESIDUAL_MODE must be off, defer or trim');
 };
 
 const buildWsChannelUrl = (baseUrl: string, channel: WsChannel) =>
@@ -250,6 +265,23 @@ export const ENV = {
     SNAPSHOT_STALE_AFTER_MS: parsePositiveInteger(
         readEnv('SNAPSHOT_STALE_AFTER_MS') || '30000',
         'SNAPSHOT_STALE_AFTER_MS'
+    ),
+    BUY_SOURCE_MERGE_WINDOW_MS: parseNonNegativeInteger(
+        readEnv('BUY_SOURCE_MERGE_WINDOW_MS') || '15000',
+        'BUY_SOURCE_MERGE_WINDOW_MS'
+    ),
+    BUY_INTENT_BUFFER_MAX_MS: parseNonNegativeInteger(
+        readEnv('BUY_INTENT_BUFFER_MAX_MS') || '300000',
+        'BUY_INTENT_BUFFER_MAX_MS'
+    ),
+    BUY_MIN_TOP_UP_ENABLED: parseBoolean(readEnv('BUY_MIN_TOP_UP_ENABLED'), true),
+    BUY_MIN_TOP_UP_TRIGGER_USDC: parseNonNegativeNumber(
+        readEnv('BUY_MIN_TOP_UP_TRIGGER_USDC') || '0.7',
+        'BUY_MIN_TOP_UP_TRIGGER_USDC'
+    ),
+    BUY_DUST_RESIDUAL_MODE: parseBuyDustResidualMode(
+        readEnv('BUY_DUST_RESIDUAL_MODE'),
+        'trim'
     ),
     MARKET_CACHE_TTL_MS: parsePositiveInteger(
         readEnv('MARKET_CACHE_TTL_MS') || '3000',

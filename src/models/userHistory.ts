@@ -49,6 +49,20 @@ const activitySchema = new Schema({
     botMatchedAt: { type: Number, required: false },
     botMinedAt: { type: Number, required: false },
     botSubmissionStatus: { type: String, required: false },
+    botBufferId: { type: Schema.Types.ObjectId, required: false },
+    botExecutionBatchId: { type: Schema.Types.ObjectId, required: false },
+    botBufferedAt: { type: Number, required: false },
+    botPolicyTrail: {
+        type: [
+            {
+                policyId: { type: String, required: true },
+                action: { type: String, required: true },
+                reason: { type: String, required: true },
+                timestamp: { type: Number, required: true },
+            },
+        ],
+        required: false,
+    },
     executionIntent: { type: String, required: false },
     sourceBalanceAfterTrade: { type: Number, required: false },
     sourceBalanceBeforeTrade: { type: Number, required: false },
@@ -64,6 +78,8 @@ activitySchema.index({ activityKey: 1 }, { unique: true, sparse: true });
 activitySchema.index({ transactionHash: 1 });
 activitySchema.index({ type: 1, executionIntent: 1, botStatus: 1, timestamp: 1 });
 activitySchema.index({ botClaimedAt: 1 });
+activitySchema.index({ botBufferId: 1, botStatus: 1 });
+activitySchema.index({ botExecutionBatchId: 1, botStatus: 1 });
 
 const syncStateSchema = new Schema({
     _id: {

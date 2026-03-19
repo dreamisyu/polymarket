@@ -22,6 +22,13 @@ export interface PostOrderResult {
     submissionStatus?: 'SUBMITTED' | 'FAILED';
 }
 
+export interface ExecutionTargetOverrides {
+    requestedUsdc?: number;
+    requestedSize?: number;
+    sourcePrice?: number;
+    note?: string;
+}
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const dedupeStrings = (values: string[]) =>
@@ -83,7 +90,8 @@ const postOrder = async (
     sourcePositionAfterTrade: { size?: number } | undefined,
     trade: UserActivityInterface,
     myBalance: number,
-    sourceBalanceAfterTrade: number
+    sourceBalanceAfterTrade: number,
+    executionTarget?: ExecutionTargetOverrides
 ): Promise<PostOrderResult> => {
     const orderIds: string[] = [];
     const transactionHashes: string[] = [];
@@ -110,6 +118,10 @@ const postOrder = async (
             marketSnapshot: workingSnapshot,
             remainingRequestedUsdc,
             remainingRequestedSize,
+            requestedUsdcOverride: executionTarget?.requestedUsdc,
+            requestedSizeOverride: executionTarget?.requestedSize,
+            sourcePriceOverride: executionTarget?.sourcePrice,
+            noteOverride: executionTarget?.note,
         });
 
         if (plan.note) {
