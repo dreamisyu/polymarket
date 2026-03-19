@@ -18,9 +18,33 @@ dotenv.config({ path: ENV_FILE_PATH });
 
 type ExecutionMode = 'live' | 'trace';
 type RelayerTransactionMode = 'SAFE' | 'PROXY';
+type WsChannel = 'market' | 'user';
+
+const DEFAULT_CLOB_HTTP_URL = 'https://clob.polymarket.com';
+const DEFAULT_POLYMARKET_WS_BASE_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws';
+const DEFAULT_RPC_URL = 'https://polygon.drpc.org';
+const DEFAULT_USDC_CONTRACT_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+const DEFAULT_POLYMARKET_RELAYER_URL = 'https://relayer-v2.polymarket.com';
+const DEFAULT_POLYMARKET_CTF_CONTRACT_ADDRESS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
+
+const readEnv = (...names: string[]): string | undefined => {
+    for (const name of names) {
+        const value = process.env[name];
+        if (typeof value !== 'string') {
+            continue;
+        }
+
+        const normalized = value.trim();
+        if (normalized) {
+            return normalized;
+        }
+    }
+
+    return undefined;
+};
 
 const requireEnv = (name: string): string => {
-    const value = process.env[name];
+    const value = readEnv(name);
     if (!value) {
         throw new Error(`${name} is not defined (loaded from ${ENV_FILE_PATH})`);
     }
@@ -55,6 +79,15 @@ const parsePositiveInteger = (rawValue: string, name: string): number => {
     return parsed;
 };
 
+const parseNonNegativeInteger = (rawValue: string, name: string): number => {
+    const parsed = Number.parseInt(rawValue, 10);
+    if (!Number.isInteger(parsed) || parsed < 0) {
+        throw new Error(`${name} must be a non-negative integer`);
+    }
+
+    return parsed;
+};
+
 const parseBoolean = (rawValue: string | undefined, fallback: boolean) => {
     if (rawValue === undefined) {
         return fallback;
@@ -77,12 +110,34 @@ const parseRelayerTransactionMode = (
     throw new Error('POLYMARKET_RELAYER_TX_TYPE must be SAFE or PROXY');
 };
 
-const EXECUTION_MODE: ExecutionMode = process.env.EXECUTION_MODE === 'trace' ? 'trace' : 'live';
-const TRACE_ID = process.env.TRACE_ID || 'default';
+const buildWsChannelUrl = (baseUrl: string, channel: WsChannel) =>
+    `${baseUrl.replace(/\/+$/, '')}/${channel}`;
+
+const resolveWsUrl = (specificEnvName: 'CLOB_WS_URL' | 'USER_WS_URL', channel: WsChannel) =>
+    readEnv(specificEnvName) ||
+    buildWsChannelUrl(readEnv('POLYMARKET_WS_BASE_URL') || DEFAULT_POLYMARKET_WS_BASE_URL, channel);
+
+const resolveInitialSyncLookbackMs = () => {
+    const lookbackSECOND = readEnv('INITIAL_SYNC_LOOKBACK_SECOND');
+    if (lookbackSECOND !== undefined) {
+        return (
+            parseNonNegativeNumber(lookbackSECOND, 'INITIAL_SYNC_LOOKBACK_SECOND') * 1000
+        );
+    }
+
+    return (
+        parseNonNegativeInteger(readEnv('TOO_OLD_TIMESTAMP') || '24', 'TOO_OLD_TIMESTAMP') * 1000
+    );
+};
+
+const EXECUTION_MODE: ExecutionMode = readEnv('EXECUTION_MODE') === 'trace' ? 'trace' : 'live';
+const TRACE_ID = readEnv('TRACE_ID') || 'default';
 const TRACE_INITIAL_BALANCE = parsePositiveNumber(
-    process.env.TRACE_INITIAL_BALANCE || '1000',
+    readEnv('TRACE_INITIAL_BALANCE') || '1000',
     'TRACE_INITIAL_BALANCE'
 );
+const INITIAL_SYNC_LOOKBACK_MS = resolveInitialSyncLookbackMs();
+const POLYMARKET_WS_RECONNECT_MS = readEnv('POLYMARKET_WS_RECONNECT_MS');
 
 const USER_ADDRESS = requireEnv('USER_ADDRESS');
 const MONGO_URI = requireEnv('MONGO_URI');
@@ -117,23 +172,22 @@ const liveOnlyEnv =
         ? {
               PROXY_WALLET: requireEnv('PROXY_WALLET'),
               PRIVATE_KEY: requireEnv('PRIVATE_KEY'),
-              CLOB_HTTP_URL: requireEnv('CLOB_HTTP_URL'),
-              CLOB_WS_URL: requireEnv('CLOB_WS_URL'),
-              USER_WS_URL:
-                  process.env.USER_WS_URL || 'wss://ws-subscriptions-clob.polymarket.com/ws/user',
-              RPC_URL: requireEnv('RPC_URL'),
-              USDC_CONTRACT_ADDRESS: requireEnv('USDC_CONTRACT_ADDRESS'),
+              CLOB_HTTP_URL: readEnv('CLOB_HTTP_URL') || DEFAULT_CLOB_HTTP_URL,
+              CLOB_WS_URL: resolveWsUrl('CLOB_WS_URL', 'market'),
+              USER_WS_URL: resolveWsUrl('USER_WS_URL', 'user'),
+              RPC_URL: readEnv('RPC_URL') || DEFAULT_RPC_URL,
+              USDC_CONTRACT_ADDRESS:
+                  readEnv('USDC_CONTRACT_ADDRESS') || DEFAULT_USDC_CONTRACT_ADDRESS,
           }
         : {
-              PROXY_WALLET: process.env.PROXY_WALLET || '',
-              PRIVATE_KEY: process.env.PRIVATE_KEY || '',
-              CLOB_HTTP_URL: process.env.CLOB_HTTP_URL || 'https://clob.polymarket.com',
-              CLOB_WS_URL:
-                  process.env.CLOB_WS_URL || 'wss://ws-subscriptions-clob.polymarket.com/ws/market',
-              USER_WS_URL:
-                  process.env.USER_WS_URL || 'wss://ws-subscriptions-clob.polymarket.com/ws/user',
-              RPC_URL: process.env.RPC_URL || '',
-              USDC_CONTRACT_ADDRESS: process.env.USDC_CONTRACT_ADDRESS || '',
+              PROXY_WALLET: readEnv('PROXY_WALLET') || '',
+              PRIVATE_KEY: readEnv('PRIVATE_KEY') || '',
+              CLOB_HTTP_URL: readEnv('CLOB_HTTP_URL') || DEFAULT_CLOB_HTTP_URL,
+              CLOB_WS_URL: resolveWsUrl('CLOB_WS_URL', 'market'),
+              USER_WS_URL: resolveWsUrl('USER_WS_URL', 'user'),
+              RPC_URL: readEnv('RPC_URL') || DEFAULT_RPC_URL,
+              USDC_CONTRACT_ADDRESS:
+                  readEnv('USDC_CONTRACT_ADDRESS') || DEFAULT_USDC_CONTRACT_ADDRESS,
           };
 
 if (EXECUTION_MODE === 'live') {
@@ -152,79 +206,78 @@ export const ENV = {
     CLOB_HTTP_URL: liveOnlyEnv.CLOB_HTTP_URL,
     CLOB_WS_URL: liveOnlyEnv.CLOB_WS_URL,
     USER_WS_URL: liveOnlyEnv.USER_WS_URL,
-    FETCH_INTERVAL: parseInt(process.env.FETCH_INTERVAL || '1', 10),
-    TOO_OLD_TIMESTAMP: parseInt(process.env.TOO_OLD_TIMESTAMP || '24', 10),
-    RETRY_LIMIT: parseInt(process.env.RETRY_LIMIT || '3', 10),
+    FETCH_INTERVAL: parseInt(readEnv('FETCH_INTERVAL') || '1', 10),
+    INITIAL_SYNC_LOOKBACK_MS,
+    RETRY_LIMIT: parseInt(readEnv('RETRY_LIMIT') || '3', 10),
     MAX_SLIPPAGE_BPS: parseNonNegativeNumber(
-        process.env.MAX_SLIPPAGE_BPS || '300',
+        readEnv('MAX_SLIPPAGE_BPS') || '300',
         'MAX_SLIPPAGE_BPS'
     ),
-    MAX_ORDER_USDC: parseNonNegativeNumber(process.env.MAX_ORDER_USDC || '0', 'MAX_ORDER_USDC'),
+    MAX_ORDER_USDC: parseNonNegativeNumber(readEnv('MAX_ORDER_USDC') || '0', 'MAX_ORDER_USDC'),
     PROCESSING_LEASE_MS: parsePositiveInteger(
-        process.env.PROCESSING_LEASE_MS || '30000',
+        readEnv('PROCESSING_LEASE_MS') || '30000',
         'PROCESSING_LEASE_MS'
     ),
     ORDER_CONFIRMATION_TIMEOUT_MS: parsePositiveInteger(
-        process.env.ORDER_CONFIRMATION_TIMEOUT_MS || '45000',
+        readEnv('ORDER_CONFIRMATION_TIMEOUT_MS') || '45000',
         'ORDER_CONFIRMATION_TIMEOUT_MS'
     ),
     ORDER_CONFIRMATION_POLL_MS: parsePositiveInteger(
-        process.env.ORDER_CONFIRMATION_POLL_MS || '2000',
+        readEnv('ORDER_CONFIRMATION_POLL_MS') || '2000',
         'ORDER_CONFIRMATION_POLL_MS'
     ),
     ORDER_CONFIRMATION_BLOCKS: parsePositiveInteger(
-        process.env.ORDER_CONFIRMATION_BLOCKS || '2',
+        readEnv('ORDER_CONFIRMATION_BLOCKS') || '2',
         'ORDER_CONFIRMATION_BLOCKS'
     ),
-    AUTO_REDEEM_ENABLED: parseBoolean(process.env.AUTO_REDEEM_ENABLED, true),
+    AUTO_REDEEM_ENABLED: parseBoolean(readEnv('AUTO_REDEEM_ENABLED'), true),
     AUTO_REDEEM_INTERVAL_MS: parsePositiveInteger(
-        process.env.AUTO_REDEEM_INTERVAL_MS || '30000',
+        readEnv('AUTO_REDEEM_INTERVAL_MS') || '30000',
         'AUTO_REDEEM_INTERVAL_MS'
     ),
     AUTO_REDEEM_MAX_CONDITIONS_PER_RUN: parsePositiveInteger(
-        process.env.AUTO_REDEEM_MAX_CONDITIONS_PER_RUN || '8',
+        readEnv('AUTO_REDEEM_MAX_CONDITIONS_PER_RUN') || '8',
         'AUTO_REDEEM_MAX_CONDITIONS_PER_RUN'
     ),
     ACTIVITY_SYNC_LIMIT: parsePositiveInteger(
-        process.env.ACTIVITY_SYNC_LIMIT || '500',
+        readEnv('ACTIVITY_SYNC_LIMIT') || '500',
         'ACTIVITY_SYNC_LIMIT'
     ),
     ACTIVITY_SYNC_OVERLAP_MS: parsePositiveInteger(
-        process.env.ACTIVITY_SYNC_OVERLAP_MS || '30000',
+        readEnv('ACTIVITY_SYNC_OVERLAP_MS') || '30000',
         'ACTIVITY_SYNC_OVERLAP_MS'
     ),
     SNAPSHOT_STALE_AFTER_MS: parsePositiveInteger(
-        process.env.SNAPSHOT_STALE_AFTER_MS || '30000',
+        readEnv('SNAPSHOT_STALE_AFTER_MS') || '30000',
         'SNAPSHOT_STALE_AFTER_MS'
     ),
     MARKET_CACHE_TTL_MS: parsePositiveInteger(
-        process.env.MARKET_CACHE_TTL_MS || '3000',
+        readEnv('MARKET_CACHE_TTL_MS') || '3000',
         'MARKET_CACHE_TTL_MS'
     ),
     MARKET_WS_RECONNECT_MS: parsePositiveInteger(
-        process.env.MARKET_WS_RECONNECT_MS || '1000',
+        readEnv('MARKET_WS_RECONNECT_MS') || POLYMARKET_WS_RECONNECT_MS || '1000',
         'MARKET_WS_RECONNECT_MS'
     ),
     USER_WS_RECONNECT_MS: parsePositiveInteger(
-        process.env.USER_WS_RECONNECT_MS || '1000',
+        readEnv('USER_WS_RECONNECT_MS') || POLYMARKET_WS_RECONNECT_MS || '1000',
         'USER_WS_RECONNECT_MS'
     ),
     MARKET_WS_SNAPSHOT_WAIT_MS: parsePositiveInteger(
-        process.env.MARKET_WS_SNAPSHOT_WAIT_MS || '750',
+        readEnv('MARKET_WS_SNAPSHOT_WAIT_MS') || '750',
         'MARKET_WS_SNAPSHOT_WAIT_MS'
     ),
-    MARKET_WS_ENABLED: parseBoolean(process.env.MARKET_WS_ENABLED, true),
+    MARKET_WS_ENABLED: parseBoolean(readEnv('MARKET_WS_ENABLED'), true),
     RPC_URL: liveOnlyEnv.RPC_URL,
     USDC_CONTRACT_ADDRESS: liveOnlyEnv.USDC_CONTRACT_ADDRESS,
-    POLYMARKET_RELAYER_URL:
-        process.env.POLYMARKET_RELAYER_URL || 'https://relayer-v2.polymarket.com',
+    POLYMARKET_RELAYER_URL: readEnv('POLYMARKET_RELAYER_URL') || DEFAULT_POLYMARKET_RELAYER_URL,
     POLYMARKET_RELAYER_TX_TYPE: parseRelayerTransactionMode(
-        process.env.POLYMARKET_RELAYER_TX_TYPE,
+        readEnv('POLYMARKET_RELAYER_TX_TYPE'),
         'SAFE'
     ),
     POLYMARKET_CTF_CONTRACT_ADDRESS:
-        process.env.POLYMARKET_CTF_CONTRACT_ADDRESS || '0x4d97dcd97ec945f40cf65f87097ace5ea0476045',
-    POLY_BUILDER_API_KEY: process.env.POLY_BUILDER_API_KEY || '',
-    POLY_BUILDER_SECRET: process.env.POLY_BUILDER_SECRET || '',
-    POLY_BUILDER_PASSPHRASE: process.env.POLY_BUILDER_PASSPHRASE || '',
+        readEnv('POLYMARKET_CTF_CONTRACT_ADDRESS') || DEFAULT_POLYMARKET_CTF_CONTRACT_ADDRESS,
+    POLY_BUILDER_API_KEY: readEnv('POLY_BUILDER_API_KEY') || '',
+    POLY_BUILDER_SECRET: readEnv('POLY_BUILDER_SECRET') || '',
+    POLY_BUILDER_PASSPHRASE: readEnv('POLY_BUILDER_PASSPHRASE') || '',
 };

@@ -774,7 +774,7 @@ const paperTradeExecutor = async (marketStream: ClobMarketStream) => {
             await spinner.start('等待新的模拟交易');
         }
 
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await new Promise((resolve) => setTimeout(resolve, 500));
     }
 };
 

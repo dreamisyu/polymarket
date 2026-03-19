@@ -559,7 +559,7 @@ const tradeExecutor = async (
             await spinner.start('等待新交易');
         }
 
-        await sleep(1000);
+        await sleep(500);
     }
 };
 
