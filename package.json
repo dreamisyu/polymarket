@@ -46,12 +46,15 @@
         "typescript-eslint": "^8.23.0"
     },
     "dependencies": {
+        "@polymarket/builder-relayer-client": "^0.0.8",
+        "@polymarket/builder-signing-sdk": "^0.0.8",
         "@polymarket/clob-client": "^5.8.0",
         "axios": "^1.7.9",
         "chalk": "^5.4.1",
         "dotenv": "^16.4.7",
         "ethers": "^6.16.0",
         "mongoose": "^8.9.5",
-        "ora": "^5.4.1"
+        "ora": "^5.4.1",
+        "viem": "^2.47.5"
     }
 }

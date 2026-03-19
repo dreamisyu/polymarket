@@ -4,6 +4,8 @@ import { UserActivityInterface } from '../interfaces/User';
 
 const MAX_SLIPPAGE_BPS = ENV.MAX_SLIPPAGE_BPS;
 const MAX_ORDER_USDC = ENV.MAX_ORDER_USDC;
+const MIN_MARKET_BUY_USDC = 1;
+const MIN_LIMIT_ORDER_SIZE = 5;
 
 export interface MarketBookLevel {
     price: number;
@@ -15,6 +17,7 @@ export interface MarketBookSnapshot {
     market?: string;
     bids: MarketBookLevel[];
     asks: MarketBookLevel[];
+    minOrderSize: number;
     tickSize: TickSize;
     negRisk: boolean;
     lastTradePrice: number;
@@ -32,6 +35,7 @@ export interface ChunkExecutionPlan {
     tickSize?: TickSize;
     negRisk?: boolean;
     note?: string;
+    allowPartialCompletion?: boolean;
 }
 
 const toSafeNumber = (value: unknown, fallback = 0) => {
@@ -70,9 +74,31 @@ export const consumeMarketLiquidity = (
         return;
     }
 
-    const topLevel = levels[0];
-    const sizeDelta = side === Side.BUY ? amount / price : amount;
-    topLevel.size = Math.max(topLevel.size - sizeDelta, 0);
+    const priceTolerance = 1e-8;
+    let remainingAmount = amount;
+
+    for (const level of levels) {
+        const isPriceMatch =
+            side === Side.BUY
+                ? level.price <= price + priceTolerance
+                : level.price >= price - priceTolerance;
+        if (!isPriceMatch || remainingAmount <= 0) {
+            break;
+        }
+
+        if (side === Side.BUY) {
+            const levelUsdc = level.price * level.size;
+            const consumedUsdc = Math.min(levelUsdc, remainingAmount);
+            const consumedSize = consumedUsdc / level.price;
+            level.size = Math.max(level.size - consumedSize, 0);
+            remainingAmount -= consumedUsdc;
+            continue;
+        }
+
+        const consumedSize = Math.min(level.size, remainingAmount);
+        level.size = Math.max(level.size - consumedSize, 0);
+        remainingAmount -= consumedSize;
+    }
 
     const filteredLevels = sortBookLevels(levels, side === Side.BUY ? Side.SELL : Side.BUY);
     if (side === Side.BUY) {
@@ -90,6 +116,7 @@ export const buildMarketBookSnapshot = (
         timestamp?: string | number;
         bids?: Array<{ price: string; size: string }>;
         asks?: Array<{ price: string; size: string }>;
+        min_order_size?: string;
         tick_size?: string;
         neg_risk?: boolean;
         last_trade_price?: string;
@@ -99,6 +126,7 @@ export const buildMarketBookSnapshot = (
     market: orderBook.market,
     bids: sortBookLevels((orderBook.bids || []).map(normalizeBookLevel), Side.BUY),
     asks: sortBookLevels((orderBook.asks || []).map(normalizeBookLevel), Side.SELL),
+    minOrderSize: Math.max(toSafeNumber(orderBook.min_order_size), 0),
     tickSize: (orderBook.tick_size || '0.01') as TickSize,
     negRisk: Boolean(orderBook.neg_risk),
     lastTradePrice: Math.max(toSafeNumber(orderBook.last_trade_price), 0),
@@ -110,6 +138,74 @@ const isAcceptableBuyPrice = (askPrice: number, sourcePrice: number) =>
 
 const isAcceptableSellPrice = (bidPrice: number, sourcePrice: number) =>
     bidPrice >= sourcePrice * (1 - MAX_SLIPPAGE_BPS / 10_000);
+
+const getEffectiveMinOrderSize = (marketSnapshot: MarketBookSnapshot) =>
+    Math.max(toSafeNumber(marketSnapshot.minOrderSize), MIN_LIMIT_ORDER_SIZE);
+
+const collectBuyLiquidity = (
+    asks: MarketBookLevel[],
+    sourcePrice: number,
+    requestedUsdc: number
+) => {
+    let availableUsdc = 0;
+    let executionPrice = 0;
+
+    for (const ask of asks) {
+        if (!isAcceptableBuyPrice(ask.price, sourcePrice)) {
+            break;
+        }
+
+        const levelUsdc = ask.price * ask.size;
+        const chunkUsdc = Math.min(requestedUsdc - availableUsdc, levelUsdc);
+        if (chunkUsdc <= 0) {
+            continue;
+        }
+
+        availableUsdc += chunkUsdc;
+        executionPrice = ask.price;
+
+        if (availableUsdc >= requestedUsdc) {
+            break;
+        }
+    }
+
+    return {
+        availableUsdc,
+        executionPrice,
+    };
+};
+
+const collectSellLiquidity = (
+    bids: MarketBookLevel[],
+    sourcePrice: number,
+    requestedSize: number
+) => {
+    let availableSize = 0;
+    let executionPrice = 0;
+
+    for (const bid of bids) {
+        if (!isAcceptableSellPrice(bid.price, sourcePrice)) {
+            break;
+        }
+
+        const chunkSize = Math.min(requestedSize - availableSize, bid.size);
+        if (chunkSize <= 0) {
+            continue;
+        }
+
+        availableSize += chunkSize;
+        executionPrice = bid.price;
+
+        if (availableSize >= requestedSize) {
+            break;
+        }
+    }
+
+    return {
+        availableSize,
+        executionPrice,
+    };
+};
 
 const computeBuyTargetUsdc = (
     trade: UserActivityInterface,
@@ -272,7 +368,7 @@ export const buildChunkExecutionPlan = (params: {
         if (!isAcceptableBuyPrice(topAsk.price, sourcePrice)) {
             return {
                 status: 'SKIPPED',
-                reason: `当前买一价格超出允许滑点（${MAX_SLIPPAGE_BPS}bps）`,
+                reason: `当前买价超出允许滑点（${MAX_SLIPPAGE_BPS}bps）`,
                 requestedSize: buyTarget.requestedUsdc / sourcePrice,
                 requestedUsdc: buyTarget.requestedUsdc,
                 orderAmount: 0,
@@ -282,15 +378,44 @@ export const buildChunkExecutionPlan = (params: {
         }
 
         const nextRequestedUsdc = remainingRequestedUsdc ?? buyTarget.requestedUsdc;
-        const orderAmount = Math.min(nextRequestedUsdc, topAsk.size * topAsk.price);
+        if (nextRequestedUsdc < MIN_MARKET_BUY_USDC) {
+            return {
+                status: 'SKIPPED',
+                reason: `剩余买单金额低于平台最小下单金额 ${MIN_MARKET_BUY_USDC} USDC`,
+                requestedSize: buyTarget.requestedUsdc / topAsk.price,
+                requestedUsdc: buyTarget.requestedUsdc,
+                orderAmount: 0,
+                executionPrice: topAsk.price,
+                note: buyTarget.note,
+                allowPartialCompletion: remainingRequestedUsdc !== undefined,
+            };
+        }
+
+        const buyLiquidity = collectBuyLiquidity(
+            marketSnapshot.asks,
+            sourcePrice,
+            nextRequestedUsdc
+        );
+        if (buyLiquidity.availableUsdc < MIN_MARKET_BUY_USDC) {
+            return {
+                status: 'RETRYABLE_ERROR',
+                reason: `盘口可成交金额不足 ${MIN_MARKET_BUY_USDC} USDC`,
+                requestedSize: buyTarget.requestedUsdc / topAsk.price,
+                requestedUsdc: buyTarget.requestedUsdc,
+                orderAmount: 0,
+                executionPrice: buyLiquidity.executionPrice || topAsk.price,
+                note: buyTarget.note,
+                allowPartialCompletion: remainingRequestedUsdc !== undefined,
+            };
+        }
 
         return {
-            status: orderAmount > 0 ? 'READY' : 'RETRYABLE_ERROR',
-            reason: orderAmount > 0 ? '' : '订单金额无效',
-            requestedSize: buyTarget.requestedUsdc / topAsk.price,
+            status: 'READY',
+            reason: '',
+            requestedSize: buyTarget.requestedUsdc / buyLiquidity.executionPrice,
             requestedUsdc: buyTarget.requestedUsdc,
-            orderAmount,
-            executionPrice: topAsk.price,
+            orderAmount: buyLiquidity.availableUsdc,
+            executionPrice: buyLiquidity.executionPrice,
             side: Side.BUY,
             tickSize: marketSnapshot.tickSize,
             negRisk: marketSnapshot.negRisk,
@@ -340,15 +465,44 @@ export const buildChunkExecutionPlan = (params: {
         }
 
         const nextRequestedSize = remainingRequestedSize ?? sellTarget.requestedSize;
-        const orderAmount = Math.min(nextRequestedSize, topBid.size);
+        const minOrderSize = getEffectiveMinOrderSize(marketSnapshot);
+        if (nextRequestedSize < minOrderSize) {
+            return {
+                status: 'SKIPPED',
+                reason: `剩余卖单数量低于平台最小下单数量 ${minOrderSize.toFixed(4)}`,
+                requestedSize: sellTarget.requestedSize,
+                requestedUsdc: sellTarget.requestedSize * topBid.price,
+                orderAmount: 0,
+                executionPrice: topBid.price,
+                allowPartialCompletion: remainingRequestedSize !== undefined,
+            };
+        }
+
+        const sellLiquidity = collectSellLiquidity(
+            marketSnapshot.bids,
+            sourcePrice,
+            nextRequestedSize
+        );
+        if (sellLiquidity.availableSize < minOrderSize) {
+            return {
+                status: 'RETRYABLE_ERROR',
+                reason: `盘口可成交数量不足 ${minOrderSize.toFixed(4)}`,
+                requestedSize: sellTarget.requestedSize,
+                requestedUsdc:
+                    sellTarget.requestedSize * (sellLiquidity.executionPrice || topBid.price),
+                orderAmount: 0,
+                executionPrice: sellLiquidity.executionPrice || topBid.price,
+                allowPartialCompletion: remainingRequestedSize !== undefined,
+            };
+        }
 
         return {
-            status: orderAmount > 0 ? 'READY' : 'RETRYABLE_ERROR',
-            reason: orderAmount > 0 ? '' : '订单数量无效',
+            status: 'READY',
+            reason: '',
             requestedSize: sellTarget.requestedSize,
-            requestedUsdc: sellTarget.requestedSize * topBid.price,
-            orderAmount,
-            executionPrice: topBid.price,
+            requestedUsdc: sellTarget.requestedSize * sellLiquidity.executionPrice,
+            orderAmount: sellLiquidity.availableSize,
+            executionPrice: sellLiquidity.executionPrice,
             side: Side.SELL,
             tickSize: marketSnapshot.tickSize,
             negRisk: marketSnapshot.negRisk,

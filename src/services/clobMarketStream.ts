@@ -154,6 +154,7 @@ export class ClobMarketStream {
             market: partial.market || existing?.market,
             bids: partial.bids || existing?.bids || [],
             asks: partial.asks || existing?.asks || [],
+            minOrderSize: partial.minOrderSize ?? existing?.minOrderSize ?? 0,
             tickSize: partial.tickSize || existing?.tickSize || '0.01',
             negRisk: partial.negRisk ?? existing?.negRisk ?? false,
             lastTradePrice: partial.lastTradePrice ?? existing?.lastTradePrice ?? 0,
@@ -204,6 +205,7 @@ export class ClobMarketStream {
                       market?: string;
                       bids?: Array<{ price: string; size: string }>;
                       asks?: Array<{ price: string; size: string }>;
+                      min_order_size?: string;
                       tick_size?: string;
                       neg_risk?: boolean;
                       timestamp?: string;
@@ -222,6 +224,7 @@ export class ClobMarketStream {
                       event_type?: string;
                       bids?: Array<{ price: string; size: string }>;
                       asks?: Array<{ price: string; size: string }>;
+                      min_order_size?: string;
                       tick_size?: string;
                       neg_risk?: boolean;
                       timestamp?: string;

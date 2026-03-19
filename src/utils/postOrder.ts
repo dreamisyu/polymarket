@@ -67,6 +67,14 @@ const buildFailureResult = (
         executedChunks > 0 ? 'FAILED' : undefined
     );
 
+const buildPartialCompletionResult = (
+    reason: string,
+    orderIds: string[],
+    transactionHashes: string[],
+    note = ''
+): PostOrderResult =>
+    buildResult('SUBMITTED', mergeReasons(reason, note), orderIds, transactionHashes, 'SUBMITTED');
+
 const postOrder = async (
     clobClient: ClobClient,
     marketStream: ClobMarketStream,
@@ -109,6 +117,15 @@ const postOrder = async (
         }
 
         if (plan.status !== 'READY') {
+            if (executedChunks > 0 && plan.allowPartialCompletion) {
+                return buildPartialCompletionResult(
+                    plan.reason,
+                    orderIds,
+                    transactionHashes,
+                    finalNote
+                );
+            }
+
             if (plan.status === 'SKIPPED') {
                 return buildResult('SKIPPED', mergeReasons(plan.reason, finalNote));
             }

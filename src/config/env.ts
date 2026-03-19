@@ -17,6 +17,7 @@ const ENV_FILE_PATH =
 dotenv.config({ path: ENV_FILE_PATH });
 
 type ExecutionMode = 'live' | 'trace';
+type RelayerTransactionMode = 'SAFE' | 'PROXY';
 
 const requireEnv = (name: string): string => {
     const value = process.env[name];
@@ -60,6 +61,20 @@ const parseBoolean = (rawValue: string | undefined, fallback: boolean) => {
     }
 
     return rawValue === '1' || rawValue.toLowerCase() === 'true';
+};
+
+const parseRelayerTransactionMode = (
+    rawValue: string | undefined,
+    fallback: RelayerTransactionMode
+): RelayerTransactionMode => {
+    const normalized = String(rawValue || fallback)
+        .trim()
+        .toUpperCase();
+    if (normalized === 'SAFE' || normalized === 'PROXY') {
+        return normalized;
+    }
+
+    throw new Error('POLYMARKET_RELAYER_TX_TYPE must be SAFE or PROXY');
 };
 
 const EXECUTION_MODE: ExecutionMode = process.env.EXECUTION_MODE === 'trace' ? 'trace' : 'live';
@@ -161,6 +176,15 @@ export const ENV = {
         process.env.ORDER_CONFIRMATION_BLOCKS || '2',
         'ORDER_CONFIRMATION_BLOCKS'
     ),
+    AUTO_REDEEM_ENABLED: parseBoolean(process.env.AUTO_REDEEM_ENABLED, true),
+    AUTO_REDEEM_INTERVAL_MS: parsePositiveInteger(
+        process.env.AUTO_REDEEM_INTERVAL_MS || '30000',
+        'AUTO_REDEEM_INTERVAL_MS'
+    ),
+    AUTO_REDEEM_MAX_CONDITIONS_PER_RUN: parsePositiveInteger(
+        process.env.AUTO_REDEEM_MAX_CONDITIONS_PER_RUN || '8',
+        'AUTO_REDEEM_MAX_CONDITIONS_PER_RUN'
+    ),
     ACTIVITY_SYNC_LIMIT: parsePositiveInteger(
         process.env.ACTIVITY_SYNC_LIMIT || '500',
         'ACTIVITY_SYNC_LIMIT'
@@ -192,4 +216,15 @@ export const ENV = {
     MARKET_WS_ENABLED: parseBoolean(process.env.MARKET_WS_ENABLED, true),
     RPC_URL: liveOnlyEnv.RPC_URL,
     USDC_CONTRACT_ADDRESS: liveOnlyEnv.USDC_CONTRACT_ADDRESS,
+    POLYMARKET_RELAYER_URL:
+        process.env.POLYMARKET_RELAYER_URL || 'https://relayer-v2.polymarket.com',
+    POLYMARKET_RELAYER_TX_TYPE: parseRelayerTransactionMode(
+        process.env.POLYMARKET_RELAYER_TX_TYPE,
+        'SAFE'
+    ),
+    POLYMARKET_CTF_CONTRACT_ADDRESS:
+        process.env.POLYMARKET_CTF_CONTRACT_ADDRESS || '0x4d97dcd97ec945f40cf65f87097ace5ea0476045',
+    POLY_BUILDER_API_KEY: process.env.POLY_BUILDER_API_KEY || '',
+    POLY_BUILDER_SECRET: process.env.POLY_BUILDER_SECRET || '',
+    POLY_BUILDER_PASSPHRASE: process.env.POLY_BUILDER_PASSPHRASE || '',
 };

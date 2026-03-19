@@ -4,6 +4,7 @@ import { ENV } from '../config/env';
 import { getUserActivityModel } from '../models/userHistory';
 import ClobMarketStream from './clobMarketStream';
 import ClobUserStream, { UserChannelStatusUpdate } from './clobUserStream';
+import LiveSettlementReclaimer from './liveSettlementReclaimer';
 import confirmTransactionHashes from '../utils/confirmTransactionHashes';
 import fetchData from '../utils/fetchData';
 import getTradingGuardState from '../utils/getTradingGuardState';
@@ -535,6 +536,7 @@ const tradeExecutor = async (
     userStream: ClobUserStream | null
 ) => {
     logger.info('启动真实跟单');
+    const settlementReclaimer = new LiveSettlementReclaimer();
     const processingCount = await UserActivity.countDocuments({ botStatus: 'PROCESSING' });
     const submittedCount = await UserActivity.countDocuments({ botStatus: 'SUBMITTED' });
     if (processingCount > 0) {
@@ -546,6 +548,7 @@ const tradeExecutor = async (
 
     while (true) {
         await syncSubmittedTrades(userStream);
+        await settlementReclaimer.runDue();
 
         const pendingTrades = await readPendingTrades();
         if (pendingTrades.length > 0) {
