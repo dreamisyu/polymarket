@@ -94,8 +94,13 @@ const copyExecutionBatchSchema = new Schema<CopyExecutionBatchInterface>(
 copyExecutionBatchSchema.index({ status: 1, claimedAt: 1, submittedAt: 1 });
 copyExecutionBatchSchema.index({ bufferId: 1 });
 
-const getCopyIntentBufferModel = (walletAddress: string) => {
-    const suffix = normalizeKey(walletAddress);
+const buildSuffix = (walletAddress: string, namespace?: string) =>
+    namespace
+        ? `${normalizeKey(walletAddress)}_${normalizeKey(namespace)}`
+        : normalizeKey(walletAddress);
+
+const getCopyIntentBufferModel = (walletAddress: string, namespace?: string) => {
+    const suffix = buildSuffix(walletAddress, namespace);
     const collectionName = `copy_intent_buffers_${suffix}`;
     const modelName = `CopyIntentBuffers_${suffix}`;
     return getModel<CopyIntentBufferInterface>(
@@ -105,8 +110,8 @@ const getCopyIntentBufferModel = (walletAddress: string) => {
     );
 };
 
-const getCopyExecutionBatchModel = (walletAddress: string) => {
-    const suffix = normalizeKey(walletAddress);
+const getCopyExecutionBatchModel = (walletAddress: string, namespace?: string) => {
+    const suffix = buildSuffix(walletAddress, namespace);
     const collectionName = `copy_execution_batches_${suffix}`;
     const modelName = `CopyExecutionBatches_${suffix}`;
     return getModel<CopyExecutionBatchInterface>(

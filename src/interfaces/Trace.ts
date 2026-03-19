@@ -1,14 +1,21 @@
 import mongoose from 'mongoose';
+import type { ExecutionPolicyTrailEntry } from './Execution';
 
 export interface TraceExecutionInterface {
     _id: mongoose.Types.ObjectId;
     traceId: string;
     traceLabel: string;
     sourceWallet: string;
-    sourceActivityId: mongoose.Types.ObjectId;
+    sourceActivityId?: mongoose.Types.ObjectId;
+    sourceActivityIds?: mongoose.Types.ObjectId[];
     sourceActivityKey?: string;
+    sourceActivityKeys?: string[];
     sourceTransactionHash: string;
+    sourceTransactionHashes?: string[];
+    sourceTradeCount?: number;
     sourceTimestamp: number;
+    sourceStartedAt?: number;
+    sourceEndedAt?: number;
     sourceSide: string;
     executionCondition: string;
     status: 'PROCESSING' | 'FILLED' | 'SKIPPED' | 'FAILED';
@@ -30,6 +37,9 @@ export interface TraceExecutionInterface {
     realizedPnlTotal: number;
     unrealizedPnlAfter: number;
     totalEquityAfter: number;
+    copyIntentBufferId?: mongoose.Types.ObjectId;
+    copyExecutionBatchId?: mongoose.Types.ObjectId;
+    policyTrail?: ExecutionPolicyTrailEntry[];
     claimedAt?: number;
     completedAt?: number;
 }

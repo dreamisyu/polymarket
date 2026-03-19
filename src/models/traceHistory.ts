@@ -4,6 +4,7 @@ import {
     TracePortfolioInterface,
     TracePositionInterface,
 } from '../interfaces/Trace';
+import { ExecutionPolicyTrailEntry } from '../interfaces/Execution';
 
 const normalizeKey = (value: string) => value.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
 
@@ -45,15 +46,33 @@ const positionSchema = new Schema<TracePositionInterface>(
 
 positionSchema.index({ asset: 1 }, { unique: true });
 
+const policyTrailEntrySchema = new Schema<ExecutionPolicyTrailEntry>(
+    {
+        policyId: { type: String, required: true },
+        action: { type: String, required: true },
+        reason: { type: String, required: true, default: '' },
+        timestamp: { type: Number, required: true, default: 0 },
+    },
+    {
+        _id: false,
+    }
+);
+
 const executionSchema = new Schema<TraceExecutionInterface>(
     {
         traceId: { type: String, required: true },
         traceLabel: { type: String, required: true },
         sourceWallet: { type: String, required: true },
         sourceActivityId: { type: Schema.Types.ObjectId, required: false },
+        sourceActivityIds: { type: [Schema.Types.ObjectId], required: false, default: [] },
         sourceActivityKey: { type: String, required: false },
+        sourceActivityKeys: { type: [String], required: false, default: [] },
         sourceTransactionHash: { type: String, required: true },
+        sourceTransactionHashes: { type: [String], required: false, default: [] },
+        sourceTradeCount: { type: Number, required: false, default: 1 },
         sourceTimestamp: { type: Number, required: true, default: 0 },
+        sourceStartedAt: { type: Number, required: false, default: 0 },
+        sourceEndedAt: { type: Number, required: false, default: 0 },
         sourceSide: { type: String, required: false, default: '' },
         executionCondition: { type: String, required: false, default: '' },
         status: {
@@ -79,6 +98,9 @@ const executionSchema = new Schema<TraceExecutionInterface>(
         realizedPnlTotal: { type: Number, required: true, default: 0 },
         unrealizedPnlAfter: { type: Number, required: true, default: 0 },
         totalEquityAfter: { type: Number, required: true, default: 0 },
+        copyIntentBufferId: { type: Schema.Types.ObjectId, required: false },
+        copyExecutionBatchId: { type: Schema.Types.ObjectId, required: false },
+        policyTrail: { type: [policyTrailEntrySchema], required: false, default: [] },
         claimedAt: { type: Number, required: false, default: 0 },
         completedAt: { type: Number, required: false, default: 0 },
     },
