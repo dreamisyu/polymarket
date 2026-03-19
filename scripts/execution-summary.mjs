@@ -96,9 +96,54 @@ const normalizeKey = (value) =>
     String(value || '')
         .replace(/[^a-zA-Z0-9]/g, '_')
         .toLowerCase();
+const normalizeStatus = (value) =>
+    String(value || '')
+        .trim()
+        .toUpperCase();
+const normalizeCondition = (value) =>
+    String(value || '')
+        .trim()
+        .toLowerCase();
 const sumBy = (items, getter) => items.reduce((sum, item) => sum + toSafeNumber(getter(item)), 0);
 const formatUsd = (value) => `${toSafeNumber(value).toFixed(4)} USDC`;
 const formatPct = (value) => `${toSafeNumber(value).toFixed(2)}%`;
+const countItems = (items, predicate) => items.filter(predicate).length;
+const hasCollectionDocs = (items) => Array.isArray(items) && items.length > 0;
+const getSourceTradeCount = (item, fieldName = 'sourceTradeIds') => {
+    const storedCount = toSafeNumber(item?.sourceTradeCount, 0);
+    if (storedCount > 0) {
+        return storedCount;
+    }
+
+    return Array.isArray(item?.[fieldName]) ? item[fieldName].length : 0;
+};
+const getBatchTimestamp = (batch) =>
+    toSafeNumber(
+        batch?.completedAt ||
+            batch?.confirmedAt ||
+            batch?.submittedAt ||
+            batch?.sourceEndedAt ||
+            batch?.sourceStartedAt ||
+            batch?.createdAt
+    );
+const getBufferTimestamp = (buffer) =>
+    toSafeNumber(
+        buffer?.completedAt ||
+            buffer?.expireAt ||
+            buffer?.flushAfter ||
+            buffer?.sourceEndedAt ||
+            buffer?.sourceStartedAt ||
+            buffer?.createdAt
+    );
+const getCollectionSuffix = (walletAddress, namespace = '') =>
+    namespace
+        ? `${normalizeKey(walletAddress)}_${normalizeKey(namespace)}`
+        : normalizeKey(walletAddress);
+const getCopyIntentBufferCollectionName = (walletAddress, namespace = '') =>
+    `copy_intent_buffers_${getCollectionSuffix(walletAddress, namespace)}`;
+const getCopyExecutionBatchCollectionName = (walletAddress, namespace = '') =>
+    `copy_execution_batches_${getCollectionSuffix(walletAddress, namespace)}`;
+const getTraceRuntimeNamespace = (traceId) => `trace_${traceId}`;
 
 const getCollectionIfExists = async (collectionName) => {
     const collections = await mongoose.connection.db
@@ -214,18 +259,155 @@ const buildFailureItems = (items, statusResolver) =>
             timestamp: toSafeNumber(item.timestamp || item.sourceTimestamp),
         }));
 
-const summarizeLiveMode = async ({ userAddress, settlementWallet }) => {
-    const activities = await fetchCollectionDocs(
-        `user_activities_${userAddress}`,
-        { type: 'TRADE' },
-        { timestamp: 1 }
+const buildBatchAttentionItems = (batches) =>
+    batches
+        .filter((batch) =>
+            ['FAILED', 'PROCESSING', 'SUBMITTED', 'READY'].includes(normalizeStatus(batch.status))
+        )
+        .sort((left, right) => getBatchTimestamp(right) - getBatchTimestamp(left))
+        .slice(0, 10)
+        .map((batch) => ({
+            transactionHash:
+                batch.transactionHashes?.[batch.transactionHashes.length - 1] ||
+                batch.sourceTransactionHashes?.[batch.sourceTransactionHashes.length - 1] ||
+                `batch:${String(batch._id || '')}`,
+            status: normalizeStatus(batch.status) || 'UNKNOWN',
+            side: batch.side || batch.condition || '',
+            title: batch.title || '',
+            reason: batch.reason || '',
+            timestamp: getBatchTimestamp(batch),
+        }));
+
+const buildBufferAttentionItems = (buffers) =>
+    buffers
+        .filter((buffer) => ['OPEN', 'FLUSHING'].includes(normalizeStatus(buffer.state)))
+        .sort((left, right) => getBufferTimestamp(right) - getBufferTimestamp(left))
+        .slice(0, 10)
+        .map((buffer) => ({
+            transactionHash:
+                buffer.sourceTransactionHashes?.[buffer.sourceTransactionHashes.length - 1] ||
+                `buffer:${String(buffer._id || '')}`,
+            status: normalizeStatus(buffer.state) || 'UNKNOWN',
+            side: buffer.side || buffer.condition || '',
+            title: buffer.title || '',
+            reason: buffer.reason || '',
+            timestamp: getBufferTimestamp(buffer),
+        }));
+
+const mergeAttentionItems = (...groups) =>
+    groups
+        .flat()
+        .sort((left, right) => toSafeNumber(right.timestamp) - toSafeNumber(left.timestamp))
+        .slice(0, 10);
+
+const summarizeSourceTrades = (activities) => {
+    const tradeActivities = activities.filter(
+        (activity) => String(activity.type || '').toUpperCase() === 'TRADE'
     );
+    return {
+        totalCount: tradeActivities.length,
+        buyCount: countItems(
+            tradeActivities,
+            (activity) => String(activity.side || '').toUpperCase() === 'BUY'
+        ),
+        sellCount: countItems(
+            tradeActivities,
+            (activity) => String(activity.side || '').toUpperCase() === 'SELL'
+        ),
+        mergeCount: countItems(
+            tradeActivities,
+            (activity) => String(activity.side || '').toUpperCase() === 'MERGE'
+        ),
+    };
+};
+
+const summarizeExecutionBatches = (batches) => {
+    const confirmedBatches = batches.filter(
+        (batch) => normalizeStatus(batch.status) === 'CONFIRMED'
+    );
+    return {
+        totalCount: batches.length,
+        readyCount: countItems(batches, (batch) => normalizeStatus(batch.status) === 'READY'),
+        processingCount: countItems(
+            batches,
+            (batch) => normalizeStatus(batch.status) === 'PROCESSING'
+        ),
+        submittedCount: countItems(
+            batches,
+            (batch) => normalizeStatus(batch.status) === 'SUBMITTED'
+        ),
+        confirmedCount: confirmedBatches.length,
+        skippedCount: countItems(batches, (batch) => normalizeStatus(batch.status) === 'SKIPPED'),
+        failedCount: countItems(batches, (batch) => normalizeStatus(batch.status) === 'FAILED'),
+        buyCount: countItems(
+            confirmedBatches,
+            (batch) => normalizeCondition(batch.condition) === 'buy'
+        ),
+        sellCount: countItems(
+            confirmedBatches,
+            (batch) => normalizeCondition(batch.condition) === 'sell'
+        ),
+        mergeCount: countItems(
+            confirmedBatches,
+            (batch) => normalizeCondition(batch.condition) === 'merge'
+        ),
+        sourceTradeCount: sumBy(batches, (batch) => getSourceTradeCount(batch)),
+        totalRequestedUsdc: sumBy(batches, (batch) => batch.requestedUsdc),
+        totalRequestedSize: sumBy(batches, (batch) => batch.requestedSize),
+    };
+};
+
+const summarizeIntentBuffers = (buffers) => {
+    const activeBuffers = buffers.filter((buffer) =>
+        ['OPEN', 'FLUSHING'].includes(normalizeStatus(buffer.state))
+    );
+    return {
+        totalCount: buffers.length,
+        openCount: countItems(buffers, (buffer) => normalizeStatus(buffer.state) === 'OPEN'),
+        flushingCount: countItems(
+            buffers,
+            (buffer) => normalizeStatus(buffer.state) === 'FLUSHING'
+        ),
+        skippedCount: countItems(buffers, (buffer) => normalizeStatus(buffer.state) === 'SKIPPED'),
+        closedCount: countItems(buffers, (buffer) => normalizeStatus(buffer.state) === 'CLOSED'),
+        sourceTradeCount: sumBy(buffers, (buffer) => getSourceTradeCount(buffer)),
+        activeSourceTradeCount: sumBy(activeBuffers, (buffer) => getSourceTradeCount(buffer)),
+    };
+};
+
+const summarizeLiveMode = async ({ userAddress, settlementWallet }) => {
+    const [activities, buffers, batches] = await Promise.all([
+        fetchCollectionDocs(`user_activities_${userAddress}`, { type: 'TRADE' }, { timestamp: 1 }),
+        fetchCollectionDocs(
+            getCopyIntentBufferCollectionName(userAddress),
+            {},
+            { sourceStartedAt: 1 }
+        ),
+        fetchCollectionDocs(
+            getCopyExecutionBatchCollectionName(userAddress),
+            {},
+            { sourceStartedAt: 1 }
+        ),
+    ]);
     const settlement = await fetchPolymarketPositions(settlementWallet);
     const positionSummary = Array.isArray(settlement.positions)
         ? summarizePolymarketPositions(settlement.positions)
         : null;
+    const sourceTradeSummary = summarizeSourceTrades(activities);
+    const batchSummary = summarizeExecutionBatches(batches);
+    const bufferSummary = summarizeIntentBuffers(buffers);
+    const hasBatchSummary = hasCollectionDocs(batches);
+    const hasPipelineSummary = hasBatchSummary || hasCollectionDocs(buffers);
     const completedActivities = activities.filter((activity) =>
         isCompletedLiveStatus(resolveLiveStatus(activity))
+    );
+    const legacyAttentionItems = buildFailureItems(
+        activities.filter(
+            (activity) =>
+                !activity.botExecutionBatchId &&
+                !['BUFFERED', 'BATCHED'].includes(normalizeStatus(resolveLiveStatus(activity)))
+        ),
+        resolveLiveStatus
     );
 
     return {
@@ -234,34 +416,55 @@ const summarizeLiveMode = async ({ userAddress, settlementWallet }) => {
         settlementWallet: settlement.walletAddress,
         recordSummary: {
             totalTradesCaptured: activities.length,
-            completedCount: activities.filter((activity) =>
-                isCompletedLiveStatus(resolveLiveStatus(activity))
+            completedCount: hasBatchSummary
+                ? batchSummary.confirmedCount
+                : activities.filter((activity) =>
+                      isCompletedLiveStatus(resolveLiveStatus(activity))
+                  ).length,
+            confirmedCount: hasBatchSummary
+                ? batchSummary.confirmedCount
+                : activities.filter((activity) => resolveLiveStatus(activity) === 'CONFIRMED')
+                      .length,
+            skippedCount: hasBatchSummary
+                ? batchSummary.skippedCount
+                : activities.filter((activity) => resolveLiveStatus(activity) === 'SKIPPED').length,
+            failedCount: hasBatchSummary
+                ? batchSummary.failedCount
+                : activities.filter((activity) => resolveLiveStatus(activity) === 'FAILED').length,
+            processingCount: hasBatchSummary
+                ? batchSummary.processingCount
+                : activities.filter((activity) => resolveLiveStatus(activity) === 'PROCESSING')
+                      .length,
+            submittedCount: hasBatchSummary
+                ? batchSummary.submittedCount
+                : activities.filter((activity) => resolveLiveStatus(activity) === 'SUBMITTED')
+                      .length,
+            bufferedCount: activities.filter(
+                (activity) => resolveLiveStatus(activity) === 'BUFFERED'
             ).length,
-            confirmedCount: activities.filter(
-                (activity) => resolveLiveStatus(activity) === 'CONFIRMED'
-            ).length,
-            skippedCount: activities.filter((activity) => resolveLiveStatus(activity) === 'SKIPPED')
+            batchedCount: activities.filter((activity) => resolveLiveStatus(activity) === 'BATCHED')
                 .length,
-            failedCount: activities.filter((activity) => resolveLiveStatus(activity) === 'FAILED')
-                .length,
-            processingCount: activities.filter(
-                (activity) => resolveLiveStatus(activity) === 'PROCESSING'
-            ).length,
-            submittedCount: activities.filter(
-                (activity) => resolveLiveStatus(activity) === 'SUBMITTED'
-            ).length,
             pendingCount: activities.filter((activity) => resolveLiveStatus(activity) === 'PENDING')
                 .length,
-            buyCount: completedActivities.filter(
-                (activity) => String(activity.side || '').toUpperCase() === 'BUY'
-            ).length,
-            sellCount: completedActivities.filter(
-                (activity) => String(activity.side || '').toUpperCase() === 'SELL'
-            ).length,
-            mergeCount: completedActivities.filter(
-                (activity) => String(activity.side || '').toUpperCase() === 'MERGE'
-            ).length,
+            buyCount: hasBatchSummary
+                ? batchSummary.buyCount
+                : completedActivities.filter(
+                      (activity) => String(activity.side || '').toUpperCase() === 'BUY'
+                  ).length,
+            sellCount: hasBatchSummary
+                ? batchSummary.sellCount
+                : completedActivities.filter(
+                      (activity) => String(activity.side || '').toUpperCase() === 'SELL'
+                  ).length,
+            mergeCount: hasBatchSummary
+                ? batchSummary.mergeCount
+                : completedActivities.filter(
+                      (activity) => String(activity.side || '').toUpperCase() === 'MERGE'
+                  ).length,
         },
+        sourceTradeSummary,
+        batchSummary,
+        bufferSummary,
         pnlSummary: positionSummary
             ? {
                   totalCashPnl: positionSummary.totalCashPnl,
@@ -280,8 +483,17 @@ const summarizeLiveMode = async ({ userAddress, settlementWallet }) => {
                   mergeableValue: positionSummary.mergeableValue,
               }
             : null,
-        failedItems: buildFailureItems(activities, resolveLiveStatus),
-        warnings: settlement.error ? [settlement.error] : [],
+        failedItems: mergeAttentionItems(
+            buildBatchAttentionItems(batches),
+            buildBufferAttentionItems(buffers),
+            legacyAttentionItems
+        ),
+        warnings: [
+            ...(settlement.error ? [settlement.error] : []),
+            ...(!hasPipelineSummary && activities.length > 0
+                ? ['未发现批次集合，已按旧版活动状态兼容汇总']
+                : []),
+        ],
     };
 };
 
@@ -315,16 +527,31 @@ const summarizeTraceSettlement = (tracePositions, remotePositions) => {
 
 const summarizeTraceMode = async ({ userAddress, traceId, settlementWallet }) => {
     const suffix = `${normalizeKey(userAddress)}_${normalizeKey(traceId)}`;
+    const runtimeNamespace = getTraceRuntimeNamespace(traceId);
     const executionCollection = `trace_executions_${suffix}`;
     const positionCollection = `trace_positions_${suffix}`;
     const portfolioCollection = `trace_portfolios_${suffix}`;
-    const executions = await fetchCollectionDocs(executionCollection, {}, { sourceTimestamp: 1 });
-    const positions = await fetchCollectionDocs(positionCollection, {}, { lastTradedAt: 1 });
-    const portfolio = await fetchSingleDoc(portfolioCollection, {}, { updatedAt: -1 });
+    const [executions, positions, portfolio, buffers, batches] = await Promise.all([
+        fetchCollectionDocs(executionCollection, {}, { sourceTimestamp: 1 }),
+        fetchCollectionDocs(positionCollection, {}, { lastTradedAt: 1 }),
+        fetchSingleDoc(portfolioCollection, {}, { updatedAt: -1 }),
+        fetchCollectionDocs(
+            getCopyIntentBufferCollectionName(userAddress, runtimeNamespace),
+            {},
+            { sourceStartedAt: 1 }
+        ),
+        fetchCollectionDocs(
+            getCopyExecutionBatchCollectionName(userAddress, runtimeNamespace),
+            {},
+            { sourceStartedAt: 1 }
+        ),
+    ]);
     const settlement = await fetchPolymarketPositions(settlementWallet);
     const settlementExecutions = executions.filter(
         (execution) => execution.status === 'FILLED' && execution.executionCondition === 'settle'
     );
+    const batchSummary = summarizeExecutionBatches(batches);
+    const bufferSummary = summarizeIntentBuffers(buffers);
     const settlementSummary = Array.isArray(settlement.positions)
         ? summarizeTraceSettlement(positions, settlement.positions)
         : {
@@ -366,6 +593,8 @@ const summarizeTraceMode = async ({ userAddress, traceId, settlementWallet }) =>
             ).length,
             settlementCount: settlementExecutions.length,
         },
+        batchSummary,
+        bufferSummary,
         pnlSummary: portfolio
             ? {
                   initialBalance: toSafeNumber(portfolio.initialBalance),
@@ -383,7 +612,11 @@ const summarizeTraceMode = async ({ userAddress, traceId, settlementWallet }) =>
             autoSettledCount: settlementExecutions.length,
             autoSettledValue: sumBy(settlementExecutions, (execution) => execution.executedUsdc),
         },
-        failedItems: buildFailureItems(executions, (execution) => execution.status || 'UNKNOWN'),
+        failedItems: mergeAttentionItems(
+            buildFailureItems(executions, (execution) => execution.status || 'UNKNOWN'),
+            buildBatchAttentionItems(batches),
+            buildBufferAttentionItems(buffers)
+        ),
         warnings: settlement.error
             ? [
                   `${settlement.error}；trace 模式下仍已输出本地账本统计，Polymarket 结算对照可能不完整`,
@@ -410,9 +643,18 @@ const printHumanReadable = (summary) => {
 
     lines.push('');
     lines.push('交易统计');
-    lines.push(`- 买入次数: ${toSafeNumber(summary.recordSummary.buyCount)}`);
-    lines.push(`- 卖出次数: ${toSafeNumber(summary.recordSummary.sellCount)}`);
-    lines.push(`- Merge 次数: ${toSafeNumber(summary.recordSummary.mergeCount)}`);
+    if (summary.sourceTradeSummary) {
+        lines.push(`- 源交易总数: ${toSafeNumber(summary.sourceTradeSummary.totalCount)}`);
+        lines.push(
+            `- 源 BUY/SELL/MERGE: ` +
+                `${toSafeNumber(summary.sourceTradeSummary.buyCount)}/` +
+                `${toSafeNumber(summary.sourceTradeSummary.sellCount)}/` +
+                `${toSafeNumber(summary.sourceTradeSummary.mergeCount)}`
+        );
+    }
+    lines.push(`- 执行买入次数: ${toSafeNumber(summary.recordSummary.buyCount)}`);
+    lines.push(`- 执行卖出次数: ${toSafeNumber(summary.recordSummary.sellCount)}`);
+    lines.push(`- 执行 Merge 次数: ${toSafeNumber(summary.recordSummary.mergeCount)}`);
     if (summary.recordSummary.settlementCount !== undefined) {
         lines.push(`- 自动结算次数: ${toSafeNumber(summary.recordSummary.settlementCount)}`);
     }
@@ -426,6 +668,36 @@ const printHumanReadable = (summary) => {
 
     if (summary.recordSummary.pendingCount !== undefined) {
         lines.push(`- 待处理次数: ${toSafeNumber(summary.recordSummary.pendingCount)}`);
+    }
+    if (summary.recordSummary.bufferedCount !== undefined) {
+        lines.push(`- 缓冲中源交易数: ${toSafeNumber(summary.recordSummary.bufferedCount)}`);
+    }
+    if (summary.recordSummary.batchedCount !== undefined) {
+        lines.push(`- 已入批次源交易数: ${toSafeNumber(summary.recordSummary.batchedCount)}`);
+    }
+    if (summary.batchSummary?.totalCount) {
+        lines.push(
+            `- 批次 READY/PROCESSING/SUBMITTED/CONFIRMED/SKIPPED/FAILED: ` +
+                `${toSafeNumber(summary.batchSummary.readyCount)}/` +
+                `${toSafeNumber(summary.batchSummary.processingCount)}/` +
+                `${toSafeNumber(summary.batchSummary.submittedCount)}/` +
+                `${toSafeNumber(summary.batchSummary.confirmedCount)}/` +
+                `${toSafeNumber(summary.batchSummary.skippedCount)}/` +
+                `${toSafeNumber(summary.batchSummary.failedCount)}`
+        );
+        lines.push(`- 批次覆盖源交易数: ${toSafeNumber(summary.batchSummary.sourceTradeCount)}`);
+    }
+    if (summary.bufferSummary?.totalCount) {
+        lines.push(
+            `- 缓冲区 OPEN/FLUSHING/SKIPPED/CLOSED: ` +
+                `${toSafeNumber(summary.bufferSummary.openCount)}/` +
+                `${toSafeNumber(summary.bufferSummary.flushingCount)}/` +
+                `${toSafeNumber(summary.bufferSummary.skippedCount)}/` +
+                `${toSafeNumber(summary.bufferSummary.closedCount)}`
+        );
+        lines.push(
+            `- 活跃缓冲区内源交易数: ${toSafeNumber(summary.bufferSummary.activeSourceTradeCount)}`
+        );
     }
 
     lines.push('');
@@ -458,7 +730,7 @@ const printHumanReadable = (summary) => {
     });
 
     lines.push('');
-    lines.push('失败项');
+    lines.push('异常与待处理项');
     if (!summary.failedItems.length) {
         lines.push('- 无');
     } else {
