@@ -25,6 +25,7 @@ import postOrder, { PostOrderResult } from '../utils/postOrder';
 import resolveTradeCondition from '../utils/resolveTradeCondition';
 import spinner from '../utils/spinner';
 import createLogger from '../utils/logger';
+import { normalizeOutcomeLabel } from '../utils/polymarketMarketResolution';
 
 const USER_ADDRESS = ENV.USER_ADDRESS;
 const PROXY_WALLET = ENV.PROXY_WALLET;
@@ -47,7 +48,11 @@ const findPositionForTrade = (
             position.conditionId === trade.conditionId &&
             position.outcomeIndex === trade.outcomeIndex
     ) ||
-    positions.find((position) => position.conditionId === trade.conditionId);
+    positions.find(
+        (position) =>
+            position.conditionId === trade.conditionId &&
+            normalizeOutcomeLabel(position.outcome) === normalizeOutcomeLabel(trade.outcome)
+    );
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -998,9 +1003,7 @@ const confirmSubmittedBatch = async (
         );
         logger.info(
             `${formatBatchRef(batch)} ${formatTerminalStatus(finalStatus)} ` +
-                (normalizedConfirmation.reason
-                    ? `reason=${normalizedConfirmation.reason}`
-                    : '')
+                (normalizedConfirmation.reason ? `reason=${normalizedConfirmation.reason}` : '')
         );
     } catch (error) {
         logger.error(`${formatBatchRef(batch)} 确认异常`, error);
@@ -1061,7 +1064,10 @@ const validateTradeForExecution = (trade: UserActivityInterface) => {
         };
     }
 
-    if (String(trade.side || '').toUpperCase() === 'BUY' && !Number.isFinite(trade.sourceBalanceAfterTrade)) {
+    if (
+        String(trade.side || '').toUpperCase() === 'BUY' &&
+        !Number.isFinite(trade.sourceBalanceAfterTrade)
+    ) {
         return {
             status: 'RETRY' as const,
             reason: '缺少源账户余额快照',
@@ -1077,9 +1083,7 @@ const validateTradeForExecution = (trade: UserActivityInterface) => {
 const appendTradeToBuyBuffer = async (trade: UserActivityInterface) => {
     const now = Date.now();
     const bufferKey = buildBuyBufferKey(trade);
-    const trail = [
-        buildPolicyTrailEntry('source-trade-merge', 'DEFER', '已加入买单累计缓冲区'),
-    ];
+    const trail = [buildPolicyTrailEntry('source-trade-merge', 'DEFER', '已加入买单累计缓冲区')];
     const existingBuffer = (await CopyIntentBuffer.findOne({
         bufferKey,
         state: 'OPEN',
@@ -1109,7 +1113,12 @@ const appendTradeToBuyBuffer = async (trade: UserActivityInterface) => {
             policyTrail: trail,
             completedAt: 0,
         });
-        await updateBufferedActivities([trade._id], createdBuffer._id, '已加入买单累计缓冲区', trail);
+        await updateBufferedActivities(
+            [trade._id],
+            createdBuffer._id,
+            '已加入买单累计缓冲区',
+            trail
+        );
         return;
     }
 
@@ -1175,13 +1184,7 @@ const cancelOpenBuyBuffersForAsset = async (
     for (const buffer of buffers) {
         const mergedTrail = mergePolicyTrail(buffer.policyTrail, trail);
         await closeBuffer(buffer, 'SKIPPED', reason, mergedTrail);
-        await finalizeActivitiesByIds(
-            buffer.sourceTradeIds,
-            'SKIPPED',
-            reason,
-            null,
-            mergedTrail
-        );
+        await finalizeActivitiesByIds(buffer.sourceTradeIds, 'SKIPPED', reason, null, mergedTrail);
     }
 };
 
@@ -1236,13 +1239,9 @@ const createBatchFromSingleTrade = async (trade: UserActivityInterface) => {
     const batch = await CopyExecutionBatch.create({
         sourceWallet: USER_ADDRESS,
         status: 'READY',
-        condition: resolveTradeCondition(
-            trade.side,
-            undefined,
-            {
-                size: trade.sourcePositionSizeAfterTrade,
-            }
-        ),
+        condition: resolveTradeCondition(trade.side, undefined, {
+            size: trade.sourcePositionSizeAfterTrade,
+        }),
         asset: trade.asset,
         conditionId: trade.conditionId,
         title: trade.title,
@@ -1300,7 +1299,12 @@ const flushReadyBuffers = async (clobClient: ClobClient) => {
 
         const trades = await loadTradesByIds(buffer.sourceTradeIds);
         if (trades.length === 0) {
-            await closeBuffer(buffer, 'SKIPPED', '累计缓冲缺少关联源交易', buffer.policyTrail || []);
+            await closeBuffer(
+                buffer,
+                'SKIPPED',
+                '累计缓冲缺少关联源交易',
+                buffer.policyTrail || []
+            );
             continue;
         }
 
@@ -1326,7 +1330,9 @@ const flushReadyBuffers = async (clobClient: ClobClient) => {
                 null,
                 mergedTrail
             );
-            logger.info(`${formatBatchRef({ asset: buffer.asset, condition: 'buy', sourceTradeCount: buffer.sourceTradeCount })} 已跳过 reason=${evaluation.reason}`);
+            logger.info(
+                `${formatBatchRef({ asset: buffer.asset, condition: 'buy', sourceTradeCount: buffer.sourceTradeCount })} 已跳过 reason=${evaluation.reason}`
+            );
             continue;
         }
 

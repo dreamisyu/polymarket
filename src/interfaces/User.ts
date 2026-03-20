@@ -62,6 +62,8 @@ export interface UserActivityInterface {
     sourcePositionSizeAfterTrade?: number;
     sourcePositionSizeBeforeTrade?: number;
     sourcePositionPriceAfterTrade?: number;
+    sourceConditionMergeableSizeAfterTrade?: number;
+    sourceConditionMergeableSizeBeforeTrade?: number;
     sourceSnapshotCapturedAt?: number;
     snapshotStatus?: SnapshotStatus;
     sourceSnapshotReason?: string;

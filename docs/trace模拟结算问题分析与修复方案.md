@@ -1,5 +1,24 @@
 # trace 模拟结算问题分析与修复方案
 
+## 0. 当前实施状态
+
+截至 `2026-03-20`，阶段 1-3 已按“允许破坏性重构”的方式落地到 trace 执行链路，核心变化如下：
+
+- `MERGE` / `REDEEM` 在 `trace` 模式下不再落为纯 `SYNC_ONLY`
+- trace 空闲同步改为按 `conditionId` 独立查询市场是否 `resolved` 以及实际 `winner`
+- 已结算市场改为按 `winner=1 / loser=0` 做 condition 级自动结算，不再依赖源钱包当前 `positions` 里是否还能看到 `redeemable`
+- 本地持仓价格同步已删除“只按 `conditionId` 匹配”的兜底，避免 outcome 串边
+- trace 持仓/执行模型新增了 `marketSlug`、`outcomeIndex`、`winnerOutcome` 等字段，用于支持 condition 级结算和更严格的匹配
+- 未 resolved 市场中的 `MERGE` 已支持按源账户 complete-set 比例执行 condition 级 merge，不再一律跳过
+
+本次改动属于破坏性重构，建议在启用新逻辑前手动清理旧 trace 数据集，避免历史脏数据与新账本契约混用。
+
+当前剩余的主要风险不再是账本契约缺失，而是数据源稳定性：
+
+- market resolution 目前仍通过 Polymarket 市场页元数据解析
+- 如果页面结构或元标签格式变化，`resolved / winner` 解析可能需要跟进调整
+- 后续如果 Polymarket 提供更稳定的官方 market API，建议替换成结构化接口
+
 ## 1. 分析范围
 
 - 分析时间：2026-03-20

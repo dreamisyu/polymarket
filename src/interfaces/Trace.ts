@@ -22,8 +22,10 @@ export interface TraceExecutionInterface {
     reason: string;
     asset: string;
     conditionId: string;
+    marketSlug?: string;
     title: string;
     outcome: string;
+    winnerOutcome?: string;
     requestedSize: number;
     executedSize: number;
     requestedUsdc: number;
@@ -51,8 +53,10 @@ export interface TracePositionInterface {
     sourceWallet: string;
     asset: string;
     conditionId: string;
+    marketSlug: string;
     title: string;
     outcome: string;
+    outcomeIndex: number;
     side: string;
     size: number;
     avgPrice: number;

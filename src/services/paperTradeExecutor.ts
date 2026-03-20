@@ -9,7 +9,11 @@ import { TracePortfolioInterface, TracePositionInterface } from '../interfaces/T
 import { UserActivityInterface, UserPositionInterface } from '../interfaces/User';
 import { ENV } from '../config/env';
 import { getCopyExecutionBatchModel, getCopyIntentBufferModel } from '../models/copyExecution';
-import { getTraceExecutionModel, getTracePortfolioModel, getTracePositionModel } from '../models/traceHistory';
+import {
+    getTraceExecutionModel,
+    getTracePortfolioModel,
+    getTracePositionModel,
+} from '../models/traceHistory';
 import { getUserActivityModel } from '../models/userHistory';
 import ClobMarketStream from './clobMarketStream';
 import {
@@ -24,8 +28,19 @@ import {
     cloneMarketSnapshot,
     consumeMarketLiquidity,
 } from '../utils/executionPlanning';
+import {
+    buildConditionOutcomeKey,
+    computeConditionMergeableSize,
+} from '../utils/conditionPositionMath';
 import fetchData from '../utils/fetchData';
 import createLogger from '../utils/logger';
+import {
+    buildPolymarketMarketSlugFromTitle,
+    fetchPolymarketMarketResolution,
+    isResolvedPolymarketMarket,
+    normalizeOutcomeLabel,
+    PolymarketMarketResolution,
+} from '../utils/polymarketMarketResolution';
 import resolveTradeCondition from '../utils/resolveTradeCondition';
 import spinner from '../utils/spinner';
 
@@ -47,10 +62,33 @@ const EPSILON = 1e-8;
 const SETTLEMENT_PRICE = 1;
 const PROCESSING_LEASE_MS = ENV.PROCESSING_LEASE_MS;
 const SOURCE_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}&sizeThreshold=0`;
+const TRACE_PORTFOLIO_SYNC_INTERVAL_MS = 15_000;
+const RESOLUTION_CACHE_RESOLVED_TTL_MS = 10 * 60_000;
+const RESOLUTION_CACHE_UNRESOLVED_TTL_MS = 30_000;
+const resolutionCache = new Map<
+    string,
+    {
+        checkedAt: number;
+        resolution: PolymarketMarketResolution | null;
+    }
+>();
 
 type ExecutionStatus = 'FILLED' | 'SKIPPED';
 type TracePortfolioDocument = HydratedDocument<TracePortfolioInterface>;
 type TracePositionDocument = HydratedDocument<TracePositionInterface>;
+
+interface ConditionMetadata {
+    conditionId: string;
+    marketSlug: string;
+    title: string;
+}
+
+interface ConditionSettlementOutcome {
+    status: 'FILLED' | 'SKIPPED';
+    reason: string;
+    resolution: PolymarketMarketResolution | null;
+    positionSizeBefore?: number;
+}
 
 interface ExecutionResult {
     status: ExecutionStatus;
@@ -123,7 +161,8 @@ const buildClaimableFilter = (fieldName: string, leaseCutoff: number) => ({
         { [fieldName]: { $lt: leaseCutoff } },
     ],
 });
-const getBatchExecutionKey = (batchId: CopyExecutionBatchInterface['_id']) => `batch:${String(batchId)}`;
+const getBatchExecutionKey = (batchId: CopyExecutionBatchInterface['_id']) =>
+    `batch:${String(batchId)}`;
 
 const updatePositionMark = (position: TracePositionDocument, marketPrice: number) => {
     if (!position || marketPrice <= 0) {
@@ -216,8 +255,10 @@ const createEmptyPosition = (trade: UserActivityInterface): TracePositionDocumen
         sourceWallet: USER_ADDRESS,
         asset: trade.asset,
         conditionId: trade.conditionId,
+        marketSlug: String(trade.eventSlug || trade.slug || '').trim(),
         title: trade.title,
         outcome: trade.outcome,
+        outcomeIndex: Number.isFinite(trade.outcomeIndex) ? trade.outcomeIndex : -1,
         side: trade.side,
         size: 0,
         avgPrice: 0,
@@ -236,15 +277,23 @@ const createEmptyPosition = (trade: UserActivityInterface): TracePositionDocumen
 
 const matchUserPosition = (
     userPositions: UserPositionInterface[],
-    tracePosition: Pick<TracePositionInterface, 'asset' | 'conditionId' | 'outcome'>
+    tracePosition: Pick<
+        TracePositionInterface,
+        'asset' | 'conditionId' | 'outcome' | 'outcomeIndex'
+    >
 ) =>
     userPositions.find((userPosition) => userPosition.asset === tracePosition.asset) ||
     userPositions.find(
         (userPosition) =>
             userPosition.conditionId === tracePosition.conditionId &&
-            userPosition.outcome === tracePosition.outcome
+            userPosition.outcomeIndex === tracePosition.outcomeIndex
     ) ||
-    userPositions.find((userPosition) => userPosition.conditionId === tracePosition.conditionId);
+    userPositions.find(
+        (userPosition) =>
+            userPosition.conditionId === tracePosition.conditionId &&
+            normalizeOutcomeLabel(userPosition.outcome) ===
+                normalizeOutcomeLabel(tracePosition.outcome)
+    );
 
 const fetchSourcePositions = async () => {
     const userPositionsRaw = await fetchData<UserPositionInterface[]>(SOURCE_POSITIONS_URL);
@@ -275,6 +324,172 @@ const refreshOpenPositionMarks = async (userPositions: UserPositionInterface[]) 
         updatePositionMark(tracePosition, nextMarketPrice);
         await tracePosition.save();
     }
+};
+
+const getConditionSettlementExecutionKey = (conditionId: string) =>
+    `condition-settlement:${conditionId}`;
+const getConditionTriggerExecutionKey = (trade: UserActivityInterface) =>
+    `condition-trigger:${trade.activityKey || trade.transactionHash || String(trade._id)}`;
+
+const loadConditionMetadataFromSource = async (conditionId: string): Promise<ConditionMetadata> => {
+    const sourceActivity = (await SourceActivity.findOne(
+        { conditionId },
+        {
+            conditionId: 1,
+            title: 1,
+            slug: 1,
+            eventSlug: 1,
+            timestamp: 1,
+        }
+    )
+        .sort({ timestamp: -1 })
+        .exec()) as Pick<
+        UserActivityInterface,
+        'conditionId' | 'title' | 'slug' | 'eventSlug'
+    > | null;
+
+    const title = String(sourceActivity?.title || '').trim();
+    const marketSlug = String(sourceActivity?.eventSlug || sourceActivity?.slug || '').trim();
+
+    return {
+        conditionId,
+        marketSlug: marketSlug || buildPolymarketMarketSlugFromTitle(title),
+        title,
+    };
+};
+
+const resolveConditionMetadata = async (
+    conditionId: string,
+    positions: Array<Pick<TracePositionInterface, 'conditionId' | 'marketSlug' | 'title'>>,
+    triggerTrades: Array<
+        Pick<UserActivityInterface, 'conditionId' | 'title' | 'slug' | 'eventSlug'>
+    > = []
+): Promise<ConditionMetadata> => {
+    const triggerWithSlug = triggerTrades.find(
+        (trade) => String(trade.eventSlug || trade.slug || '').trim() !== ''
+    );
+    const positionWithSlug = positions.find(
+        (position) => String(position.marketSlug || '').trim() !== ''
+    );
+    const title = String(
+        triggerWithSlug?.title || positionWithSlug?.title || positions[0]?.title || ''
+    ).trim();
+    const marketSlug = String(
+        triggerWithSlug?.eventSlug || triggerWithSlug?.slug || positionWithSlug?.marketSlug || ''
+    ).trim();
+
+    if (marketSlug || title) {
+        return {
+            conditionId,
+            marketSlug: marketSlug || buildPolymarketMarketSlugFromTitle(title),
+            title,
+        };
+    }
+
+    return loadConditionMetadataFromSource(conditionId);
+};
+
+const loadConditionResolution = async (metadata: ConditionMetadata) => {
+    if (!metadata.marketSlug) {
+        return null;
+    }
+
+    const cached = resolutionCache.get(metadata.conditionId);
+    if (cached?.resolution?.marketSlug === metadata.marketSlug) {
+        const ttl = isResolvedPolymarketMarket(cached.resolution)
+            ? RESOLUTION_CACHE_RESOLVED_TTL_MS
+            : RESOLUTION_CACHE_UNRESOLVED_TTL_MS;
+        if (Date.now() - cached.checkedAt < ttl) {
+            return cached.resolution;
+        }
+    }
+
+    const resolution = await fetchPolymarketMarketResolution(metadata.marketSlug);
+    resolutionCache.set(metadata.conditionId, {
+        checkedAt: Date.now(),
+        resolution,
+    });
+    return resolution;
+};
+
+const mergeStringArrays = (...values: string[][]) => [
+    ...new Set(
+        values
+            .flatMap((items) => items)
+            .map((item) => String(item || '').trim())
+            .filter(Boolean)
+    ),
+];
+
+const mergeActivityIds = (...values: Array<Array<unknown>>) => {
+    const merged = new Map<string, unknown>();
+    for (const items of values) {
+        for (const item of items) {
+            const key = String(item || '').trim();
+            if (!key || merged.has(key)) {
+                continue;
+            }
+
+            merged.set(key, item);
+        }
+    }
+
+    return [...merged.values()] as UserActivityInterface['_id'][];
+};
+
+const loadConditionOutcomeKeys = async (
+    conditionId: string,
+    positions: Array<Pick<TracePositionInterface, 'asset' | 'outcomeIndex' | 'outcome'>>,
+    triggerTrades: Array<Pick<UserActivityInterface, 'asset' | 'outcomeIndex' | 'outcome'>> = []
+) => {
+    const keys = new Set<string>();
+    const registerOutcomeKey = (item: {
+        asset?: string;
+        outcomeIndex?: number;
+        outcome?: string;
+    }) => {
+        const outcomeKey = buildConditionOutcomeKey(item);
+        if (outcomeKey) {
+            keys.add(outcomeKey);
+        }
+    };
+
+    positions.forEach(registerOutcomeKey);
+    triggerTrades.forEach(registerOutcomeKey);
+
+    const sourceTrades = (await SourceActivity.find(
+        {
+            conditionId,
+            asset: { $exists: true, $ne: '' },
+        },
+        {
+            asset: 1,
+            outcomeIndex: 1,
+            outcome: 1,
+        }
+    )
+        .limit(16)
+        .exec()) as Array<Pick<UserActivityInterface, 'asset' | 'outcomeIndex' | 'outcome'>>;
+    sourceTrades.forEach(registerOutcomeKey);
+
+    return [...keys];
+};
+
+const computeLocalConditionMergeableSize = (
+    positions: Array<Pick<TracePositionInterface, 'asset' | 'outcomeIndex' | 'outcome' | 'size'>>,
+    outcomeKeys: string[]
+) => {
+    const sizeByOutcomeKey = new Map<string, number>();
+    for (const position of positions) {
+        const outcomeKey = buildConditionOutcomeKey(position);
+        if (!outcomeKey) {
+            continue;
+        }
+
+        sizeByOutcomeKey.set(outcomeKey, Math.max(toSafeNumber(position.size), 0));
+    }
+
+    return computeConditionMergeableSize(outcomeKeys, sizeByOutcomeKey);
 };
 
 const simulateTradeAgainstMarket = async (params: {
@@ -308,8 +523,12 @@ const simulateTradeAgainstMarket = async (params: {
     let finalReason = '';
 
     position.conditionId = trade.conditionId;
+    position.marketSlug = String(trade.eventSlug || trade.slug || position.marketSlug || '').trim();
     position.title = trade.title;
     position.outcome = trade.outcome;
+    position.outcomeIndex = Number.isFinite(trade.outcomeIndex)
+        ? trade.outcomeIndex
+        : position.outcomeIndex;
     position.side = trade.side;
     position.lastSourceTransactionHash = trade.transactionHash;
     position.lastTradedAt = trade.timestamp;
@@ -446,7 +665,8 @@ const simulateTradeAgainstMarket = async (params: {
                 condition === 'buy'
                     ? Math.max(
                           totalExecutedSize,
-                          (executionTarget?.requestedUsdc || 0) / Math.max(lastExecutionPrice, EPSILON)
+                          (executionTarget?.requestedUsdc || 0) /
+                              Math.max(lastExecutionPrice, EPSILON)
                       )
                     : executionTarget?.requestedSize !== undefined
                       ? executionTarget.requestedSize
@@ -457,7 +677,8 @@ const simulateTradeAgainstMarket = async (params: {
                     ? executionTarget?.requestedUsdc !== undefined
                         ? executionTarget.requestedUsdc
                         : totalExecutedUsdc + Math.max(remainingRequestedUsdc || 0, 0)
-                    : totalExecutedUsdc + Math.max(remainingRequestedSize || 0, 0) * Math.max(lastExecutionPrice, 0),
+                    : totalExecutedUsdc +
+                      Math.max(remainingRequestedSize || 0, 0) * Math.max(lastExecutionPrice, 0),
             executedUsdc: totalExecutedUsdc,
             executionPrice: lastExecutionPrice,
             cashBefore,
@@ -495,125 +716,547 @@ const syncPortfolioAfterExecution = async (
     return metrics;
 };
 
-const autoSettleRedeemablePositions = async (
-    portfolio: TracePortfolioDocument,
-    userPositions: UserPositionInterface[]
+const attachTriggerTradesToConditionExecution = async (
+    executionKey: string,
+    triggerTrades: UserActivityInterface[]
 ) => {
-    const activePositions = (await TracePosition.find({
-        size: { $gt: 0 },
-    }).exec()) as TracePositionDocument[];
-    let settledCount = 0;
+    if (triggerTrades.length === 0) {
+        return false;
+    }
 
-    for (const tracePosition of activePositions) {
-        const matchedUserPosition = matchUserPosition(userPositions, tracePosition);
-        if (!matchedUserPosition?.redeemable) {
-            continue;
+    const existingExecution = (await TraceExecution.findOne(
+        { sourceActivityKey: executionKey },
+        {
+            sourceActivityId: 1,
+            sourceActivityIds: 1,
+            sourceActivityKeys: 1,
+            sourceTransactionHashes: 1,
+            sourceStartedAt: 1,
+            sourceEndedAt: 1,
+            sourceTimestamp: 1,
         }
+    ).exec()) as {
+        sourceActivityId?: UserActivityInterface['_id'];
+        sourceActivityIds?: UserActivityInterface['_id'][];
+        sourceActivityKeys?: string[];
+        sourceTransactionHashes?: string[];
+        sourceStartedAt?: number;
+        sourceEndedAt?: number;
+        sourceTimestamp?: number;
+    } | null;
+    if (!existingExecution) {
+        return false;
+    }
 
+    const orderedTrades = sortTradesAsc(triggerTrades);
+    const latestTrade = orderedTrades[orderedTrades.length - 1];
+    const firstTrade = orderedTrades[0];
+    const mergedActivityIds = mergeActivityIds(
+        existingExecution.sourceActivityId ? [existingExecution.sourceActivityId] : [],
+        existingExecution.sourceActivityIds || [],
+        orderedTrades.map((trade) => trade._id)
+    );
+
+    await TraceExecution.updateOne(
+        { sourceActivityKey: executionKey },
+        {
+            $set: {
+                sourceActivityId: mergedActivityIds[0],
+                sourceActivityIds: mergedActivityIds,
+                sourceActivityKeys: mergeStringArrays(
+                    existingExecution.sourceActivityKeys || [],
+                    orderedTrades.map((trade) => trade.activityKey || trade.transactionHash)
+                ),
+                sourceTransactionHash: latestTrade?.transactionHash || executionKey,
+                sourceTransactionHashes: mergeStringArrays(
+                    existingExecution.sourceTransactionHashes || [],
+                    orderedTrades.map((trade) => trade.transactionHash)
+                ),
+                sourceTradeCount: mergedActivityIds.length,
+                sourceTimestamp: Math.max(
+                    toSafeNumber(existingExecution.sourceTimestamp),
+                    toSafeNumber(latestTrade?.timestamp)
+                ),
+                sourceStartedAt: Math.min(
+                    toSafeNumber(existingExecution.sourceStartedAt, Number.MAX_SAFE_INTEGER),
+                    toSafeNumber(firstTrade?.timestamp, Number.MAX_SAFE_INTEGER)
+                ),
+                sourceEndedAt: Math.max(
+                    toSafeNumber(existingExecution.sourceEndedAt),
+                    toSafeNumber(latestTrade?.timestamp)
+                ),
+            },
+        }
+    );
+
+    return true;
+};
+
+const recordSkippedConditionTrigger = async (params: {
+    portfolio: TracePortfolioDocument;
+    trade: UserActivityInterface;
+    reason: string;
+    positionSizeBefore: number;
+    metadata: ConditionMetadata;
+    resolution: PolymarketMarketResolution | null;
+}) => {
+    const { portfolio, trade, reason, positionSizeBefore, metadata, resolution } = params;
+    const cashBefore = toSafeNumber(portfolio.cashBalance);
+    const completedAt = Date.now();
+
+    await syncPortfolioAfterExecution(
+        portfolio,
+        {
+            referenceHash: trade.transactionHash,
+            timestamp: trade.timestamp,
+        },
+        'SKIPPED'
+    );
+
+    await TraceExecution.updateOne(
+        {
+            sourceActivityKey: getConditionTriggerExecutionKey(trade),
+        },
+        {
+            $set: {
+                traceId: TRACE_ID,
+                traceLabel: TRACE_LABEL,
+                sourceWallet: USER_ADDRESS,
+                sourceActivityId: trade._id,
+                sourceActivityIds: [trade._id],
+                sourceActivityKey: getConditionTriggerExecutionKey(trade),
+                sourceActivityKeys: [trade.activityKey || trade.transactionHash],
+                sourceTransactionHash: trade.transactionHash,
+                sourceTransactionHashes: [trade.transactionHash],
+                sourceTradeCount: 1,
+                sourceTimestamp: trade.timestamp,
+                sourceStartedAt: trade.timestamp,
+                sourceEndedAt: trade.timestamp,
+                sourceSide: trade.type || trade.side || 'SETTLE',
+                executionCondition: 'reconcile',
+                status: 'SKIPPED',
+                reason,
+                asset: '',
+                conditionId: trade.conditionId,
+                marketSlug: metadata.marketSlug,
+                title: metadata.title || trade.title,
+                outcome: '',
+                winnerOutcome: resolution?.winnerOutcome || '',
+                requestedSize: positionSizeBefore,
+                executedSize: 0,
+                requestedUsdc: 0,
+                executedUsdc: 0,
+                executionPrice: 0,
+                cashBefore,
+                cashAfter: toSafeNumber(portfolio.cashBalance),
+                positionSizeBefore,
+                positionSizeAfter: positionSizeBefore,
+                realizedPnlDelta: 0,
+                realizedPnlTotal: toSafeNumber(portfolio.realizedPnl),
+                unrealizedPnlAfter: toSafeNumber(portfolio.unrealizedPnl),
+                totalEquityAfter: toSafeNumber(portfolio.totalEquity),
+                claimedAt: completedAt,
+                completedAt,
+            },
+        },
+        {
+            upsert: true,
+        }
+    );
+};
+
+const settleTraceCondition = async (params: {
+    portfolio: TracePortfolioDocument;
+    conditionId: string;
+    positions?: TracePositionDocument[];
+    triggerTrades?: UserActivityInterface[];
+}): Promise<ConditionSettlementOutcome> => {
+    const { portfolio, conditionId, triggerTrades = [] } = params;
+    const settlementExecutionKey = getConditionSettlementExecutionKey(conditionId);
+    if (await attachTriggerTradesToConditionExecution(settlementExecutionKey, triggerTrades)) {
+        return {
+            status: 'FILLED',
+            reason: 'condition 已完成结算，已补挂 source activity 关联',
+            resolution: null,
+        };
+    }
+
+    const positions =
+        params.positions ||
+        ((await TracePosition.find({
+            conditionId,
+            size: { $gt: 0 },
+        }).exec()) as TracePositionDocument[]);
+    if (positions.length === 0) {
+        return {
+            status: 'SKIPPED',
+            reason: '本地无可结算的未平仓位',
+            resolution: null,
+        };
+    }
+
+    const metadata = await resolveConditionMetadata(conditionId, positions, triggerTrades);
+    const resolution = await loadConditionResolution(metadata);
+    if (!isResolvedPolymarketMarket(resolution)) {
+        return {
+            status: 'SKIPPED',
+            reason: '市场尚未 resolved 或缺少 winner，暂不执行 condition 级结算',
+            resolution,
+        };
+    }
+
+    const winnerOutcome = normalizeOutcomeLabel(resolution?.winnerOutcome || '');
+    const totalPositionSizeBefore = positions.reduce(
+        (sum, position) => sum + toSafeNumber(position.size),
+        0
+    );
+    const cashBefore = toSafeNumber(portfolio.cashBalance);
+    const settledAt = Date.now();
+    const orderedTrades = sortTradesAsc(triggerTrades);
+    const latestTriggerTrade = orderedTrades[orderedTrades.length - 1];
+    const firstTriggerTrade = orderedTrades[0];
+
+    let totalExecutedUsdc = 0;
+    let totalRealizedPnlDelta = 0;
+
+    for (const tracePosition of positions) {
         const positionSizeBefore = toSafeNumber(tracePosition.size);
         if (positionSizeBefore <= 0) {
             continue;
         }
 
-        const settledAt = Date.now();
-        const settlementExecutionId = `settlement:${tracePosition.asset}`;
-        const cashBefore = toSafeNumber(portfolio.cashBalance);
-        const executedUsdc = positionSizeBefore * SETTLEMENT_PRICE;
+        const isWinningOutcome = normalizeOutcomeLabel(tracePosition.outcome) === winnerOutcome;
+        const executedUsdc = isWinningOutcome ? positionSizeBefore * SETTLEMENT_PRICE : 0;
         const realizedPnlDelta = executedUsdc - toSafeNumber(tracePosition.costBasis);
 
-        portfolio.cashBalance = cashBefore + executedUsdc;
-        portfolio.realizedPnl = toSafeNumber(portfolio.realizedPnl) + realizedPnlDelta;
+        totalExecutedUsdc += executedUsdc;
+        totalRealizedPnlDelta += realizedPnlDelta;
 
-        tracePosition.marketPrice = SETTLEMENT_PRICE;
+        tracePosition.marketSlug = metadata.marketSlug || tracePosition.marketSlug;
+        tracePosition.marketPrice = isWinningOutcome ? SETTLEMENT_PRICE : 0;
         tracePosition.size = 0;
         tracePosition.costBasis = 0;
         tracePosition.marketValue = 0;
         tracePosition.avgPrice = 0;
         tracePosition.unrealizedPnl = 0;
         tracePosition.realizedPnl = toSafeNumber(tracePosition.realizedPnl) + realizedPnlDelta;
-        tracePosition.lastSourceTransactionHash = settlementExecutionId;
+        tracePosition.lastSourceTransactionHash =
+            latestTriggerTrade?.transactionHash || settlementExecutionKey;
         tracePosition.lastTradedAt = settledAt;
         tracePosition.closedAt = settledAt;
         await tracePosition.save();
-
-        await syncPortfolioAfterExecution(
-            portfolio,
-            {
-                referenceHash: settlementExecutionId,
-                timestamp: settledAt,
-            },
-            'FILLED'
-        );
-
-        await TraceExecution.updateOne(
-            {
-                sourceActivityKey: settlementExecutionId,
-            },
-            {
-                $set: {
-                    traceId: TRACE_ID,
-                    traceLabel: TRACE_LABEL,
-                    sourceWallet: USER_ADDRESS,
-                    sourceActivityKey: settlementExecutionId,
-                    sourceActivityKeys: [settlementExecutionId],
-                    sourceTransactionHash: settlementExecutionId,
-                    sourceTransactionHashes: [settlementExecutionId],
-                    sourceTradeCount: 1,
-                    sourceTimestamp: settledAt,
-                    sourceStartedAt: settledAt,
-                    sourceEndedAt: settledAt,
-                    sourceSide: 'SETTLE',
-                    executionCondition: 'settle',
-                    status: 'FILLED',
-                    reason: '根据 Polymarket redeemable 状态自动结算',
-                    asset: tracePosition.asset,
-                    conditionId: tracePosition.conditionId,
-                    title: tracePosition.title,
-                    outcome: tracePosition.outcome,
-                    requestedSize: positionSizeBefore,
-                    executedSize: positionSizeBefore,
-                    requestedUsdc: executedUsdc,
-                    executedUsdc,
-                    executionPrice: SETTLEMENT_PRICE,
-                    cashBefore,
-                    cashAfter: toSafeNumber(portfolio.cashBalance),
-                    positionSizeBefore,
-                    positionSizeAfter: 0,
-                    realizedPnlDelta,
-                    realizedPnlTotal: toSafeNumber(portfolio.realizedPnl),
-                    unrealizedPnlAfter: toSafeNumber(portfolio.unrealizedPnl),
-                    totalEquityAfter: toSafeNumber(portfolio.totalEquity),
-                    claimedAt: settledAt,
-                    completedAt: settledAt,
-                },
-            },
-            {
-                upsert: true,
-            }
-        );
-
-        settledCount += 1;
-
-        logger.info(
-            `自动结算 asset=${tracePosition.asset} ` +
-                `size=${formatAmount(positionSizeBefore)} payout=${formatAmount(executedUsdc)}`
-        );
     }
 
-    return settledCount;
+    portfolio.cashBalance = cashBefore + totalExecutedUsdc;
+    portfolio.realizedPnl = toSafeNumber(portfolio.realizedPnl) + totalRealizedPnlDelta;
+
+    await syncPortfolioAfterExecution(
+        portfolio,
+        {
+            referenceHash: latestTriggerTrade?.transactionHash || settlementExecutionKey,
+            timestamp: latestTriggerTrade?.timestamp || settledAt,
+        },
+        'FILLED'
+    );
+
+    const existingExecution = (await TraceExecution.findOne(
+        { sourceActivityKey: settlementExecutionKey },
+        {
+            sourceActivityId: 1,
+            sourceActivityIds: 1,
+            sourceActivityKeys: 1,
+            sourceTransactionHashes: 1,
+        }
+    ).exec()) as {
+        sourceActivityId?: UserActivityInterface['_id'];
+        sourceActivityIds?: UserActivityInterface['_id'][];
+        sourceActivityKeys?: string[];
+        sourceTransactionHashes?: string[];
+    } | null;
+    const mergedActivityIds = mergeActivityIds(
+        existingExecution?.sourceActivityId ? [existingExecution.sourceActivityId] : [],
+        existingExecution?.sourceActivityIds || [],
+        orderedTrades.map((trade) => trade._id)
+    );
+
+    await TraceExecution.updateOne(
+        {
+            sourceActivityKey: settlementExecutionKey,
+        },
+        {
+            $set: {
+                traceId: TRACE_ID,
+                traceLabel: TRACE_LABEL,
+                sourceWallet: USER_ADDRESS,
+                sourceActivityId: mergedActivityIds[0],
+                sourceActivityIds: mergedActivityIds,
+                sourceActivityKey: settlementExecutionKey,
+                sourceActivityKeys: mergeStringArrays(
+                    existingExecution?.sourceActivityKeys || [],
+                    orderedTrades.map((trade) => trade.activityKey || trade.transactionHash)
+                ),
+                sourceTransactionHash:
+                    latestTriggerTrade?.transactionHash || settlementExecutionKey,
+                sourceTransactionHashes: mergeStringArrays(
+                    existingExecution?.sourceTransactionHashes || [],
+                    orderedTrades.map((trade) => trade.transactionHash)
+                ),
+                sourceTradeCount: mergedActivityIds.length,
+                sourceTimestamp: latestTriggerTrade?.timestamp || settledAt,
+                sourceStartedAt: firstTriggerTrade?.timestamp || settledAt,
+                sourceEndedAt: latestTriggerTrade?.timestamp || settledAt,
+                sourceSide: latestTriggerTrade?.type || 'SETTLE',
+                executionCondition: 'settle',
+                status: 'FILLED',
+                reason: `根据市场 resolved winner=${resolution?.winnerOutcome || 'unknown'} 自动执行 condition 级结算`,
+                asset: '',
+                conditionId,
+                marketSlug: metadata.marketSlug,
+                title: metadata.title || resolution?.title || positions[0]?.title || '',
+                outcome: resolution?.winnerOutcome || '',
+                winnerOutcome: resolution?.winnerOutcome || '',
+                requestedSize: totalPositionSizeBefore,
+                executedSize: totalPositionSizeBefore,
+                requestedUsdc: totalExecutedUsdc,
+                executedUsdc: totalExecutedUsdc,
+                executionPrice:
+                    totalPositionSizeBefore > 0 ? totalExecutedUsdc / totalPositionSizeBefore : 0,
+                cashBefore,
+                cashAfter: toSafeNumber(portfolio.cashBalance),
+                positionSizeBefore: totalPositionSizeBefore,
+                positionSizeAfter: 0,
+                realizedPnlDelta: totalRealizedPnlDelta,
+                realizedPnlTotal: toSafeNumber(portfolio.realizedPnl),
+                unrealizedPnlAfter: toSafeNumber(portfolio.unrealizedPnl),
+                totalEquityAfter: toSafeNumber(portfolio.totalEquity),
+                claimedAt: settledAt,
+                completedAt: settledAt,
+            },
+        },
+        {
+            upsert: true,
+        }
+    );
+
+    logger.info(
+        `condition=${conditionId} winner=${resolution?.winnerOutcome || 'unknown'} 自动结算 ` +
+            `size=${formatAmount(totalPositionSizeBefore)} payout=${formatAmount(totalExecutedUsdc)}`
+    );
+
+    return {
+        status: 'FILLED',
+        reason: '已按 resolved winner 完成 condition 级结算',
+        resolution,
+        positionSizeBefore: totalPositionSizeBefore,
+    };
+};
+
+const executeConditionMergeTrade = async (params: {
+    portfolio: TracePortfolioDocument;
+    trade: UserActivityInterface;
+    positions: TracePositionDocument[];
+    metadata: ConditionMetadata;
+    resolution: PolymarketMarketResolution | null;
+}): Promise<ConditionSettlementOutcome> => {
+    const { portfolio, trade, positions, metadata, resolution } = params;
+    const sourceMergeRequestedSize = Math.max(
+        toSafeNumber(trade.size),
+        toSafeNumber(trade.usdcSize)
+    );
+    const sourceMergeableBefore = Math.max(
+        toSafeNumber(
+            trade.sourceConditionMergeableSizeBeforeTrade,
+            toSafeNumber(trade.sourceConditionMergeableSizeAfterTrade) + sourceMergeRequestedSize
+        ),
+        0
+    );
+    const outcomeKeys = await loadConditionOutcomeKeys(trade.conditionId, positions, [trade]);
+    const localMergeableBefore = computeLocalConditionMergeableSize(positions, outcomeKeys);
+
+    if (sourceMergeRequestedSize <= EPSILON) {
+        return {
+            status: 'SKIPPED',
+            reason: '源 MERGE 数量无效，已跳过 condition 级 merge',
+            resolution,
+            positionSizeBefore: localMergeableBefore,
+        };
+    }
+
+    if (sourceMergeableBefore <= EPSILON) {
+        return {
+            status: 'SKIPPED',
+            reason: '缺少源账户 condition mergeable 快照，无法按比例复刻 MERGE',
+            resolution,
+            positionSizeBefore: localMergeableBefore,
+        };
+    }
+
+    if (localMergeableBefore <= EPSILON) {
+        return {
+            status: 'SKIPPED',
+            reason: '本地无可 merge 的 complete set',
+            resolution,
+            positionSizeBefore: 0,
+        };
+    }
+
+    const mergeRatio = Math.min(sourceMergeRequestedSize / sourceMergeableBefore, 1);
+    const localMergeRequestedSize = normalizeSize(localMergeableBefore * mergeRatio);
+    if (localMergeRequestedSize <= EPSILON) {
+        return {
+            status: 'SKIPPED',
+            reason: '按比例换算后的本地 merge 数量为 0',
+            resolution,
+            positionSizeBefore: localMergeableBefore,
+        };
+    }
+
+    const participatingPositions = positions.filter((position) => {
+        const outcomeKey = buildConditionOutcomeKey(position);
+        return outcomeKey && outcomeKeys.includes(outcomeKey) && toSafeNumber(position.size) > 0;
+    });
+    if (participatingPositions.length < 2) {
+        return {
+            status: 'SKIPPED',
+            reason: '本地缺少完整对手仓位，无法执行 condition 级 merge',
+            resolution,
+            positionSizeBefore: localMergeableBefore,
+        };
+    }
+
+    const cashBefore = toSafeNumber(portfolio.cashBalance);
+    const proceedsShare = localMergeRequestedSize / participatingPositions.length;
+    let totalRealizedPnlDelta = 0;
+
+    for (const position of participatingPositions) {
+        const positionSizeBefore = Math.max(toSafeNumber(position.size), 0);
+        const releasedCostBasis =
+            positionSizeBefore > 0
+                ? toSafeNumber(position.costBasis) * (localMergeRequestedSize / positionSizeBefore)
+                : 0;
+        const realizedPnlDelta = proceedsShare - releasedCostBasis;
+
+        position.size = normalizeSize(positionSizeBefore - localMergeRequestedSize);
+        position.costBasis = normalizeSize(toSafeNumber(position.costBasis) - releasedCostBasis);
+        position.realizedPnl = toSafeNumber(position.realizedPnl) + realizedPnlDelta;
+        position.totalSoldSize = toSafeNumber(position.totalSoldSize) + localMergeRequestedSize;
+        position.totalSoldUsdc = toSafeNumber(position.totalSoldUsdc) + proceedsShare;
+        position.lastSourceTransactionHash = trade.transactionHash;
+        position.lastTradedAt = trade.timestamp;
+
+        if (position.size === 0) {
+            position.avgPrice = 0;
+            position.marketValue = 0;
+            position.unrealizedPnl = 0;
+            position.closedAt = trade.timestamp;
+        } else {
+            position.closedAt = undefined;
+            updatePositionMark(position, toSafeNumber(position.marketPrice));
+        }
+
+        totalRealizedPnlDelta += realizedPnlDelta;
+        await position.save();
+    }
+
+    portfolio.cashBalance = cashBefore + localMergeRequestedSize;
+    portfolio.realizedPnl = toSafeNumber(portfolio.realizedPnl) + totalRealizedPnlDelta;
+
+    await syncPortfolioAfterExecution(
+        portfolio,
+        {
+            referenceHash: trade.transactionHash,
+            timestamp: trade.timestamp,
+        },
+        'FILLED'
+    );
+
+    await TraceExecution.updateOne(
+        {
+            sourceActivityKey: getConditionTriggerExecutionKey(trade),
+        },
+        {
+            $set: {
+                traceId: TRACE_ID,
+                traceLabel: TRACE_LABEL,
+                sourceWallet: USER_ADDRESS,
+                sourceActivityId: trade._id,
+                sourceActivityIds: [trade._id],
+                sourceActivityKey: getConditionTriggerExecutionKey(trade),
+                sourceActivityKeys: [trade.activityKey || trade.transactionHash],
+                sourceTransactionHash: trade.transactionHash,
+                sourceTransactionHashes: [trade.transactionHash],
+                sourceTradeCount: 1,
+                sourceTimestamp: trade.timestamp,
+                sourceStartedAt: trade.timestamp,
+                sourceEndedAt: trade.timestamp,
+                sourceSide: trade.type || 'MERGE',
+                executionCondition: 'merge',
+                status: 'FILLED',
+                reason: `根据源账户 MERGE 比例 ${(mergeRatio * 100).toFixed(2)}% 执行 condition 级 complete-set merge`,
+                asset: '',
+                conditionId: trade.conditionId,
+                marketSlug: metadata.marketSlug,
+                title: metadata.title || trade.title,
+                outcome: '',
+                winnerOutcome: '',
+                requestedSize: localMergeRequestedSize,
+                executedSize: localMergeRequestedSize,
+                requestedUsdc: localMergeRequestedSize,
+                executedUsdc: localMergeRequestedSize,
+                executionPrice: SETTLEMENT_PRICE,
+                cashBefore,
+                cashAfter: toSafeNumber(portfolio.cashBalance),
+                positionSizeBefore: localMergeableBefore,
+                positionSizeAfter: normalizeSize(localMergeableBefore - localMergeRequestedSize),
+                realizedPnlDelta: totalRealizedPnlDelta,
+                realizedPnlTotal: toSafeNumber(portfolio.realizedPnl),
+                unrealizedPnlAfter: toSafeNumber(portfolio.unrealizedPnl),
+                totalEquityAfter: toSafeNumber(portfolio.totalEquity),
+                claimedAt: Date.now(),
+                completedAt: Date.now(),
+            },
+        },
+        {
+            upsert: true,
+        }
+    );
+
+    logger.info(
+        `condition=${trade.conditionId} 已执行 condition 级 merge ` +
+            `sourceMerge=${formatAmount(sourceMergeRequestedSize)} ` +
+            `localMerge=${formatAmount(localMergeRequestedSize)}`
+    );
+
+    return {
+        status: 'FILLED',
+        reason: '已按源账户 MERGE 比例完成 condition 级 merge',
+        resolution,
+        positionSizeBefore: localMergeableBefore,
+    };
 };
 
 const syncTracePortfolioWithPolymarket = async (portfolio: TracePortfolioDocument) => {
     const userPositions = await fetchSourcePositions();
-    if (!userPositions) {
-        return;
+    if (userPositions) {
+        await refreshOpenPositionMarks(userPositions);
     }
 
-    await refreshOpenPositionMarks(userPositions);
+    const activePositions = (await TracePosition.find({
+        size: { $gt: 0 },
+    }).exec()) as TracePositionDocument[];
+    const positionsByCondition = new Map<string, TracePositionDocument[]>();
+    for (const position of activePositions) {
+        const conditionPositions = positionsByCondition.get(position.conditionId) || [];
+        conditionPositions.push(position);
+        positionsByCondition.set(position.conditionId, conditionPositions);
+    }
 
-    const settledCount = await autoSettleRedeemablePositions(portfolio, userPositions);
-    if (settledCount > 0) {
-        return;
+    for (const [conditionId, positions] of positionsByCondition.entries()) {
+        await settleTraceCondition({
+            portfolio,
+            conditionId,
+            positions,
+        });
     }
 
     await refreshPortfolioState(portfolio);
@@ -678,9 +1321,15 @@ const loadPendingTrades = async () => {
     const [trades, trackedIds] = await Promise.all([
         SourceActivity.find({
             $and: [
-                { type: 'TRADE' },
+                { type: { $in: ['TRADE', 'MERGE', 'REDEEM'] } },
                 { $or: [{ executionIntent: 'EXECUTE' }, { executionIntent: { $exists: false } }] },
-                { $or: [{ snapshotStatus: 'COMPLETE' }, { snapshotStatus: { $exists: false } }] },
+                {
+                    $or: [
+                        { type: { $in: ['MERGE', 'REDEEM'] } },
+                        { snapshotStatus: 'COMPLETE' },
+                        { snapshotStatus: { $exists: false } },
+                    ],
+                },
                 { transactionHash: { $exists: true, $ne: '' } },
             ],
         })
@@ -689,7 +1338,9 @@ const loadPendingTrades = async () => {
         readTrackedTradeIds(),
     ]);
 
-    return (trades as UserActivityInterface[]).filter((trade) => !trackedIds.has(String(trade._id)));
+    return (trades as UserActivityInterface[]).filter(
+        (trade) => !trackedIds.has(String(trade._id))
+    );
 };
 
 const loadTradesByIds = async (tradeIds: UserActivityInterface['_id'][]) =>
@@ -778,7 +1429,9 @@ const recordTraceExecution = async (params: {
                 sourceActivityId: firstTrade._id,
                 sourceActivityIds: orderedTrades.map((trade) => trade._id),
                 sourceActivityKey: executionKey,
-                sourceActivityKeys: orderedTrades.map((trade) => trade.activityKey || trade.transactionHash),
+                sourceActivityKeys: orderedTrades.map(
+                    (trade) => trade.activityKey || trade.transactionHash
+                ),
                 sourceTransactionHash: lastTrade.transactionHash,
                 sourceTransactionHashes: orderedTrades.map((trade) => trade.transactionHash),
                 sourceTradeCount: orderedTrades.length,
@@ -791,8 +1444,10 @@ const recordTraceExecution = async (params: {
                 reason: result.reason,
                 asset: lastTrade.asset,
                 conditionId: lastTrade.conditionId,
+                marketSlug: String(lastTrade.eventSlug || lastTrade.slug || '').trim(),
                 title: lastTrade.title,
                 outcome: lastTrade.outcome,
+                winnerOutcome: '',
                 requestedSize: result.requestedSize,
                 executedSize: result.executedSize,
                 requestedUsdc: result.requestedUsdc,
@@ -833,7 +1488,10 @@ const validateTradeForTrace = (trade: UserActivityInterface) => {
         };
     }
 
-    if (String(trade.side || '').toUpperCase() === 'BUY' && !Number.isFinite(trade.sourceBalanceAfterTrade)) {
+    if (
+        String(trade.side || '').toUpperCase() === 'BUY' &&
+        !Number.isFinite(trade.sourceBalanceAfterTrade)
+    ) {
         return {
             status: 'RETRY' as const,
             reason: '缺少源账户余额快照',
@@ -1147,8 +1805,80 @@ const createDirectBatch = async (trade: UserActivityInterface) => {
     });
 };
 
+const processConditionTriggerTrade = async (trade: UserActivityInterface) => {
+    const portfolio = await ensurePortfolio();
+    const activePositions = (await TracePosition.find({
+        conditionId: trade.conditionId,
+        size: { $gt: 0 },
+    }).exec()) as TracePositionDocument[];
+    const metadata = await resolveConditionMetadata(trade.conditionId, activePositions, [trade]);
+    const settlementOutcome = await settleTraceCondition({
+        portfolio,
+        conditionId: trade.conditionId,
+        positions: activePositions,
+        triggerTrades: [trade],
+    });
+
+    if (settlementOutcome.status === 'FILLED') {
+        return;
+    }
+
+    if (
+        trade.type === 'MERGE' &&
+        settlementOutcome.resolution !== null &&
+        !isResolvedPolymarketMarket(settlementOutcome.resolution)
+    ) {
+        const mergeOutcome = await executeConditionMergeTrade({
+            portfolio,
+            trade,
+            positions: activePositions,
+            metadata,
+            resolution: settlementOutcome.resolution,
+        });
+        if (mergeOutcome.status === 'FILLED') {
+            return;
+        }
+
+        await recordSkippedConditionTrigger({
+            portfolio,
+            trade,
+            reason: mergeOutcome.reason,
+            positionSizeBefore: mergeOutcome.positionSizeBefore || 0,
+            metadata,
+            resolution: mergeOutcome.resolution,
+        });
+
+        logger.info(
+            `condition=${trade.conditionId} type=${trade.type} 已跳过 condition 级 merge ` +
+                `reason=${mergeOutcome.reason}`
+        );
+        return;
+    }
+
+    await recordSkippedConditionTrigger({
+        portfolio,
+        trade,
+        reason: settlementOutcome.reason,
+        positionSizeBefore:
+            settlementOutcome.positionSizeBefore ||
+            activePositions.reduce((sum, position) => sum + toSafeNumber(position.size), 0),
+        metadata,
+        resolution: settlementOutcome.resolution,
+    });
+
+    logger.info(
+        `condition=${trade.conditionId} type=${trade.type} 已跳过 condition 级结算 ` +
+            `reason=${settlementOutcome.reason}`
+    );
+};
+
 const processPendingTrades = async (trades: UserActivityInterface[]) => {
     for (const trade of trades) {
+        if (trade.type === 'MERGE' || trade.type === 'REDEEM') {
+            await processConditionTriggerTrade(trade);
+            continue;
+        }
+
         const validation = validateTradeForTrace(trade);
         if (validation.status === 'RETRY') {
             logger.warn(`${formatTradeRef(trade)} 稍后重试 reason=${validation.reason}`);
@@ -1348,7 +2078,8 @@ const executeReadyBatches = async (marketStream: ClobMarketStream) => {
                                       batch.requestedUsdc > 0 ? batch.requestedUsdc : undefined,
                                   requestedSize:
                                       batch.requestedSize > 0 ? batch.requestedSize : undefined,
-                                  sourcePrice: batch.sourcePrice > 0 ? batch.sourcePrice : undefined,
+                                  sourcePrice:
+                                      batch.sourcePrice > 0 ? batch.sourcePrice : undefined,
                                   note: batch.reason,
                               }
                             : undefined,
@@ -1401,7 +2132,8 @@ const executeReadyBatches = async (marketStream: ClobMarketStream) => {
                 { _id: batch._id },
                 {
                     $set: {
-                        status: resultWithPosition.result.status === 'FILLED' ? 'CONFIRMED' : 'SKIPPED',
+                        status:
+                            resultWithPosition.result.status === 'FILLED' ? 'CONFIRMED' : 'SKIPPED',
                         reason: resultWithPosition.result.reason,
                         claimedAt: 0,
                         confirmedAt: Date.now(),
@@ -1454,6 +2186,7 @@ const executeReadyBatches = async (marketStream: ClobMarketStream) => {
 const paperTradeExecutor = async (marketStream: ClobMarketStream) => {
     logger.info('启动模拟跟单');
     const processingCount = await TraceExecutionBatch.countDocuments({ status: 'PROCESSING' });
+    let lastTracePortfolioSyncAt = 0;
     if (processingCount > 0) {
         logger.warn(`检测到 ${processingCount} 个 PROCESSING 批次，本次启动会自动回收续跑`);
     }
@@ -1478,8 +2211,11 @@ const paperTradeExecutor = async (marketStream: ClobMarketStream) => {
             }));
 
         if (pendingTrades.length === 0 && openWorkCount === 0) {
-            const portfolio = await ensurePortfolio();
-            await syncTracePortfolioWithPolymarket(portfolio);
+            if (Date.now() - lastTracePortfolioSyncAt >= TRACE_PORTFOLIO_SYNC_INTERVAL_MS) {
+                const portfolio = await ensurePortfolio();
+                await syncTracePortfolioWithPolymarket(portfolio);
+                lastTracePortfolioSyncAt = Date.now();
+            }
             await spinner.start('等待新的模拟交易');
         }
 

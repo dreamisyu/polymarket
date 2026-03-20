@@ -69,6 +69,8 @@ const activitySchema = new Schema({
     sourcePositionSizeAfterTrade: { type: Number, required: false },
     sourcePositionSizeBeforeTrade: { type: Number, required: false },
     sourcePositionPriceAfterTrade: { type: Number, required: false },
+    sourceConditionMergeableSizeAfterTrade: { type: Number, required: false },
+    sourceConditionMergeableSizeBeforeTrade: { type: Number, required: false },
     sourceSnapshotCapturedAt: { type: Number, required: false },
     snapshotStatus: { type: String, required: false },
     sourceSnapshotReason: { type: String, required: false },

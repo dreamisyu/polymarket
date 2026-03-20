@@ -20,6 +20,7 @@ const ACTIVITY_SYNC_LIMIT = ENV.ACTIVITY_SYNC_LIMIT;
 const ACTIVITY_SYNC_OVERLAP_MS = ENV.ACTIVITY_SYNC_OVERLAP_MS;
 const MILLISECOND_TIMESTAMP_THRESHOLD = 1_000_000_000_000;
 const TRACKED_ACTIVITY_TYPES = new Set(['TRADE', 'MERGE', 'REDEEM']);
+const TRACE_EXECUTION_ACTIVITY_TYPES = new Set(['TRADE', 'MERGE', 'REDEEM']);
 const SOURCE_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}&sizeThreshold=0`;
 const logger = createLogger('monitor');
 
@@ -52,7 +53,12 @@ const normalizeTimestampToSeconds = (rawTimestamp: number): number | null => {
 };
 
 const resolveExecutionIntent = (trade: UserActivityInterface): ExecutionIntent =>
-    String(trade.type || '').toUpperCase() === 'TRADE' ? 'EXECUTE' : 'SYNC_ONLY';
+    TRACE_EXECUTION_ACTIVITY_TYPES.has(String(trade.type || '').toUpperCase()) &&
+    ENV.EXECUTION_MODE === 'trace'
+        ? 'EXECUTE'
+        : String(trade.type || '').toUpperCase() === 'TRADE'
+          ? 'EXECUTE'
+          : 'SYNC_ONLY';
 
 const getDefaultBotStatus = (trade: UserActivityInterface): BotExecutionStatus => {
     if (resolveExecutionIntent(trade) === 'SYNC_ONLY') {
