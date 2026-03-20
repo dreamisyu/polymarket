@@ -792,9 +792,9 @@ const fetchTradeData = async () => {
         ).length;
         const syncOnlyCount = mergedFetchedTrades.trades.length - executeCount;
         if (executeCount > 0 || syncOnlyCount > 0) {
-            logger.info(
-                `同步原始活动 ${fetchedTrades.length} 条，合并后 ${mergedFetchedTrades.trades.length} 条，` +
-                    `待执行 ${executeCount} 条，仅校准 ${syncOnlyCount} 条`
+            logger.debug(
+                `活动同步 fetched=${fetchedTrades.length} merged=${mergedFetchedTrades.trades.length} ` +
+                    `execute=${executeCount} syncOnly=${syncOnlyCount}`
             );
         }
     } catch (error) {

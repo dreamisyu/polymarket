@@ -156,8 +156,14 @@ const normalizeSignature = (line) =>
         .trim();
 
 const extractScope = (line) => {
-    const matched = stripAnsi(line).match(/\[([^\]]+)\]/);
-    return matched ? matched[1] : 'unknown';
+    const normalizedLine = stripAnsi(line);
+    const bracketMatched = normalizedLine.match(/\[([^\]]+)\]/);
+    if (bracketMatched) {
+        return bracketMatched[1];
+    }
+
+    const jsonMatched = normalizedLine.match(/"scope":"([^"]+)"/);
+    return jsonMatched ? jsonMatched[1] : 'unknown';
 };
 
 const extractFieldValues = (line, fieldName) => {

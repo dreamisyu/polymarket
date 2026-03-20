@@ -533,7 +533,7 @@ class LiveSettlementReclaimer {
             ]);
 
             if (pendingTradeCount > 0 || bufferCount > 0 || batchCount > 0) {
-                logger.info(
+                logger.debug(
                     `resolved condition=${subject.conditionId} winner=${resolution?.winnerOutcome || 'unknown'} ` +
                         `skippedTrades=${pendingTradeCount} skippedBuffers=${bufferCount} skippedBatches=${batchCount}`
                 );

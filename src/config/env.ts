@@ -20,6 +20,7 @@ type ExecutionMode = 'live' | 'trace';
 type RelayerTransactionMode = 'SAFE' | 'PROXY';
 type WsChannel = 'market' | 'user';
 type BuyDustResidualMode = 'off' | 'defer' | 'trim';
+type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
 
 const DEFAULT_CLOB_HTTP_URL = 'https://clob.polymarket.com';
 const DEFAULT_POLYMARKET_WS_BASE_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws';
@@ -97,6 +98,25 @@ const parseBoolean = (rawValue: string | undefined, fallback: boolean) => {
     return rawValue === '1' || rawValue.toLowerCase() === 'true';
 };
 
+const parseLogLevel = (rawValue: string | undefined, fallback: LogLevel): LogLevel => {
+    const normalized = String(rawValue || fallback)
+        .trim()
+        .toLowerCase();
+
+    if (
+        normalized === 'trace' ||
+        normalized === 'debug' ||
+        normalized === 'info' ||
+        normalized === 'warn' ||
+        normalized === 'error' ||
+        normalized === 'fatal'
+    ) {
+        return normalized;
+    }
+
+    throw new Error('LOG_LEVEL must be trace, debug, info, warn, error or fatal');
+};
+
 const parseRelayerTransactionMode = (
     rawValue: string | undefined,
     fallback: RelayerTransactionMode
@@ -149,6 +169,12 @@ const TRACE_INITIAL_BALANCE = parsePositiveNumber(
     readEnv('TRACE_INITIAL_BALANCE') || '1000',
     'TRACE_INITIAL_BALANCE'
 );
+const LOG_DEFAULT_LEVEL = parseLogLevel(readEnv('LOG_LEVEL'), 'info');
+const LOG_CONSOLE_LEVEL = parseLogLevel(readEnv('LOG_CONSOLE_LEVEL'), LOG_DEFAULT_LEVEL);
+const LOG_FILE_LEVEL = parseLogLevel(readEnv('LOG_FILE_LEVEL'), 'debug');
+const LOG_CONSOLE_ENABLED = parseBoolean(readEnv('LOG_CONSOLE_ENABLED'), true);
+const LOG_FILE_ENABLED = parseBoolean(readEnv('LOG_FILE_ENABLED'), true);
+const LOG_FILE_PATH = readEnv('LOG_FILE_PATH') || 'logs/bot.log';
 const INITIAL_SYNC_LOOKBACK_MS = resolveInitialSyncLookbackMs();
 const POLYMARKET_WS_RECONNECT_MS = readEnv('POLYMARKET_WS_RECONNECT_MS');
 
@@ -214,6 +240,12 @@ export const ENV = {
     TRACE_INITIAL_BALANCE,
     USER_ADDRESS,
     MONGO_URI,
+    LOG_LEVEL: LOG_DEFAULT_LEVEL,
+    LOG_CONSOLE_LEVEL,
+    LOG_FILE_LEVEL,
+    LOG_CONSOLE_ENABLED,
+    LOG_FILE_ENABLED,
+    LOG_FILE_PATH,
     PROXY_WALLET: liveOnlyEnv.PROXY_WALLET,
     PRIVATE_KEY: liveOnlyEnv.PRIVATE_KEY,
     CLOB_HTTP_URL: liveOnlyEnv.CLOB_HTTP_URL,

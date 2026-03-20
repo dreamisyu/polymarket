@@ -63,16 +63,16 @@ try {
 console.log('\n🔍 Checking tradeExecutor.ts implementation...');
 try {
     const tradeExecutorContent = fs.readFileSync('src/services/tradeExecutor.ts', 'utf8');
-    if (tradeExecutorContent.includes('doTrading')) {
-        console.log('  ✅ doTrading function exists');
+    if (tradeExecutorContent.includes('const tradeExecutor = async')) {
+        console.log('  ✅ tradeExecutor function exists');
     } else {
-        console.log('  ❌ doTrading function missing');
+        console.log('  ❌ tradeExecutor function missing');
         hasErrors = true;
     }
     if (tradeExecutorContent.includes('await postOrder')) {
-        console.log('  ✅ doTrading calls postOrder');
+        console.log('  ✅ tradeExecutor calls postOrder');
     } else {
-        console.log('  ⚠️  doTrading might not execute trades');
+        console.log('  ⚠️  tradeExecutor might not execute trades');
     }
     if (tradeExecutorContent.includes('condition')) {
         console.log('  ✅ Trading condition logic exists');

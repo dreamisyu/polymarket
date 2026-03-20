@@ -2456,7 +2456,7 @@ const processConditionTriggerTrade = async (trade: UserActivityInterface) => {
             });
         }
 
-        logger.info(
+        logger.debug(
             `condition=${trade.conditionId} type=${trade.type} 已跳过 condition 级 merge ` +
                 `reason=${mergeOutcome.reason}`
         );
@@ -2489,7 +2489,7 @@ const processConditionTriggerTrade = async (trade: UserActivityInterface) => {
         });
     }
 
-    logger.info(
+    logger.debug(
         `condition=${trade.conditionId} type=${trade.type} 已跳过 condition 级结算 ` +
             `reason=${settlementOutcome.reason}`
     );
@@ -2539,7 +2539,7 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
                 sourceSide: trade.side || trade.type || 'TRADE',
             });
 
-            logger.info(
+            logger.debug(
                 `condition=${trade.conditionId} tx=${trade.transactionHash} 已跳过 resolved 市场盘口模拟`
             );
             continue;
@@ -2570,7 +2570,7 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
                     policyTrail: evaluation.policyTrail,
                     condition: 'buy',
                 });
-                logger.info(`${formatTradeRef(trade)} 已跳过模拟买单 reason=${evaluation.reason}`);
+                logger.debug(`${formatTradeRef(trade)} 已跳过模拟买单 reason=${evaluation.reason}`);
                 continue;
             }
 
@@ -2582,7 +2582,7 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
                 policyTrail: evaluation.policyTrail,
             });
             buyPlanningBalance = Math.max(buyPlanningBalance - evaluation.requestedUsdc, 0);
-            logger.info(
+            logger.debug(
                 `${formatTradeRef(trade)} 已创建模拟买入批次 ` +
                     `requestedUsdc=${formatAmount(evaluation.requestedUsdc)}` +
                     (evaluation.reason ? ` reason=${evaluation.reason}` : '')
@@ -2593,7 +2593,7 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
         await cancelOpenBuyBuffersForAsset(trade);
         await cancelReadyBuyBatchesForAsset(trade);
         await createDirectBatch(trade);
-        logger.info(`${formatTradeRef(trade)} 已创建模拟执行批次`);
+        logger.debug(`${formatTradeRef(trade)} 已创建模拟执行批次`);
     }
 };
 
@@ -2726,7 +2726,7 @@ const executeReadyBatches = async (marketStream: ClobMarketStream) => {
                 }
             );
 
-            logger.info(
+            logger.debug(
                 `${formatBatchRef(batch)} status=${resultWithPosition.result.status} ` +
                     `cash=${formatAmount(portfolio.cashBalance)} ` +
                     `equity=${formatAmount(portfolio.totalEquity)}` +
@@ -2775,7 +2775,7 @@ export const createTraceSettlementScheduler = () => {
             const conditionTriggerTrades = await loadPendingConditionTriggerTrades();
             if (conditionTriggerTrades.length > 0) {
                 spinner.stop();
-                logger.info(
+                logger.debug(
                     `发现 ${conditionTriggerTrades.length} 条待处理 condition 结算触发活动`
                 );
 
@@ -2812,7 +2812,7 @@ const paperTradeExecutor = async (marketStream: ClobMarketStream) => {
         const pendingTrades = await loadPendingTrades();
         if (pendingTrades.length > 0) {
             spinner.stop();
-            logger.info(`发现 ${pendingTrades.length} 条待处理模拟交易`);
+            logger.debug(`待处理模拟交易 ${pendingTrades.length} 条`);
             await processPendingTrades(pendingTrades);
         }
 

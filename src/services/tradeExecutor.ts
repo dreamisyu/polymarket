@@ -414,7 +414,7 @@ const finalizeTerminalTradeWithLog = async (
         return;
     }
 
-    logger.info(message);
+    logger.debug(message);
 };
 
 const finalizeActivitiesByIds = async (
@@ -941,7 +941,7 @@ const confirmSubmittedBatch = async (
             normalizedConfirmation.reason,
             normalizedConfirmation.confirmedAt
         );
-        logger.info(
+        logger.debug(
             `${formatBatchRef(batch)} ${formatTerminalStatus(finalStatus)} ` +
                 (normalizedConfirmation.reason ? `reason=${normalizedConfirmation.reason}` : '')
         );
@@ -957,7 +957,7 @@ const syncSubmittedTrades = async (userStream: ClobUserStream | null) => {
         return;
     }
 
-    logger.info(`检测到 ${submittedTrades.length} 条待确认交易，开始补偿确认`);
+    logger.debug(`待确认交易 ${submittedTrades.length} 条，开始补偿`);
 
     for (const trade of submittedTrades) {
         const claimed = await claimSubmittedTrade(trade);
@@ -975,7 +975,7 @@ const syncSubmittedBatches = async (userStream: ClobUserStream | null) => {
         return;
     }
 
-    logger.info(`检测到 ${submittedBatches.length} 个待确认批次，开始补偿确认`);
+    logger.debug(`待确认批次 ${submittedBatches.length} 个，开始补偿`);
 
     for (const batch of submittedBatches) {
         const claimed = await claimSubmittedBatch(batch);
@@ -1224,7 +1224,7 @@ const processPendingTrades = async (clobClient: ClobClient, trades: UserActivity
                         evaluation.reason,
                         evaluation.policyTrail
                     );
-                    logger.info(`${formatTradeRef(trade)} 已跳过 reason=${evaluation.reason}`);
+                    logger.debug(`${formatTradeRef(trade)} 已跳过 reason=${evaluation.reason}`);
                     continue;
                 }
 
@@ -1236,7 +1236,7 @@ const processPendingTrades = async (clobClient: ClobClient, trades: UserActivity
                     policyTrail: evaluation.policyTrail,
                 });
                 buyPlanningBalance = Math.max(buyPlanningBalance - evaluation.requestedUsdc, 0);
-                logger.info(
+                logger.debug(
                     `${formatTradeRef(trade)} 已创建直接买入批次 ` +
                         `requestedUsdc=${formatAmount(evaluation.requestedUsdc)}` +
                         (evaluation.reason ? ` reason=${evaluation.reason}` : '')
@@ -1247,7 +1247,7 @@ const processPendingTrades = async (clobClient: ClobClient, trades: UserActivity
             await cancelOpenBuyBuffersForAsset(trade);
             await cancelReadyBuyBatchesForAsset(trade);
             await createBatchFromSingleTrade(trade);
-            logger.info(`${formatTradeRef(trade)} 已创建直接执行批次`);
+            logger.debug(`${formatTradeRef(trade)} 已创建直接执行批次`);
         } catch (error) {
             logger.error(`${formatTradeRef(trade)} 入批异常`, error);
             await finalizeRetryableTradeWithLog(trade, '交易入批流程发生未预期异常');
@@ -1302,7 +1302,7 @@ const executeReadyBatches = async (
             const condition =
                 batch.condition ||
                 resolveTradeCondition(latestTrade.side, myPosition, sourcePositionAfterTrade);
-            logger.info(
+            logger.debug(
                 `${formatBatchRef(batch)} 执行=${condition} ` +
                     `balance=${formatAmount(tradingGuardState.availableBalance)} ` +
                     `proxySize=${formatAmount(myPosition?.size)} ` +
@@ -1334,7 +1334,7 @@ const executeReadyBatches = async (
 
             if (result.orderIds.length > 0 || result.transactionHashes.length > 0) {
                 await markBatchSubmitted(batch, result);
-                logger.info(
+                logger.debug(
                     `${formatBatchRef(batch)} 已提交 orderIds=${result.orderIds.length} ` +
                         `txHashes=${result.transactionHashes.length}`
                 );
@@ -1390,7 +1390,7 @@ const tradeExecutor = async (
         const pendingTrades = await readPendingTrades();
         if (pendingTrades.length > 0) {
             spinner.stop();
-            logger.info(`发现 ${pendingTrades.length} 条待入批交易`);
+            logger.debug(`待入批交易 ${pendingTrades.length} 条`);
             await processPendingTrades(clobClient, pendingTrades);
         }
 
