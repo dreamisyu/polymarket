@@ -89,7 +89,7 @@ const buildTradeSnapshots = (
         }
 
         const snapshotStatus: SnapshotStatus =
-            capturedAt - trade.timestamp > SNAPSHOT_STALE_AFTER_MS ? 'STALE' : 'COMPLETE';
+            (capturedAt / 1000 - trade.timestamp / 1000) > SNAPSHOT_STALE_AFTER_MS / 1000 ? 'STALE' : 'COMPLETE';
         snapshots.set(activityKey, {
             sourceBalanceAfterTrade: rollingBalance,
             sourceBalanceBeforeTrade: beforeBalance,
