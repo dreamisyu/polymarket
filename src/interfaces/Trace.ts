@@ -93,3 +93,31 @@ export interface TracePortfolioInterface {
     lastSourceTransactionHash: string;
     lastUpdatedAt: number;
 }
+
+export interface TraceSettlementTaskInterface {
+    _id: mongoose.Types.ObjectId;
+    traceId: string;
+    traceLabel: string;
+    sourceWallet: string;
+    conditionId: string;
+    marketSlug: string;
+    title: string;
+    status: 'PENDING' | 'PROCESSING' | 'SETTLED' | 'CLOSED';
+    reason: string;
+    resolvedStatus: string;
+    winnerOutcome: string;
+    sourceActivityId?: mongoose.Types.ObjectId;
+    sourceActivityIds?: mongoose.Types.ObjectId[];
+    sourceActivityKeys?: string[];
+    sourceTransactionHash: string;
+    sourceTransactionHashes?: string[];
+    sourceTradeCount?: number;
+    sourceTimestamp: number;
+    sourceStartedAt?: number;
+    sourceEndedAt?: number;
+    retryCount: number;
+    lastCheckedAt: number;
+    nextRetryAt: number;
+    claimedAt: number;
+    completedAt?: number;
+}

@@ -3,6 +3,7 @@ import {
     TraceExecutionInterface,
     TracePortfolioInterface,
     TracePositionInterface,
+    TraceSettlementTaskInterface,
 } from '../interfaces/Trace';
 import { ExecutionPolicyTrailEntry } from '../interfaces/Execution';
 
@@ -136,6 +137,43 @@ const portfolioSchema = new Schema<TracePortfolioInterface>(
     { timestamps: true }
 );
 
+const settlementTaskSchema = new Schema<TraceSettlementTaskInterface>(
+    {
+        traceId: { type: String, required: true },
+        traceLabel: { type: String, required: true },
+        sourceWallet: { type: String, required: true },
+        conditionId: { type: String, required: true },
+        marketSlug: { type: String, required: false, default: '' },
+        title: { type: String, required: false, default: '' },
+        status: {
+            type: String,
+            enum: ['PENDING', 'PROCESSING', 'SETTLED', 'CLOSED'],
+            required: true,
+            default: 'PENDING',
+        },
+        reason: { type: String, required: false, default: '' },
+        resolvedStatus: { type: String, required: false, default: '' },
+        winnerOutcome: { type: String, required: false, default: '' },
+        sourceActivityId: { type: Schema.Types.ObjectId, required: false },
+        sourceActivityIds: { type: [Schema.Types.ObjectId], required: false, default: [] },
+        sourceActivityKeys: { type: [String], required: false, default: [] },
+        sourceTransactionHash: { type: String, required: false, default: '' },
+        sourceTransactionHashes: { type: [String], required: false, default: [] },
+        sourceTradeCount: { type: Number, required: false, default: 0 },
+        sourceTimestamp: { type: Number, required: true, default: 0 },
+        sourceStartedAt: { type: Number, required: false, default: 0 },
+        sourceEndedAt: { type: Number, required: false, default: 0 },
+        retryCount: { type: Number, required: true, default: 0 },
+        lastCheckedAt: { type: Number, required: true, default: 0 },
+        nextRetryAt: { type: Number, required: true, default: 0 },
+        claimedAt: { type: Number, required: true, default: 0 },
+        completedAt: { type: Number, required: false, default: 0 },
+    },
+    { timestamps: true }
+);
+
+settlementTaskSchema.index({ conditionId: 1 }, { unique: true });
+
 const getTracePositionModel = (walletAddress: string, traceId: string) => {
     const suffix = `${normalizeKey(walletAddress)}_${normalizeKey(traceId)}`;
     const collectionName = `trace_positions_${suffix}`;
@@ -157,4 +195,16 @@ const getTracePortfolioModel = (walletAddress: string, traceId: string) => {
     return getModel<TracePortfolioInterface>(modelName, portfolioSchema, collectionName);
 };
 
-export { getTraceExecutionModel, getTracePortfolioModel, getTracePositionModel };
+const getTraceSettlementTaskModel = (walletAddress: string, traceId: string) => {
+    const suffix = `${normalizeKey(walletAddress)}_${normalizeKey(traceId)}`;
+    const collectionName = `trace_settlement_tasks_${suffix}`;
+    const modelName = `TraceSettlementTasks_${suffix}`;
+    return getModel<TraceSettlementTaskInterface>(modelName, settlementTaskSchema, collectionName);
+};
+
+export {
+    getTraceExecutionModel,
+    getTracePortfolioModel,
+    getTracePositionModel,
+    getTraceSettlementTaskModel,
+};

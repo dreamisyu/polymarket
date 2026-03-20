@@ -5,7 +5,11 @@ import {
     CopyIntentBufferInterface,
     ExecutionPolicyTrailEntry,
 } from '../interfaces/Execution';
-import { TracePortfolioInterface, TracePositionInterface } from '../interfaces/Trace';
+import {
+    TracePortfolioInterface,
+    TracePositionInterface,
+    TraceSettlementTaskInterface,
+} from '../interfaces/Trace';
 import { UserActivityInterface, UserPositionInterface } from '../interfaces/User';
 import { ENV } from '../config/env';
 import { getCopyExecutionBatchModel, getCopyIntentBufferModel } from '../models/copyExecution';
@@ -13,6 +17,7 @@ import {
     getTraceExecutionModel,
     getTracePortfolioModel,
     getTracePositionModel,
+    getTraceSettlementTaskModel,
 } from '../models/traceHistory';
 import { getUserActivityModel } from '../models/userHistory';
 import ClobMarketStream from './clobMarketStream';
@@ -57,12 +62,16 @@ const TraceExecutionBatch = getCopyExecutionBatchModel(USER_ADDRESS, TRACE_RUNTI
 const TraceExecution = getTraceExecutionModel(USER_ADDRESS, TRACE_ID);
 const TracePortfolio = getTracePortfolioModel(USER_ADDRESS, TRACE_ID);
 const TracePosition = getTracePositionModel(USER_ADDRESS, TRACE_ID);
+const TraceSettlementTask = getTraceSettlementTaskModel(USER_ADDRESS, TRACE_ID);
 
 const EPSILON = 1e-8;
 const SETTLEMENT_PRICE = 1;
 const PROCESSING_LEASE_MS = ENV.PROCESSING_LEASE_MS;
 const SOURCE_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}&sizeThreshold=0`;
 const TRACE_PORTFOLIO_SYNC_INTERVAL_MS = 15_000;
+const TRACE_SETTLEMENT_TASK_SYNC_INTERVAL_MS = 15_000;
+const TRACE_SETTLEMENT_RETRY_BASE_MS = 5_000;
+const TRACE_SETTLEMENT_RETRY_MAX_MS = 60_000;
 const RESOLUTION_CACHE_RESOLVED_TTL_MS = 10 * 60_000;
 const RESOLUTION_CACHE_UNRESOLVED_TTL_MS = 30_000;
 const resolutionCache = new Map<
@@ -76,6 +85,7 @@ const resolutionCache = new Map<
 type ExecutionStatus = 'FILLED' | 'SKIPPED';
 type TracePortfolioDocument = HydratedDocument<TracePortfolioInterface>;
 type TracePositionDocument = HydratedDocument<TracePositionInterface>;
+type TraceSettlementTaskDocument = HydratedDocument<TraceSettlementTaskInterface>;
 
 interface ConditionMetadata {
     conditionId: string;
@@ -89,6 +99,8 @@ interface ConditionSettlementOutcome {
     resolution: PolymarketMarketResolution | null;
     positionSizeBefore?: number;
 }
+
+type SettlementTaskStatus = TraceSettlementTaskInterface['status'];
 
 interface ExecutionResult {
     status: ExecutionStatus;
@@ -154,6 +166,11 @@ const buildPolicyTrailEntry = (
     timestamp: Date.now(),
 });
 const buildLeaseCutoff = () => Date.now() - PROCESSING_LEASE_MS;
+const buildConditionSettlementRetryDelayMs = (retryCount: number) =>
+    Math.min(
+        TRACE_SETTLEMENT_RETRY_BASE_MS * 2 ** Math.max(Math.min(retryCount, 4), 0),
+        TRACE_SETTLEMENT_RETRY_MAX_MS
+    );
 const buildClaimableFilter = (fieldName: string, leaseCutoff: number) => ({
     $or: [
         { [fieldName]: { $exists: false } },
@@ -163,6 +180,8 @@ const buildClaimableFilter = (fieldName: string, leaseCutoff: number) => ({
 });
 const getBatchExecutionKey = (batchId: CopyExecutionBatchInterface['_id']) =>
     `batch:${String(batchId)}`;
+const getConditionSettlementTaskReason = (reason: string) =>
+    String(reason || '').trim() || '等待 condition 级自动结算';
 
 const updatePositionMark = (position: TracePositionDocument, marketPrice: number) => {
     if (!position || marketPrice <= 0) {
@@ -389,13 +408,18 @@ const resolveConditionMetadata = async (
     return loadConditionMetadataFromSource(conditionId);
 };
 
-const loadConditionResolution = async (metadata: ConditionMetadata) => {
+const loadConditionResolution = async (
+    metadata: ConditionMetadata,
+    options: {
+        forceRefresh?: boolean;
+    } = {}
+) => {
     if (!metadata.marketSlug) {
         return null;
     }
 
     const cached = resolutionCache.get(metadata.conditionId);
-    if (cached?.resolution?.marketSlug === metadata.marketSlug) {
+    if (!options.forceRefresh && cached?.resolution?.marketSlug === metadata.marketSlug) {
         const ttl = isResolvedPolymarketMarket(cached.resolution)
             ? RESOLUTION_CACHE_RESOLVED_TTL_MS
             : RESOLUTION_CACHE_UNRESOLVED_TTL_MS;
@@ -405,11 +429,23 @@ const loadConditionResolution = async (metadata: ConditionMetadata) => {
     }
 
     const resolution = await fetchPolymarketMarketResolution(metadata.marketSlug);
+    if (resolution) {
+        resolutionCache.set(metadata.conditionId, {
+            checkedAt: Date.now(),
+            resolution,
+        });
+        return resolution;
+    }
+
+    if (cached?.resolution?.marketSlug === metadata.marketSlug) {
+        return cached.resolution;
+    }
+
     resolutionCache.set(metadata.conditionId, {
         checkedAt: Date.now(),
-        resolution,
+        resolution: null,
     });
-    return resolution;
+    return null;
 };
 
 const mergeStringArrays = (...values: string[][]) => [
@@ -436,6 +472,219 @@ const mergeActivityIds = (...values: Array<Array<unknown>>) => {
 
     return [...merged.values()] as UserActivityInterface['_id'][];
 };
+
+const loadConditionSettlementTriggerTrades = async (conditionId: string) => {
+    const task = (await TraceSettlementTask.findOne(
+        {
+            conditionId,
+        },
+        {
+            sourceActivityIds: 1,
+        }
+    ).exec()) as Pick<TraceSettlementTaskInterface, 'sourceActivityIds'> | null;
+
+    if (!task?.sourceActivityIds?.length) {
+        return [];
+    }
+
+    return (await SourceActivity.find(
+        {
+            _id: {
+                $in: task.sourceActivityIds,
+            },
+        },
+        {
+            _id: 1,
+            activityKey: 1,
+            conditionId: 1,
+            eventSlug: 1,
+            slug: 1,
+            timestamp: 1,
+            title: 1,
+            transactionHash: 1,
+            type: 1,
+        }
+    )
+        .sort({ timestamp: 1 })
+        .exec()) as UserActivityInterface[];
+};
+
+const upsertConditionSettlementTask = async (params: {
+    conditionId: string;
+    metadata: ConditionMetadata;
+    reason: string;
+    resolution?: PolymarketMarketResolution | null;
+    triggerTrades?: UserActivityInterface[];
+    nextRetryAt?: number;
+}) => {
+    const {
+        conditionId,
+        metadata,
+        reason,
+        resolution,
+        triggerTrades = [],
+        nextRetryAt = 0,
+    } = params;
+    const existingTask = (await TraceSettlementTask.findOne(
+        {
+            conditionId,
+        },
+        {
+            sourceActivityId: 1,
+            sourceActivityIds: 1,
+            sourceActivityKeys: 1,
+            sourceTransactionHash: 1,
+            sourceTransactionHashes: 1,
+            sourceStartedAt: 1,
+            sourceEndedAt: 1,
+            sourceTimestamp: 1,
+        }
+    ).exec()) as
+        | (Pick<
+              TraceSettlementTaskInterface,
+              | 'sourceActivityId'
+              | 'sourceActivityIds'
+              | 'sourceActivityKeys'
+              | 'sourceTransactionHash'
+              | 'sourceTransactionHashes'
+              | 'sourceStartedAt'
+              | 'sourceEndedAt'
+              | 'sourceTimestamp'
+          > & {
+              _id?: TraceSettlementTaskInterface['_id'];
+          })
+        | null;
+    const orderedTrades = sortTradesAsc(triggerTrades);
+    const latestTrade = orderedTrades[orderedTrades.length - 1];
+    const firstTrade = orderedTrades[0];
+    const mergedActivityIds = mergeActivityIds(
+        existingTask?.sourceActivityId ? [existingTask.sourceActivityId] : [],
+        existingTask?.sourceActivityIds || [],
+        orderedTrades.map((trade) => trade._id)
+    );
+    const now = Date.now();
+    const referenceTimestamp =
+        latestTrade?.timestamp || toSafeNumber(existingTask?.sourceTimestamp) || now;
+    const sourceStartedAtCandidates = [
+        firstTrade?.timestamp,
+        toSafeNumber(existingTask?.sourceStartedAt),
+        referenceTimestamp,
+    ].filter((value) => toSafeNumber(value) > 0);
+    const sourceEndedAtCandidates = [
+        latestTrade?.timestamp,
+        toSafeNumber(existingTask?.sourceEndedAt),
+        referenceTimestamp,
+    ].filter((value) => toSafeNumber(value) > 0);
+    const sourceStartedAt =
+        sourceStartedAtCandidates.length > 0
+            ? Math.min(...sourceStartedAtCandidates.map((value) => toSafeNumber(value)))
+            : referenceTimestamp;
+    const sourceEndedAt =
+        sourceEndedAtCandidates.length > 0
+            ? Math.max(...sourceEndedAtCandidates.map((value) => toSafeNumber(value)))
+            : referenceTimestamp;
+
+    await TraceSettlementTask.updateOne(
+        {
+            conditionId,
+        },
+        {
+            $set: {
+                traceId: TRACE_ID,
+                traceLabel: TRACE_LABEL,
+                sourceWallet: USER_ADDRESS,
+                conditionId,
+                marketSlug: metadata.marketSlug,
+                title: metadata.title,
+                status: 'PENDING' as SettlementTaskStatus,
+                reason: getConditionSettlementTaskReason(reason),
+                resolvedStatus: resolution?.resolvedStatus || '',
+                winnerOutcome: resolution?.winnerOutcome || '',
+                sourceActivityId: mergedActivityIds[0],
+                sourceActivityIds: mergedActivityIds,
+                sourceActivityKeys: mergeStringArrays(
+                    existingTask?.sourceActivityKeys || [],
+                    orderedTrades.map((trade) => trade.activityKey || trade.transactionHash)
+                ),
+                sourceTransactionHash:
+                    latestTrade?.transactionHash ||
+                    existingTask?.sourceTransactionHash ||
+                    getConditionSettlementExecutionKey(conditionId),
+                sourceTransactionHashes: mergeStringArrays(
+                    existingTask?.sourceTransactionHashes || [],
+                    orderedTrades.map((trade) => trade.transactionHash)
+                ),
+                sourceTradeCount: mergedActivityIds.length,
+                sourceTimestamp: Math.max(
+                    toSafeNumber(existingTask?.sourceTimestamp),
+                    referenceTimestamp
+                ),
+                sourceStartedAt,
+                sourceEndedAt,
+                nextRetryAt,
+                claimedAt: 0,
+                completedAt: 0,
+            },
+            $setOnInsert: {
+                retryCount: 0,
+                lastCheckedAt: 0,
+            },
+        },
+        {
+            upsert: true,
+        }
+    );
+};
+
+const finalizeConditionSettlementTask = async (params: {
+    conditionId: string;
+    status: Exclude<SettlementTaskStatus, 'PROCESSING'>;
+    reason: string;
+    resolution?: PolymarketMarketResolution | null;
+    retryCount?: number;
+    nextRetryAt?: number;
+}) => {
+    const { conditionId, status, reason, resolution, retryCount, nextRetryAt = 0 } = params;
+
+    const nextState = {
+        status,
+        reason: getConditionSettlementTaskReason(reason),
+        resolvedStatus: resolution?.resolvedStatus || '',
+        winnerOutcome: resolution?.winnerOutcome || '',
+        lastCheckedAt: Date.now(),
+        nextRetryAt,
+        claimedAt: 0,
+        completedAt: status === 'PENDING' ? 0 : Date.now(),
+    } as Record<string, number | string>;
+    if (retryCount !== undefined) {
+        nextState.retryCount = retryCount;
+    }
+
+    await TraceSettlementTask.updateOne(
+        {
+            conditionId,
+        },
+        {
+            $set: nextState,
+        }
+    );
+};
+
+const readReadyConditionSettlementTasks = async () =>
+    (await TraceSettlementTask.find({
+        $or: [
+            {
+                status: 'PENDING',
+                nextRetryAt: { $lte: Date.now() },
+            },
+            {
+                status: 'PROCESSING',
+                claimedAt: { $lt: buildLeaseCutoff() },
+            },
+        ],
+    })
+        .sort({ sourceTimestamp: 1, updatedAt: 1 })
+        .exec()) as TraceSettlementTaskDocument[];
 
 const loadConditionOutcomeKeys = async (
     conditionId: string,
@@ -870,10 +1119,31 @@ const settleTraceCondition = async (params: {
     conditionId: string;
     positions?: TracePositionDocument[];
     triggerTrades?: UserActivityInterface[];
+    metadata?: ConditionMetadata;
+    forceResolutionRefresh?: boolean;
 }): Promise<ConditionSettlementOutcome> => {
-    const { portfolio, conditionId, triggerTrades = [] } = params;
+    const { portfolio, conditionId } = params;
+    const effectiveTriggerTrades =
+        params.triggerTrades && params.triggerTrades.length > 0
+            ? sortTradesAsc(params.triggerTrades)
+            : sortTradesAsc(await loadConditionSettlementTriggerTrades(conditionId));
     const settlementExecutionKey = getConditionSettlementExecutionKey(conditionId);
-    if (await attachTriggerTradesToConditionExecution(settlementExecutionKey, triggerTrades)) {
+    if (
+        await attachTriggerTradesToConditionExecution(
+            settlementExecutionKey,
+            effectiveTriggerTrades
+        )
+    ) {
+        await finalizeConditionSettlementTask({
+            conditionId,
+            status: 'SETTLED',
+            reason: 'condition 已完成结算，已补挂 source activity 关联',
+        });
+        await cancelResolvedConditionOpenWork({
+            portfolio,
+            conditionId,
+            reason: 'condition 已完成结算，已停止后续盘口模拟',
+        });
         return {
             status: 'FILLED',
             reason: 'condition 已完成结算，已补挂 source activity 关联',
@@ -895,8 +1165,12 @@ const settleTraceCondition = async (params: {
         };
     }
 
-    const metadata = await resolveConditionMetadata(conditionId, positions, triggerTrades);
-    const resolution = await loadConditionResolution(metadata);
+    const metadata =
+        params.metadata ||
+        (await resolveConditionMetadata(conditionId, positions, effectiveTriggerTrades));
+    const resolution = await loadConditionResolution(metadata, {
+        forceRefresh: params.forceResolutionRefresh,
+    });
     if (!isResolvedPolymarketMarket(resolution)) {
         return {
             status: 'SKIPPED',
@@ -912,9 +1186,8 @@ const settleTraceCondition = async (params: {
     );
     const cashBefore = toSafeNumber(portfolio.cashBalance);
     const settledAt = Date.now();
-    const orderedTrades = sortTradesAsc(triggerTrades);
-    const latestTriggerTrade = orderedTrades[orderedTrades.length - 1];
-    const firstTriggerTrade = orderedTrades[0];
+    const latestTriggerTrade = effectiveTriggerTrades[effectiveTriggerTrades.length - 1];
+    const firstTriggerTrade = effectiveTriggerTrades[0];
 
     let totalExecutedUsdc = 0;
     let totalRealizedPnlDelta = 0;
@@ -976,7 +1249,7 @@ const settleTraceCondition = async (params: {
     const mergedActivityIds = mergeActivityIds(
         existingExecution?.sourceActivityId ? [existingExecution.sourceActivityId] : [],
         existingExecution?.sourceActivityIds || [],
-        orderedTrades.map((trade) => trade._id)
+        effectiveTriggerTrades.map((trade) => trade._id)
     );
 
     await TraceExecution.updateOne(
@@ -993,13 +1266,15 @@ const settleTraceCondition = async (params: {
                 sourceActivityKey: settlementExecutionKey,
                 sourceActivityKeys: mergeStringArrays(
                     existingExecution?.sourceActivityKeys || [],
-                    orderedTrades.map((trade) => trade.activityKey || trade.transactionHash)
+                    effectiveTriggerTrades.map(
+                        (trade) => trade.activityKey || trade.transactionHash
+                    )
                 ),
                 sourceTransactionHash:
                     latestTriggerTrade?.transactionHash || settlementExecutionKey,
                 sourceTransactionHashes: mergeStringArrays(
                     existingExecution?.sourceTransactionHashes || [],
-                    orderedTrades.map((trade) => trade.transactionHash)
+                    effectiveTriggerTrades.map((trade) => trade.transactionHash)
                 ),
                 sourceTradeCount: mergedActivityIds.length,
                 sourceTimestamp: latestTriggerTrade?.timestamp || settledAt,
@@ -1037,6 +1312,20 @@ const settleTraceCondition = async (params: {
             upsert: true,
         }
     );
+
+    await finalizeConditionSettlementTask({
+        conditionId,
+        status: 'SETTLED',
+        reason: '已按 resolved winner 完成 condition 级结算',
+        resolution,
+        retryCount: 0,
+        nextRetryAt: 0,
+    });
+    await cancelResolvedConditionOpenWork({
+        portfolio,
+        conditionId,
+        reason: `市场已 resolved winner=${resolution?.winnerOutcome || 'unknown'}，已停止后续盘口模拟`,
+    });
 
     logger.info(
         `condition=${conditionId} winner=${resolution?.winnerOutcome || 'unknown'} 自动结算 ` +
@@ -1235,6 +1524,119 @@ const executeConditionMergeTrade = async (params: {
     };
 };
 
+const syncConditionSettlementTasksFromOpenPositions = async () => {
+    const activePositions = (await TracePosition.find({
+        size: { $gt: 0 },
+    }).exec()) as TracePositionDocument[];
+    const positionsByCondition = new Map<string, TracePositionDocument[]>();
+
+    for (const position of activePositions) {
+        const existingPositions = positionsByCondition.get(position.conditionId) || [];
+        existingPositions.push(position);
+        positionsByCondition.set(position.conditionId, existingPositions);
+    }
+
+    for (const [conditionId, positions] of positionsByCondition.entries()) {
+        const metadata = await resolveConditionMetadata(conditionId, positions);
+        await upsertConditionSettlementTask({
+            conditionId,
+            metadata,
+            reason: '检测到本地仍有未平仓 condition，已加入待回补结算队列',
+            nextRetryAt: 0,
+        });
+    }
+};
+
+const processReadyConditionSettlementTasks = async () => {
+    const tasks = await readReadyConditionSettlementTasks();
+    if (tasks.length === 0) {
+        return;
+    }
+
+    const portfolio = await ensurePortfolio();
+    for (const task of tasks) {
+        await TraceSettlementTask.updateOne(
+            {
+                _id: task._id,
+            },
+            {
+                $set: {
+                    status: 'PROCESSING',
+                    claimedAt: Date.now(),
+                },
+            }
+        );
+
+        try {
+            const triggerTrades = await loadConditionSettlementTriggerTrades(task.conditionId);
+            const activePositions = (await TracePosition.find({
+                conditionId: task.conditionId,
+                size: { $gt: 0 },
+            }).exec()) as TracePositionDocument[];
+            const metadata =
+                task.marketSlug || task.title
+                    ? {
+                          conditionId: task.conditionId,
+                          marketSlug: String(task.marketSlug || '').trim(),
+                          title: String(task.title || '').trim(),
+                      }
+                    : await resolveConditionMetadata(
+                          task.conditionId,
+                          activePositions,
+                          triggerTrades
+                      );
+            const outcome = await settleTraceCondition({
+                portfolio,
+                conditionId: task.conditionId,
+                positions: activePositions,
+                triggerTrades,
+                metadata,
+                forceResolutionRefresh: true,
+            });
+
+            if (outcome.status === 'FILLED') {
+                continue;
+            }
+
+            if (outcome.reason === '本地无可结算的未平仓位') {
+                await finalizeConditionSettlementTask({
+                    conditionId: task.conditionId,
+                    status: 'CLOSED',
+                    reason: outcome.reason,
+                    resolution: outcome.resolution,
+                    retryCount: 0,
+                    nextRetryAt: 0,
+                });
+                continue;
+            }
+
+            const nextRetryCount = toSafeNumber(task.retryCount) + 1;
+            await finalizeConditionSettlementTask({
+                conditionId: task.conditionId,
+                status: 'PENDING',
+                reason: outcome.reason,
+                resolution: outcome.resolution,
+                retryCount: nextRetryCount,
+                nextRetryAt: Date.now() + buildConditionSettlementRetryDelayMs(nextRetryCount),
+            });
+        } catch (error) {
+            const nextRetryCount = toSafeNumber(task.retryCount) + 1;
+            const reason =
+                error instanceof Error
+                    ? `condition 级结算回补异常: ${error.message}`
+                    : 'condition 级结算回补发生未知异常';
+            await finalizeConditionSettlementTask({
+                conditionId: task.conditionId,
+                status: 'PENDING',
+                reason,
+                retryCount: nextRetryCount,
+                nextRetryAt: Date.now() + buildConditionSettlementRetryDelayMs(nextRetryCount),
+            });
+            logger.warn(`condition=${task.conditionId} 结算回补稍后重试 reason=${reason}`);
+        }
+    }
+};
+
 const syncTracePortfolioWithPolymarket = async (portfolio: TracePortfolioDocument) => {
     const userPositions = await fetchSourcePositions();
     if (userPositions) {
@@ -1252,11 +1654,24 @@ const syncTracePortfolioWithPolymarket = async (portfolio: TracePortfolioDocumen
     }
 
     for (const [conditionId, positions] of positionsByCondition.entries()) {
-        await settleTraceCondition({
+        const metadata = await resolveConditionMetadata(conditionId, positions);
+        const outcome = await settleTraceCondition({
             portfolio,
             conditionId,
             positions,
+            metadata,
+            forceResolutionRefresh: true,
         });
+
+        if (outcome.status !== 'FILLED') {
+            await upsertConditionSettlementTask({
+                conditionId,
+                metadata,
+                reason: outcome.reason,
+                resolution: outcome.resolution,
+                nextRetryAt: 0,
+            });
+        }
     }
 
     await refreshPortfolioState(portfolio);
@@ -1594,6 +2009,176 @@ const createSkippedTraceResult = (
     unrealizedPnlAfter: toSafeNumber(position.unrealizedPnl),
 });
 
+const createPortfolioOnlySkippedResult = (
+    portfolio: TracePortfolioDocument,
+    reason: string,
+    requestedUsdc = 0,
+    requestedSize = 0,
+    executionPrice = 0
+): ExecutionResult => ({
+    status: 'SKIPPED',
+    reason,
+    requestedSize,
+    executedSize: 0,
+    requestedUsdc,
+    executedUsdc: 0,
+    executionPrice,
+    cashBefore: toSafeNumber(portfolio.cashBalance),
+    cashAfter: toSafeNumber(portfolio.cashBalance),
+    positionSizeBefore: 0,
+    positionSizeAfter: 0,
+    realizedPnlDelta: 0,
+    unrealizedPnlAfter: toSafeNumber(portfolio.unrealizedPnl),
+});
+
+const cancelResolvedConditionOpenWork = async (params: {
+    portfolio: TracePortfolioDocument;
+    conditionId: string;
+    reason: string;
+}) => {
+    const { portfolio, conditionId, reason } = params;
+    const [openBuffers, openBatches] = await Promise.all([
+        TraceIntentBuffer.find({
+            conditionId,
+            state: { $in: ['OPEN', 'FLUSHING'] },
+        }).exec() as Promise<CopyIntentBufferInterface[]>,
+        TraceExecutionBatch.find({
+            conditionId,
+            status: { $in: ['READY', 'PROCESSING'] },
+        }).exec() as Promise<CopyExecutionBatchInterface[]>,
+    ]);
+    const resolutionTrail = [buildPolicyTrailEntry('resolved-condition-guard', 'SKIP', reason)];
+
+    for (const buffer of openBuffers) {
+        const trades = await loadTradesByIds(buffer.sourceTradeIds);
+        const latestTrade = sortTradesAsc(trades).slice(-1)[0];
+        const policyTrail = mergePolicyTrail(buffer.policyTrail, resolutionTrail);
+
+        await recordTraceExecution({
+            executionKey: `buffer:${String(buffer._id)}`,
+            trades,
+            condition: 'reconcile',
+            result: createPortfolioOnlySkippedResult(
+                portfolio,
+                reason,
+                0,
+                0,
+                Math.max(toSafeNumber(latestTrade?.price), 0)
+            ),
+            portfolio,
+            sourceSide: latestTrade?.side || buffer.side || 'BUY',
+            copyIntentBufferId: buffer._id,
+            policyTrail,
+        });
+
+        await TraceIntentBuffer.updateOne(
+            { _id: buffer._id },
+            {
+                $set: {
+                    state: 'SKIPPED',
+                    claimedAt: 0,
+                    reason,
+                    policyTrail,
+                    completedAt: Date.now(),
+                },
+            }
+        );
+    }
+
+    for (const batch of openBatches) {
+        const trades = await loadTradesByIds(batch.sourceTradeIds);
+        const latestTrade = sortTradesAsc(trades).slice(-1)[0];
+        const policyTrail = mergePolicyTrail(batch.policyTrail, resolutionTrail);
+
+        await recordTraceExecution({
+            executionKey: getBatchExecutionKey(batch._id),
+            trades,
+            condition: 'reconcile',
+            result: createPortfolioOnlySkippedResult(
+                portfolio,
+                reason,
+                batch.requestedUsdc,
+                batch.requestedSize,
+                batch.sourcePrice
+            ),
+            portfolio,
+            sourceSide: latestTrade?.side || batch.side || '',
+            copyIntentBufferId: batch.bufferId,
+            copyExecutionBatchId: batch._id,
+            policyTrail,
+        });
+
+        await TraceExecutionBatch.updateOne(
+            { _id: batch._id },
+            {
+                $set: {
+                    status: 'SKIPPED',
+                    reason,
+                    claimedAt: 0,
+                    completedAt: Date.now(),
+                    policyTrail,
+                },
+            }
+        );
+    }
+};
+
+const sweepResolvedConditionOpenWork = async () => {
+    const [openBuffers, openBatches] = await Promise.all([
+        TraceIntentBuffer.find({
+            state: { $in: ['OPEN', 'FLUSHING'] },
+            conditionId: { $exists: true, $ne: '' },
+        }).exec() as Promise<CopyIntentBufferInterface[]>,
+        TraceExecutionBatch.find({
+            status: { $in: ['READY', 'PROCESSING'] },
+            conditionId: { $exists: true, $ne: '' },
+        }).exec() as Promise<CopyExecutionBatchInterface[]>,
+    ]);
+    const titlesByCondition = new Map<string, string>();
+    let portfolio: TracePortfolioDocument | null = null;
+
+    for (const item of [...openBuffers, ...openBatches]) {
+        if (!titlesByCondition.has(item.conditionId)) {
+            titlesByCondition.set(item.conditionId, String(item.title || '').trim());
+        }
+    }
+
+    for (const [conditionId, title] of titlesByCondition.entries()) {
+        const activePositions = (await TracePosition.find({
+            conditionId,
+            size: { $gt: 0 },
+        }).exec()) as TracePositionDocument[];
+        const metadata =
+            title || activePositions.length > 0
+                ? await resolveConditionMetadata(conditionId, activePositions, [
+                      {
+                          conditionId,
+                          title,
+                          slug: buildPolymarketMarketSlugFromTitle(title),
+                          eventSlug: buildPolymarketMarketSlugFromTitle(title),
+                      } as Pick<
+                          UserActivityInterface,
+                          'conditionId' | 'title' | 'slug' | 'eventSlug'
+                      >,
+                  ])
+                : await resolveConditionMetadata(conditionId, activePositions);
+        const resolution = await loadConditionResolution(metadata, {
+            forceRefresh: true,
+        });
+
+        if (!isResolvedPolymarketMarket(resolution)) {
+            continue;
+        }
+
+        portfolio = portfolio || (await ensurePortfolio());
+        await cancelResolvedConditionOpenWork({
+            portfolio,
+            conditionId,
+            reason: `市场已 resolved winner=${resolution?.winnerOutcome || 'unknown'}，已停止后续盘口模拟`,
+        });
+    }
+};
+
 const finalizeSkippedBuffer = async (
     buffer: CopyIntentBufferInterface,
     trades: UserActivityInterface[],
@@ -1817,6 +2402,8 @@ const processConditionTriggerTrade = async (trade: UserActivityInterface) => {
         conditionId: trade.conditionId,
         positions: activePositions,
         triggerTrades: [trade],
+        metadata,
+        forceResolutionRefresh: true,
     });
 
     if (settlementOutcome.status === 'FILLED') {
@@ -1836,6 +2423,20 @@ const processConditionTriggerTrade = async (trade: UserActivityInterface) => {
             resolution: settlementOutcome.resolution,
         });
         if (mergeOutcome.status === 'FILLED') {
+            const remainingPositions = (await TracePosition.find({
+                conditionId: trade.conditionId,
+                size: { $gt: 0 },
+            }).exec()) as TracePositionDocument[];
+            if (remainingPositions.length > 0) {
+                await upsertConditionSettlementTask({
+                    conditionId: trade.conditionId,
+                    metadata,
+                    reason: 'condition 级 merge 完成后仍有未平仓位，等待 resolved 自动结算',
+                    resolution: mergeOutcome.resolution,
+                    triggerTrades: [trade],
+                    nextRetryAt: 0,
+                });
+            }
             return;
         }
 
@@ -1847,6 +2448,21 @@ const processConditionTriggerTrade = async (trade: UserActivityInterface) => {
             metadata,
             resolution: mergeOutcome.resolution,
         });
+
+        const remainingPositions = (await TracePosition.find({
+            conditionId: trade.conditionId,
+            size: { $gt: 0 },
+        }).exec()) as TracePositionDocument[];
+        if (remainingPositions.length > 0) {
+            await upsertConditionSettlementTask({
+                conditionId: trade.conditionId,
+                metadata,
+                reason: mergeOutcome.reason,
+                resolution: mergeOutcome.resolution,
+                triggerTrades: [trade],
+                nextRetryAt: 0,
+            });
+        }
 
         logger.info(
             `condition=${trade.conditionId} type=${trade.type} 已跳过 condition 级 merge ` +
@@ -1866,6 +2482,21 @@ const processConditionTriggerTrade = async (trade: UserActivityInterface) => {
         resolution: settlementOutcome.resolution,
     });
 
+    const remainingPositions = (await TracePosition.find({
+        conditionId: trade.conditionId,
+        size: { $gt: 0 },
+    }).exec()) as TracePositionDocument[];
+    if (remainingPositions.length > 0) {
+        await upsertConditionSettlementTask({
+            conditionId: trade.conditionId,
+            metadata,
+            reason: settlementOutcome.reason,
+            resolution: settlementOutcome.resolution,
+            triggerTrades: [trade],
+            nextRetryAt: 0,
+        });
+    }
+
     logger.info(
         `condition=${trade.conditionId} type=${trade.type} 已跳过 condition 级结算 ` +
             `reason=${settlementOutcome.reason}`
@@ -1873,9 +2504,51 @@ const processConditionTriggerTrade = async (trade: UserActivityInterface) => {
 };
 
 const processPendingTrades = async (trades: UserActivityInterface[]) => {
+    const resolvedConditionsHandled = new Set<string>();
+    let resolvedConditionPortfolio: TracePortfolioDocument | null = null;
+
     for (const trade of trades) {
         if (trade.type === 'MERGE' || trade.type === 'REDEEM') {
             await processConditionTriggerTrade(trade);
+            continue;
+        }
+
+        const metadata = await resolveConditionMetadata(trade.conditionId, [], [trade]);
+        const resolution = await loadConditionResolution(metadata);
+        if (isResolvedPolymarketMarket(resolution)) {
+            resolvedConditionPortfolio = resolvedConditionPortfolio || (await ensurePortfolio());
+            const reason =
+                `市场已 resolved winner=${resolution?.winnerOutcome || 'unknown'}，` +
+                '已跳过盘口模拟并转入 condition 级结算';
+
+            if (!resolvedConditionsHandled.has(trade.conditionId)) {
+                await cancelResolvedConditionOpenWork({
+                    portfolio: resolvedConditionPortfolio,
+                    conditionId: trade.conditionId,
+                    reason,
+                });
+                resolvedConditionsHandled.add(trade.conditionId);
+            }
+
+            await recordTraceExecution({
+                executionKey: `resolved-trade:${trade.activityKey || trade.transactionHash || String(trade._id)}`,
+                trades: [trade],
+                condition: 'reconcile',
+                result: createSkippedTraceResult(
+                    resolvedConditionPortfolio,
+                    await loadExistingPosition(trade),
+                    reason,
+                    Math.max(toSafeNumber(trade.usdcSize), 0),
+                    Math.max(toSafeNumber(trade.size), 0),
+                    Math.max(toSafeNumber(trade.price), 0)
+                ),
+                portfolio: resolvedConditionPortfolio,
+                sourceSide: trade.side || trade.type || 'TRADE',
+            });
+
+            logger.info(
+                `condition=${trade.conditionId} tx=${trade.transactionHash} 已跳过 resolved 市场盘口模拟`
+            );
             continue;
         }
 
@@ -2187,6 +2860,7 @@ const paperTradeExecutor = async (marketStream: ClobMarketStream) => {
     logger.info('启动模拟跟单');
     const processingCount = await TraceExecutionBatch.countDocuments({ status: 'PROCESSING' });
     let lastTracePortfolioSyncAt = 0;
+    let lastSettlementTaskSyncAt = 0;
     if (processingCount > 0) {
         logger.warn(`检测到 ${processingCount} 个 PROCESSING 批次，本次启动会自动回收续跑`);
     }
@@ -2198,6 +2872,13 @@ const paperTradeExecutor = async (marketStream: ClobMarketStream) => {
             logger.info(`发现 ${pendingTrades.length} 条待处理模拟交易`);
             await processPendingTrades(pendingTrades);
         }
+
+        if (Date.now() - lastSettlementTaskSyncAt >= TRACE_SETTLEMENT_TASK_SYNC_INTERVAL_MS) {
+            await syncConditionSettlementTasksFromOpenPositions();
+            lastSettlementTaskSyncAt = Date.now();
+        }
+        await processReadyConditionSettlementTasks();
+        await sweepResolvedConditionOpenWork();
 
         await flushReadyBuffers();
         await executeReadyBatches(marketStream);
