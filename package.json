@@ -11,7 +11,8 @@
         "audit:osv": "node scripts/osv-audit.mjs",
         "audit:osv:all": "node scripts/osv-audit.mjs --include-dev",
         "audit:all": "npm run audit:npm:all && npm run audit:osv:all",
-        "report:summary": "node scripts/execution-summary.mjs"
+        "report:summary": "node scripts/execution-summary.mjs",
+        "report:trace-audit": "node scripts/trace-settlement-audit.mjs"
     },
     "keywords": [],
     "author": "BlackSky-jose",
