@@ -389,6 +389,30 @@ export const isResolvedPolymarketMarket = (resolution: PolymarketMarketResolutio
     );
 };
 
+export const isTradablePolymarketMarket = (resolution: PolymarketMarketResolution | null) => {
+    if (!resolution) {
+        return true;
+    }
+
+    const normalizedStatus = String(resolution.resolvedStatus || '')
+        .trim()
+        .toLowerCase();
+
+    if (normalizedStatus === 'resolved' || normalizedStatus === 'closed') {
+        return false;
+    }
+
+    if (resolution.closed || resolution.acceptingOrders === false) {
+        return false;
+    }
+
+    if (resolution.active === false || resolution.archived === true) {
+        return false;
+    }
+
+    return true;
+};
+
 export const fetchPolymarketMarketResolution = async (
     params: FetchPolymarketMarketResolutionParams
 ): Promise<PolymarketMarketResolution | null> => {

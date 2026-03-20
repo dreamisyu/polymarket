@@ -293,7 +293,7 @@ export const ENV = {
         'ACTIVITY_SYNC_LIMIT'
     ),
     ACTIVITY_ADJACENT_MERGE_WINDOW_MS: parsePositiveInteger(
-        readEnv('ACTIVITY_ADJACENT_MERGE_WINDOW_MS') || '15000',
+        readEnv('ACTIVITY_ADJACENT_MERGE_WINDOW_MS', 'BUY_SOURCE_MERGE_WINDOW_MS') || '15000',
         'ACTIVITY_ADJACENT_MERGE_WINDOW_MS'
     ),
     ACTIVITY_SYNC_OVERLAP_MS: parsePositiveInteger(
@@ -308,6 +308,10 @@ export const ENV = {
     BUY_MIN_TOP_UP_TRIGGER_USDC: parseNonNegativeNumber(
         readEnv('BUY_MIN_TOP_UP_TRIGGER_USDC') || '0.7',
         'BUY_MIN_TOP_UP_TRIGGER_USDC'
+    ),
+    BUY_INTENT_BUFFER_MAX_MS: parsePositiveInteger(
+        readEnv('BUY_INTENT_BUFFER_MAX_MS') || '2000',
+        'BUY_INTENT_BUFFER_MAX_MS'
     ),
     BUY_DUST_RESIDUAL_MODE: parseBuyDustResidualMode(readEnv('BUY_DUST_RESIDUAL_MODE'), 'trim'),
     MARKET_CACHE_TTL_MS: parsePositiveInteger(

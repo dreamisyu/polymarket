@@ -34,6 +34,8 @@ export interface CopyIntentBufferInterface {
     sourceTradeCount: number;
     sourceStartedAt: number;
     sourceEndedAt: number;
+    requestedUsdc: number;
+    sourcePrice: number;
     flushAfter: number;
     expireAt: number;
     claimedAt?: number;

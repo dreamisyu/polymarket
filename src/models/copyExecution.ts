@@ -44,6 +44,8 @@ const copyIntentBufferSchema = new Schema<CopyIntentBufferInterface>(
         sourceTradeCount: { type: Number, required: true, default: 0 },
         sourceStartedAt: { type: Number, required: true, default: 0 },
         sourceEndedAt: { type: Number, required: true, default: 0 },
+        requestedUsdc: { type: Number, required: true, default: 0 },
+        sourcePrice: { type: Number, required: true, default: 0 },
         flushAfter: { type: Number, required: true, default: 0 },
         expireAt: { type: Number, required: true, default: 0 },
         claimedAt: { type: Number, required: false, default: 0 },
@@ -103,11 +105,7 @@ const getCopyIntentBufferModel = (walletAddress: string, namespace?: string) => 
     const suffix = buildSuffix(walletAddress, namespace);
     const collectionName = `copy_intent_buffers_${suffix}`;
     const modelName = `CopyIntentBuffers_${suffix}`;
-    return getModel<CopyIntentBufferInterface>(
-        modelName,
-        copyIntentBufferSchema,
-        collectionName
-    );
+    return getModel<CopyIntentBufferInterface>(modelName, copyIntentBufferSchema, collectionName);
 };
 
 const getCopyExecutionBatchModel = (walletAddress: string, namespace?: string) => {

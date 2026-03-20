@@ -39,6 +39,29 @@ const SNAPSHOT_STATUS_PRIORITY = {
     PARTIAL: 2,
 } as const;
 const SNAPSHOT_MERGE_TOLERANCE = 1e-6;
+const NON_SOURCE_ACTIVITY_FIELDS = new Set([
+    '_id',
+    '__v',
+    'bot',
+    'botExcutedTime',
+    'botStatus',
+    'botClaimedAt',
+    'botExecutedAt',
+    'botLastError',
+    'botOrderIds',
+    'botTransactionHashes',
+    'botSubmittedAt',
+    'botConfirmedAt',
+    'botMatchedAt',
+    'botMinedAt',
+    'botSubmissionStatus',
+    'botBufferId',
+    'botExecutionBatchId',
+    'botBufferedAt',
+    'botPolicyTrail',
+    'createdAt',
+    'updatedAt',
+]);
 
 if (!USER_ADDRESS) {
     throw new Error('USER_ADDRESS is not defined');
@@ -95,6 +118,11 @@ const hasCompleteSnapshot = (trade: UserActivityInterface) =>
     Number.isFinite(trade.sourcePositionSizeAfterTrade) &&
     Number.isFinite(trade.sourcePositionSizeBeforeTrade);
 
+const hasMergeableSnapshot = (snapshot: TradeSnapshotFields) =>
+    snapshot.snapshotStatus !== 'PARTIAL' &&
+    Number.isFinite(snapshot.sourcePositionSizeAfterTrade) &&
+    Number.isFinite(snapshot.sourcePositionSizeBeforeTrade);
+
 const normalizeTrade = (trade: UserActivityInterface): UserActivityInterface | null => {
     const baseTrade =
         typeof (trade as { toObject?: () => UserActivityInterface }).toObject === 'function'
@@ -128,6 +156,11 @@ const normalizeTrade = (trade: UserActivityInterface): UserActivityInterface | n
             String(baseTrade.activityKey || '').trim() || buildActivityKey(normalizedTrade),
     };
 };
+
+const sanitizeSourceActivityUpdateSet = (trade: Record<string, unknown>) =>
+    Object.fromEntries(
+        Object.entries(trade).filter(([key]) => !NON_SOURCE_ACTIVITY_FIELDS.has(key))
+    );
 
 const dedupeTradesByActivityKey = (trades: UserActivityInterface[]) => {
     const tradeMap = new Map<string, UserActivityInterface>();
@@ -266,10 +299,7 @@ const canMergeAdjacentActivities = (
         return false;
     }
 
-    if (
-        previousSnapshot.snapshotStatus !== 'COMPLETE' ||
-        nextSnapshot.snapshotStatus !== 'COMPLETE'
-    ) {
+    if (!hasMergeableSnapshot(previousSnapshot) || !hasMergeableSnapshot(nextSnapshot)) {
         return false;
     }
 
@@ -633,10 +663,10 @@ const upsertTrades = async (
     const bulkOps = fetchedTrades.map((trade) => {
         const existingTrade = storedTradeMap.get(trade.activityKey || '');
         const snapshotData = prepareSnapshotData(trade, snapshots, snapshotCapturedAt);
-        const updateSet: Record<string, unknown> = {
+        const updateSet: Record<string, unknown> = sanitizeSourceActivityUpdateSet({
             ...trade,
             executionIntent: resolveExecutionIntent(trade),
-        };
+        });
 
         if (existingTrade && shouldUpdateSnapshot(existingTrade, snapshotData)) {
             Object.assign(updateSet, snapshotData);

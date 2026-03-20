@@ -19,6 +19,7 @@ import postOrder, { PostOrderResult } from '../utils/postOrder';
 import {
     fetchPolymarketMarketResolution,
     isResolvedPolymarketMarket,
+    isTradablePolymarketMarket,
     normalizeOutcomeLabel,
 } from '../utils/polymarketMarketResolution';
 import resolveTradeCondition from '../utils/resolveTradeCondition';
@@ -1167,10 +1168,10 @@ const processPendingTrades = async (clobClient: ClobClient, trades: UserActivity
                 marketSlug: String(trade.eventSlug || trade.slug || '').trim(),
                 title: trade.title,
             });
-            if (isResolvedPolymarketMarket(resolution)) {
-                const reason =
-                    `市场已 resolved winner=${resolution?.winnerOutcome || 'unknown'}，` +
-                    '已跳过真实执行并交由结算回收器处理';
+            if (resolution && !isTradablePolymarketMarket(resolution)) {
+                const reason = isResolvedPolymarketMarket(resolution)
+                    ? `市场已 resolved winner=${resolution?.winnerOutcome || 'unknown'}，已跳过真实执行并交由结算回收器处理`
+                    : '市场已停止接单，已跳过真实执行并等待结算回收';
                 await cancelOpenBuyBuffersForAsset(trade);
                 await cancelReadyBuyBatchesForAsset(trade);
                 await finalizeTerminalTradeWithLog(trade, 'SKIPPED', reason);
