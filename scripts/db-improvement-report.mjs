@@ -34,6 +34,10 @@ const DEFAULT_TRACE_ID = readEnv('TRACE_ID') || 'default';
 const DEFAULT_USER_ADDRESS = readEnv('USER_ADDRESS') || '';
 const DEFAULT_MONGO_URI = readEnv('MONGO_URI') || '';
 const DEFAULT_TOP = 8;
+const BUY_MIN_TOP_UP_TRIGGER_USDC = Number.parseFloat(
+    readEnv('BUY_MIN_TOP_UP_TRIGGER_USDC') || '0.7'
+);
+const BOOTSTRAP_POLICY_IDS = new Set(['first-entry-ticket', 'buffer-min-top-up']);
 
 const parseArgs = (argv) => {
     const parsed = {
@@ -129,6 +133,9 @@ if (argv.help) {
 }
 
 const getSourceTradeCount = (item) => Math.max(toSafeNumber(item?.sourceTradeCount, 1), 1);
+const hasPolicyId = (policyTrail, policyIds) =>
+    Array.isArray(policyTrail) &&
+    policyTrail.some((entry) => policyIds.has(String(entry?.policyId || '').trim()));
 
 const buildReasonSummary = (items, getter, top) => {
     const counts = new Map();
@@ -239,6 +246,15 @@ const summarizeBatches = (batches, top) => {
     const completedBatches = batches.filter((item) =>
         ['CONFIRMED', 'SKIPPED', 'FAILED'].includes(String(item.status || '').toUpperCase())
     );
+    const buyBatches = batches.filter(
+        (item) => String(item.condition || '').toLowerCase() === 'buy'
+    );
+    const buyConfirmedCount = buyBatches.filter(
+        (item) => String(item.status || '').toUpperCase() === 'CONFIRMED'
+    ).length;
+    const buySkippedCount = buyBatches.filter(
+        (item) => String(item.status || '').toUpperCase() === 'SKIPPED'
+    ).length;
 
     return {
         totalDocs: batches.length,
@@ -253,6 +269,18 @@ const summarizeBatches = (batches, top) => {
         retryingCount: batches.filter((item) => toSafeNumber(item.retryCount) > 0).length,
         activeCount: activeBatches.length,
         completedCount: completedBatches.length,
+        bootstrapBatchCount: buyBatches.filter((item) =>
+            hasPolicyId(item.policyTrail, BOOTSTRAP_POLICY_IDS)
+        ).length,
+        buySlippageSkipCount: buyBatches.filter(
+            (item) =>
+                String(item.status || '').toUpperCase() === 'SKIPPED' &&
+                String(item.reason || '').includes('当前买价超出允许滑点')
+        ).length,
+        buyParticipationPct:
+            buyConfirmedCount + buySkippedCount > 0
+                ? pct(buyConfirmedCount, buyConfirmedCount + buySkippedCount)
+                : 0,
         topReasons: buildReasonSummary(batches, (item) => item.reason, top),
         submissionStatusCounts: takeTopEntries(
             countBy(batches, (item) => item.submissionStatus || 'UNSET'),
@@ -261,15 +289,30 @@ const summarizeBatches = (batches, top) => {
     };
 };
 
-const summarizeBuffers = (buffers, top) => ({
-    totalDocs: buffers.length,
-    stateCounts: takeTopEntries(
-        countBy(buffers, (item) => item.state || 'UNKNOWN'),
-        top
-    ).map(([key, value]) => ({ key, value })),
-    totalSourceTrades: sumBy(buffers, (item) => getSourceTradeCount(item)),
-    topReasons: buildReasonSummary(buffers, (item) => item.reason, top),
-});
+const summarizeBuffers = (buffers, top) => {
+    const nearThresholdBuffers = buffers.filter((item) => {
+        const requestedUsdc = toSafeNumber(item.requestedUsdc);
+        return requestedUsdc >= BUY_MIN_TOP_UP_TRIGGER_USDC && requestedUsdc < 1;
+    });
+
+    return {
+        totalDocs: buffers.length,
+        stateCounts: takeTopEntries(
+            countBy(buffers, (item) => item.state || 'UNKNOWN'),
+            top
+        ).map(([key, value]) => ({ key, value })),
+        totalSourceTrades: sumBy(buffers, (item) => getSourceTradeCount(item)),
+        nearThresholdSkipCount: nearThresholdBuffers.filter(
+            (item) => String(item.state || '').toUpperCase() === 'SKIPPED'
+        ).length,
+        bufferTopUpConvertedCount: buffers.filter(
+            (item) =>
+                String(item.state || '').toUpperCase() === 'CLOSED' &&
+                hasPolicyId(item.policyTrail, new Set(['buffer-min-top-up']))
+        ).length,
+        topReasons: buildReasonSummary(buffers, (item) => item.reason, top),
+    };
+};
 
 const summarizeTraceExecutions = (executions, top) => {
     const filled = executions.filter(
@@ -302,6 +345,20 @@ const summarizeTraceExecutions = (executions, top) => {
             (item) => String(item.executionCondition || '').toLowerCase() === 'settle'
         ).length,
         topReasons: buildReasonSummary([...skipped, ...failed], (item) => item.reason, top),
+    };
+};
+
+const summarizeTracePositions = (positions) => {
+    const openPositions = positions.filter((item) => toSafeNumber(item.size) > 0);
+    const bootstrapPositions = openPositions.filter(
+        (item) => toSafeNumber(item.bootstrapEntryUsdc) > 0
+    );
+
+    return {
+        totalDocs: positions.length,
+        openCount: openPositions.length,
+        activeBootstrapPositionCount: bootstrapPositions.length,
+        activeBootstrapExposureUsdc: sumBy(bootstrapPositions, (item) => item.bootstrapEntryUsdc),
     };
 };
 
@@ -377,6 +434,17 @@ const buildSuggestions = ({
         suggestions,
         retryRate >= 20,
         '执行批次重试率偏高，建议结合运行日志继续拆分确认异常、滑点失败、余额读取失败等原因。'
+    );
+    pushSuggestion(
+        suggestions,
+        toSafeNumber(bufferSummary?.nearThresholdSkipCount) > 0,
+        '仍有接近 1 USDC 门槛的累计缓冲被放弃，优先检查 buffer 补齐策略是否生效，以及 flush 时是否仍被并发批次占住。'
+    );
+    pushSuggestion(
+        suggestions,
+        toSafeNumber(batchSummary?.buyParticipationPct) < 50 &&
+            toSafeNumber(batchSummary?.totalDocs) > 0,
+        'buy 批次参与率仍偏低，建议同时观察近门槛 buffer 损耗和滑点跳过批次，优先减少延迟造成的错失。'
     );
     pushSuggestion(
         suggestions,
@@ -484,6 +552,9 @@ const renderTextSummary = (summary) => {
         `- 平均每批覆盖源交易: ${toSafeNumber(summary.batches.avgSourceTradesPerBatch).toFixed(2)}`
     );
     lines.push(`- 重试批次数: ${formatCount(summary.batches.retryingCount)}`);
+    lines.push(`- Buy 批次参与率: ${formatPct(summary.batches.buyParticipationPct)}`);
+    lines.push(`- Bootstrap 批次数: ${formatCount(summary.batches.bootstrapBatchCount)}`);
+    lines.push(`- Buy 滑点跳过批次: ${formatCount(summary.batches.buySlippageSkipCount)}`);
     lines.push(
         ...renderTopItems(
             '批次状态',
@@ -502,6 +573,8 @@ const renderTextSummary = (summary) => {
     lines.push('');
     lines.push('遗留缓冲区');
     lines.push(`- 文档数: ${formatCount(summary.buffers.totalDocs)}`);
+    lines.push(`- 近门槛 buffer 跳过数: ${formatCount(summary.buffers.nearThresholdSkipCount)}`);
+    lines.push(`- buffer 补齐成批次数: ${formatCount(summary.buffers.bufferTopUpConvertedCount)}`);
     lines.push(
         ...renderTopItems(
             '缓冲状态',
@@ -509,6 +582,18 @@ const renderTextSummary = (summary) => {
             (item) => `${item.key}: ${item.value}`
         )
     );
+
+    if (summary.tracePositions) {
+        lines.push('');
+        lines.push('Trace 仓位概览');
+        lines.push(`- 未平仓位数: ${formatCount(summary.tracePositions.openCount)}`);
+        lines.push(
+            `- 活跃 bootstrap 仓位数: ${formatCount(summary.tracePositions.activeBootstrapPositionCount)}`
+        );
+        lines.push(
+            `- 活跃 bootstrap 暴露: ${formatUsd(summary.tracePositions.activeBootstrapExposureUsdc)}`
+        );
+    }
 
     if (summary.traceExecutions) {
         lines.push('');
@@ -613,6 +698,13 @@ const main = async () => {
                   { sort: { sourceTimestamp: 1 } }
               )
             : [];
+        const tracePositions = traceCollections
+            ? await fetchCollectionDocs(
+                  traceCollections.position,
+                  {},
+                  { sort: { lastTradedAt: 1 } }
+              )
+            : [];
         const settlementTasks = traceCollections
             ? await fetchCollectionDocs(
                   traceCollections.settlementTask,
@@ -629,6 +721,8 @@ const main = async () => {
         const bufferSummary = summarizeBuffers(buffers, argv.top);
         const traceExecutionSummary =
             mode === 'trace' ? summarizeTraceExecutions(traceExecutions, argv.top) : null;
+        const tracePositionSummary =
+            mode === 'trace' ? summarizeTracePositions(tracePositions) : null;
         const settlementSummary =
             mode === 'trace' ? summarizeSettlementTasks(settlementTasks, argv.top) : null;
 
@@ -648,6 +742,7 @@ const main = async () => {
             batches: batchSummary,
             buffers: bufferSummary,
             traceExecutions: traceExecutionSummary,
+            tracePositions: tracePositionSummary,
             settlementTasks: settlementSummary,
             tracePortfolio,
         };

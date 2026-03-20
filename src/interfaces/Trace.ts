@@ -69,6 +69,8 @@ export interface TracePositionInterface {
     totalSoldSize: number;
     totalBoughtUsdc: number;
     totalSoldUsdc: number;
+    bootstrapEntryUsdc?: number;
+    bootstrapPolicyId?: string;
     lastSourceTransactionHash: string;
     lastTradedAt: number;
     closedAt?: number;

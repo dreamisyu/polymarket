@@ -55,6 +55,8 @@ export const evaluateDirectBuyIntent = (params: {
     hasLocalExposure?: boolean;
     hasPendingBuyExposure?: boolean;
     sourcePositionBeforeTradeSize?: number;
+    allowLocalFirstEntryTicket?: boolean;
+    bootstrapBudgetRemainingUsdc?: number;
 }): DirectBuyIntentEvaluation => {
     const {
         trade,
@@ -62,10 +64,17 @@ export const evaluateDirectBuyIntent = (params: {
         hasLocalExposure = false,
         hasPendingBuyExposure = false,
         sourcePositionBeforeTradeSize = Number.POSITIVE_INFINITY,
+        allowLocalFirstEntryTicket = false,
+        bootstrapBudgetRemainingUsdc = Number.POSITIVE_INFINITY,
     } = params;
     const sourcePrice = Math.max(toSafeNumber(trade.price), 0);
     const target = computeBuyTargetUsdc(trade, availableBalance);
     const baseReason = dedupeReasons(target.reason, target.note);
+    const isOpeningLocalPosition = !hasLocalExposure && !hasPendingBuyExposure;
+    const bootstrapBudgetAllowsTicket =
+        bootstrapBudgetRemainingUsdc + EPSILON >= BUY_FIRST_ENTRY_TICKET_USDC;
+    const bootstrapBudgetAllowsMinTopUp =
+        bootstrapBudgetRemainingUsdc + EPSILON >= MIN_MARKET_BUY_USDC;
 
     if (target.status !== 'READY') {
         return {
@@ -100,9 +109,9 @@ export const evaluateDirectBuyIntent = (params: {
         BUY_FIRST_ENTRY_TICKET_USDC >= MIN_MARKET_BUY_USDC &&
         target.requestedUsdc >= BUY_FIRST_ENTRY_SIGNAL_MIN_USDC &&
         availableBalance >= BUY_FIRST_ENTRY_TICKET_USDC &&
-        !hasLocalExposure &&
-        !hasPendingBuyExposure &&
-        isSourceEntryTrade
+        isOpeningLocalPosition &&
+        bootstrapBudgetAllowsTicket &&
+        (allowLocalFirstEntryTicket || isSourceEntryTrade)
     ) {
         const ticketReason = dedupeReasons(
             baseReason,
@@ -127,7 +136,8 @@ export const evaluateDirectBuyIntent = (params: {
         BUY_MIN_TOP_UP_ENABLED &&
         BUY_MIN_TOP_UP_ALLOWED_BY_ORDER_CAP &&
         target.requestedUsdc >= BUY_MIN_TOP_UP_TRIGGER_USDC &&
-        availableBalance >= MIN_MARKET_BUY_USDC
+        availableBalance >= MIN_MARKET_BUY_USDC &&
+        (!allowLocalFirstEntryTicket || !isOpeningLocalPosition || bootstrapBudgetAllowsMinTopUp)
     ) {
         const topUpReason = dedupeReasons(baseReason, '已按最小买单门槛补齐到 1 USDC');
         return {

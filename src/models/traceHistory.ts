@@ -40,6 +40,8 @@ const positionSchema = new Schema<TracePositionInterface>(
         totalSoldSize: { type: Number, required: true, default: 0 },
         totalBoughtUsdc: { type: Number, required: true, default: 0 },
         totalSoldUsdc: { type: Number, required: true, default: 0 },
+        bootstrapEntryUsdc: { type: Number, required: false, default: 0 },
+        bootstrapPolicyId: { type: String, required: false, default: '' },
         lastSourceTransactionHash: { type: String, required: false },
         lastTradedAt: { type: Number, required: false },
         closedAt: { type: Number, required: false },

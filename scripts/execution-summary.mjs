@@ -18,6 +18,10 @@ const ENV_FILE_PATH =
 dotenv.config({ path: ENV_FILE_PATH });
 
 const RETRY_LIMIT = Number.parseInt(process.env.RETRY_LIMIT || '3', 10);
+const BUY_MIN_TOP_UP_TRIGGER_USDC = Number.parseFloat(
+    process.env.BUY_MIN_TOP_UP_TRIGGER_USDC || '0.7'
+);
+const BOOTSTRAP_POLICY_IDS = new Set(['first-entry-ticket', 'buffer-min-top-up']);
 const DEFAULT_MODE = process.env.EXECUTION_MODE === 'trace' ? 'trace' : 'live';
 
 const parseArgs = (argv) => {
@@ -109,6 +113,9 @@ const formatUsd = (value) => `${toSafeNumber(value).toFixed(4)} USDC`;
 const formatPct = (value) => `${toSafeNumber(value).toFixed(2)}%`;
 const countItems = (items, predicate) => items.filter(predicate).length;
 const hasCollectionDocs = (items) => Array.isArray(items) && items.length > 0;
+const hasPolicyId = (policyTrail, policyIds) =>
+    Array.isArray(policyTrail) &&
+    policyTrail.some((entry) => policyIds.has(String(entry?.policyId || '').trim()));
 const getSourceTradeCount = (item, fieldName = 'sourceTradeIds') => {
     const storedCount = toSafeNumber(item?.sourceTradeCount, 0);
     if (storedCount > 0) {
@@ -325,6 +332,15 @@ const summarizeExecutionBatches = (batches) => {
     const confirmedBatches = batches.filter(
         (batch) => normalizeStatus(batch.status) === 'CONFIRMED'
     );
+    const buyBatches = batches.filter((batch) => normalizeCondition(batch.condition) === 'buy');
+    const buyConfirmedCount = countItems(
+        buyBatches,
+        (batch) => normalizeStatus(batch.status) === 'CONFIRMED'
+    );
+    const buySkippedCount = countItems(
+        buyBatches,
+        (batch) => normalizeStatus(batch.status) === 'SKIPPED'
+    );
     return {
         totalCount: batches.length,
         readyCount: countItems(batches, (batch) => normalizeStatus(batch.status) === 'READY'),
@@ -339,10 +355,12 @@ const summarizeExecutionBatches = (batches) => {
         confirmedCount: confirmedBatches.length,
         skippedCount: countItems(batches, (batch) => normalizeStatus(batch.status) === 'SKIPPED'),
         failedCount: countItems(batches, (batch) => normalizeStatus(batch.status) === 'FAILED'),
-        buyCount: countItems(
-            confirmedBatches,
-            (batch) => normalizeCondition(batch.condition) === 'buy'
-        ),
+        buyCount: buyConfirmedCount,
+        buySkippedCount,
+        buyParticipationPct:
+            buyConfirmedCount + buySkippedCount > 0
+                ? (buyConfirmedCount / (buyConfirmedCount + buySkippedCount)) * 100
+                : 0,
         sellCount: countItems(
             confirmedBatches,
             (batch) => normalizeCondition(batch.condition) === 'sell'
@@ -354,6 +372,15 @@ const summarizeExecutionBatches = (batches) => {
         sourceTradeCount: sumBy(batches, (batch) => getSourceTradeCount(batch)),
         totalRequestedUsdc: sumBy(batches, (batch) => batch.requestedUsdc),
         totalRequestedSize: sumBy(batches, (batch) => batch.requestedSize),
+        bootstrapBatchCount: countItems(batches, (batch) =>
+            hasPolicyId(batch.policyTrail, BOOTSTRAP_POLICY_IDS)
+        ),
+        buySlippageSkipCount: countItems(
+            buyBatches,
+            (batch) =>
+                normalizeStatus(batch.status) === 'SKIPPED' &&
+                String(batch.reason || '').includes('当前买价超出允许滑点')
+        ),
     };
 };
 
@@ -361,6 +388,10 @@ const summarizeIntentBuffers = (buffers) => {
     const activeBuffers = buffers.filter((buffer) =>
         ['OPEN', 'FLUSHING'].includes(normalizeStatus(buffer.state))
     );
+    const nearThresholdBuffers = buffers.filter((buffer) => {
+        const requestedUsdc = toSafeNumber(buffer.requestedUsdc);
+        return requestedUsdc >= BUY_MIN_TOP_UP_TRIGGER_USDC && requestedUsdc < 1;
+    });
     return {
         totalCount: buffers.length,
         openCount: countItems(buffers, (buffer) => normalizeStatus(buffer.state) === 'OPEN'),
@@ -372,6 +403,23 @@ const summarizeIntentBuffers = (buffers) => {
         closedCount: countItems(buffers, (buffer) => normalizeStatus(buffer.state) === 'CLOSED'),
         sourceTradeCount: sumBy(buffers, (buffer) => getSourceTradeCount(buffer)),
         activeSourceTradeCount: sumBy(activeBuffers, (buffer) => getSourceTradeCount(buffer)),
+        bufferLossPct:
+            buffers.length > 0
+                ? (countItems(buffers, (buffer) => normalizeStatus(buffer.state) === 'SKIPPED') /
+                      buffers.length) *
+                  100
+                : 0,
+        nearThresholdSkipCount: countItems(
+            nearThresholdBuffers,
+            (buffer) => normalizeStatus(buffer.state) === 'SKIPPED'
+        ),
+        bufferTopUpConvertedCount: countItems(
+            buffers,
+            (buffer) =>
+                normalizeStatus(buffer.state) === 'CLOSED' &&
+                hasPolicyId(buffer.policyTrail, BOOTSTRAP_POLICY_IDS) &&
+                hasPolicyId(buffer.policyTrail, new Set(['buffer-min-top-up']))
+        ),
     };
 };
 
@@ -686,6 +734,11 @@ const printHumanReadable = (summary) => {
                 `${toSafeNumber(summary.batchSummary.failedCount)}`
         );
         lines.push(`- 批次覆盖源交易数: ${toSafeNumber(summary.batchSummary.sourceTradeCount)}`);
+        lines.push(`- Buy 批次参与率: ${formatPct(summary.batchSummary.buyParticipationPct)}`);
+        lines.push(`- Bootstrap 批次数: ${toSafeNumber(summary.batchSummary.bootstrapBatchCount)}`);
+        lines.push(
+            `- Buy 滑点跳过批次: ${toSafeNumber(summary.batchSummary.buySlippageSkipCount)}`
+        );
     }
     if (summary.bufferSummary?.totalCount) {
         lines.push(
@@ -697,6 +750,13 @@ const printHumanReadable = (summary) => {
         );
         lines.push(
             `- 活跃缓冲区内源交易数: ${toSafeNumber(summary.bufferSummary.activeSourceTradeCount)}`
+        );
+        lines.push(`- Buffer 损耗率: ${formatPct(summary.bufferSummary.bufferLossPct)}`);
+        lines.push(
+            `- 近门槛 buffer 跳过数: ${toSafeNumber(summary.bufferSummary.nearThresholdSkipCount)}`
+        );
+        lines.push(
+            `- buffer 补齐成批次数: ${toSafeNumber(summary.bufferSummary.bufferTopUpConvertedCount)}`
         );
     }
 

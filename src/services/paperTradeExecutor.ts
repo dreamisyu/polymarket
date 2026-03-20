@@ -76,8 +76,13 @@ const TRACE_SETTLEMENT_RETRY_BASE_MS = 5_000;
 const TRACE_SETTLEMENT_RETRY_MAX_MS = 60_000;
 const TRACE_SOURCE_LOOKBACK_MS = ENV.TRACE_SOURCE_LOOKBACK_MS;
 const BUY_INTENT_BUFFER_MAX_MS = ENV.BUY_INTENT_BUFFER_MAX_MS;
+const BUY_MIN_TOP_UP_TRIGGER_USDC = ENV.BUY_MIN_TOP_UP_TRIGGER_USDC;
+const BUY_BOOTSTRAP_MAX_ACTIVE_RATIO = ENV.BUY_BOOTSTRAP_MAX_ACTIVE_RATIO;
 const MIN_MARKET_BUY_USDC = 1;
 const TRACE_BUY_BUFFER_POLICY_ID = 'trace-buy-intent-buffer';
+const FIRST_ENTRY_TICKET_POLICY_ID = 'first-entry-ticket';
+const BUFFER_MIN_TOP_UP_POLICY_ID = 'buffer-min-top-up';
+const BOOTSTRAP_POLICY_IDS = [FIRST_ENTRY_TICKET_POLICY_ID, BUFFER_MIN_TOP_UP_POLICY_ID];
 const RESOLUTION_CACHE_RESOLVED_TTL_MS = 10 * 60_000;
 const RESOLUTION_CACHE_UNRESOLVED_TTL_MS = 30_000;
 const resolutionCache = new Map<
@@ -174,6 +179,16 @@ const buildPolicyTrailEntry = (
     reason,
     timestamp: Date.now(),
 });
+const hasPolicyId = (policyTrail: ExecutionPolicyTrailEntry[] | undefined, policyIds: string[]) => {
+    const policyIdSet = new Set(policyIds);
+    return (policyTrail || []).some((entry) =>
+        policyIdSet.has(String(entry.policyId || '').trim())
+    );
+};
+const getBootstrapPolicyIdFromTrail = (policyTrail: ExecutionPolicyTrailEntry[] | undefined) =>
+    BOOTSTRAP_POLICY_IDS.find((policyId) =>
+        (policyTrail || []).some((entry) => String(entry.policyId || '').trim() === policyId)
+    ) || '';
 const buildLeaseCutoff = () => Date.now() - PROCESSING_LEASE_MS;
 const buildConditionSettlementRetryDelayMs = (retryCount: number) =>
     Math.min(
@@ -328,6 +343,8 @@ const createEmptyPosition = (trade: UserActivityInterface): TracePositionDocumen
         totalSoldSize: 0,
         totalBoughtUsdc: 0,
         totalSoldUsdc: 0,
+        bootstrapEntryUsdc: 0,
+        bootstrapPolicyId: '',
         lastSourceTransactionHash: '',
         lastTradedAt: trade.timestamp,
     });
@@ -791,9 +808,18 @@ const simulateTradeAgainstMarket = async (params: {
     condition: string;
     marketStream: ClobMarketStream;
     executionTarget?: ExecutionTargetOverrides;
+    policyTrail?: ExecutionPolicyTrailEntry[];
 }) => {
-    const { portfolio, position, trade, userPosition, condition, marketStream, executionTarget } =
-        params;
+    const {
+        portfolio,
+        position,
+        trade,
+        userPosition,
+        condition,
+        marketStream,
+        executionTarget,
+        policyTrail,
+    } = params;
     const marketSnapshot = await marketStream.getSnapshot(trade.asset);
     if (!marketSnapshot) {
         throw new RetryableTraceError('市场快照不可用');
@@ -802,6 +828,7 @@ const simulateTradeAgainstMarket = async (params: {
     const workingSnapshot = cloneMarketSnapshot(marketSnapshot);
     const cashBefore = toSafeNumber(portfolio.cashBalance);
     const positionSizeBefore = toSafeNumber(position.size);
+    const bootstrapPolicyId = getBootstrapPolicyIdFromTrail(policyTrail);
     let remainingRequestedUsdc: number | undefined;
     let remainingRequestedSize: number | undefined;
     let totalExecutedUsdc = 0;
@@ -941,7 +968,20 @@ const simulateTradeAgainstMarket = async (params: {
     if (position.size === 0) {
         position.costBasis = 0;
         position.avgPrice = 0;
+        position.bootstrapEntryUsdc = 0;
+        position.bootstrapPolicyId = '';
         position.closedAt = trade.timestamp;
+    } else if (
+        condition === 'buy' &&
+        positionSizeBefore <= EPSILON &&
+        totalExecutedUsdc > 0 &&
+        bootstrapPolicyId
+    ) {
+        position.bootstrapEntryUsdc = totalExecutedUsdc;
+        position.bootstrapPolicyId = bootstrapPolicyId;
+    } else if (condition === 'buy' && positionSizeBefore <= EPSILON && totalExecutedUsdc > 0) {
+        position.bootstrapEntryUsdc = 0;
+        position.bootstrapPolicyId = '';
     }
 
     updatePositionMark(position, lastExecutionPrice);
@@ -1253,6 +1293,8 @@ const settleTraceCondition = async (params: {
         tracePosition.marketValue = 0;
         tracePosition.avgPrice = 0;
         tracePosition.unrealizedPnl = 0;
+        tracePosition.bootstrapEntryUsdc = 0;
+        tracePosition.bootstrapPolicyId = '';
         tracePosition.realizedPnl = toSafeNumber(tracePosition.realizedPnl) + realizedPnlDelta;
         tracePosition.lastSourceTransactionHash =
             latestTriggerTrade?.transactionHash || settlementExecutionKey;
@@ -1478,6 +1520,8 @@ const executeConditionMergeTrade = async (params: {
             position.avgPrice = 0;
             position.marketValue = 0;
             position.unrealizedPnl = 0;
+            position.bootstrapEntryUsdc = 0;
+            position.bootstrapPolicyId = '';
             position.closedAt = trade.timestamp;
         } else {
             position.closedAt = undefined;
@@ -1879,6 +1923,62 @@ const loadReservedTraceBuyExposure = async () => {
         (sum, item) => sum + Math.max(toSafeNumber(item.requestedUsdc), 0),
         0
     );
+};
+
+const loadActiveBootstrapExposureUsdc = async () => {
+    const [openBuffers, openBatches, activePositions] = await Promise.all([
+        TraceIntentBuffer.find(
+            {
+                state: 'OPEN',
+                condition: 'buy',
+                'policyTrail.policyId': { $in: BOOTSTRAP_POLICY_IDS },
+            },
+            {
+                requestedUsdc: 1,
+            }
+        ).exec(),
+        TraceExecutionBatch.find(
+            {
+                status: { $in: ['READY', 'PROCESSING'] },
+                condition: 'buy',
+                'policyTrail.policyId': { $in: BOOTSTRAP_POLICY_IDS },
+            },
+            {
+                requestedUsdc: 1,
+            }
+        ).exec(),
+        TracePosition.find(
+            {
+                size: { $gt: 0 },
+                bootstrapEntryUsdc: { $gt: 0 },
+            },
+            {
+                bootstrapEntryUsdc: 1,
+            }
+        ).exec(),
+    ]);
+
+    return (
+        [...openBuffers, ...openBatches].reduce(
+            (sum, item) => sum + Math.max(toSafeNumber(item.requestedUsdc), 0),
+            0
+        ) +
+        activePositions.reduce(
+            (sum, position) => sum + Math.max(toSafeNumber(position.bootstrapEntryUsdc), 0),
+            0
+        )
+    );
+};
+
+const loadBootstrapBudgetRemainingUsdc = async (portfolio: TracePortfolioDocument) => {
+    const totalEquityBase = Math.max(
+        toSafeNumber(portfolio.totalEquity),
+        toSafeNumber(portfolio.cashBalance),
+        toSafeNumber(portfolio.initialBalance)
+    );
+    const budgetCapUsdc = totalEquityBase * BUY_BOOTSTRAP_MAX_ACTIVE_RATIO;
+    const activeExposureUsdc = await loadActiveBootstrapExposureUsdc();
+    return Math.max(budgetCapUsdc - activeExposureUsdc, 0);
 };
 
 const loadOpenBuyBufferForTrade = async (
@@ -2350,14 +2450,52 @@ const flushTraceBuyBuffer = async (
         return;
     }
 
-    if (Math.max(toSafeNumber(buffer.requestedUsdc), 0) < MIN_MARKET_BUY_USDC) {
+    const portfolio = await ensurePortfolio();
+    const [existingPosition, activeBuyBatch, reservedBuyExposure, bootstrapBudgetRemainingUsdc] =
+        await Promise.all([
+            loadExistingPosition(latestTrade),
+            loadActiveBuyBatchForTrade(latestTrade),
+            loadReservedTraceBuyExposure(),
+            loadBootstrapBudgetRemainingUsdc(portfolio),
+        ]);
+    const bufferedRequestedUsdc = Math.max(toSafeNumber(buffer.requestedUsdc), 0);
+    const availableBalance = Math.max(
+        toSafeNumber(portfolio.cashBalance) -
+            Math.max(reservedBuyExposure - Math.max(bufferedRequestedUsdc, 0), 0),
+        0
+    );
+    const canTopUpBufferedBuy =
+        bufferedRequestedUsdc >= BUY_MIN_TOP_UP_TRIGGER_USDC &&
+        bufferedRequestedUsdc < MIN_MARKET_BUY_USDC &&
+        Math.max(toSafeNumber(existingPosition.size), 0) <= EPSILON &&
+        activeBuyBatch === null &&
+        availableBalance >= MIN_MARKET_BUY_USDC &&
+        bootstrapBudgetRemainingUsdc + EPSILON >= MIN_MARKET_BUY_USDC;
+    const finalRequestedUsdc = canTopUpBufferedBuy ? MIN_MARKET_BUY_USDC : bufferedRequestedUsdc;
+    const finalReason = canTopUpBufferedBuy
+        ? mergeReasons(
+              buffer.reason || '',
+              `累计买单 ${formatAmount(buffer.requestedUsdc)} USDC，已按最小买单门槛补齐到 1 USDC`
+          )
+        : buffer.reason || '';
+    const finalPolicyTrail = canTopUpBufferedBuy
+        ? mergePolicyTrail(policyTrail, [
+              buildPolicyTrailEntry(
+                  BUFFER_MIN_TOP_UP_POLICY_ID,
+                  'ADJUST',
+                  `累计买单 ${formatAmount(buffer.requestedUsdc)} USDC，已补齐到 1 USDC`
+              ),
+          ])
+        : policyTrail;
+
+    if (finalRequestedUsdc < MIN_MARKET_BUY_USDC) {
         const skipReason =
             options.skipReason ||
             mergeReasons(
-                buffer.reason || '',
+                finalReason,
                 `累计买单 ${formatAmount(buffer.requestedUsdc)} USDC 未达到 ${MIN_MARKET_BUY_USDC} USDC`
             );
-        await finalizeSkippedBuffer(buffer, trades, skipReason, policyTrail);
+        await finalizeSkippedBuffer(buffer, trades, skipReason, finalPolicyTrail);
         logger.debug(`${formatBufferRef(buffer)} 已放弃累计缓冲 reason=${skipReason}`);
         return;
     }
@@ -2366,10 +2504,10 @@ const flushTraceBuyBuffer = async (
         bufferId: buffer._id,
         trades,
         condition: 'buy',
-        requestedUsdc: Math.max(toSafeNumber(buffer.requestedUsdc), 0),
+        requestedUsdc: finalRequestedUsdc,
         sourcePrice: Math.max(toSafeNumber(buffer.sourcePrice), toSafeNumber(latestTrade.price), 0),
-        reason: buffer.reason || '',
-        policyTrail,
+        reason: finalReason,
+        policyTrail: finalPolicyTrail,
     });
     await TraceIntentBuffer.updateOne(
         { _id: buffer._id },
@@ -2377,14 +2515,14 @@ const flushTraceBuyBuffer = async (
             $set: {
                 state: 'CLOSED',
                 claimedAt: 0,
-                reason: buffer.reason || '',
-                policyTrail,
+                reason: finalReason,
+                policyTrail: finalPolicyTrail,
                 completedAt: Date.now(),
             },
         }
     );
     logger.debug(
-        `${formatBufferRef(buffer)} 已生成模拟买入批次 requestedUsdc=${formatAmount(buffer.requestedUsdc)}`
+        `${formatBufferRef(buffer)} 已生成模拟买入批次 requestedUsdc=${formatAmount(finalRequestedUsdc)}`
     );
 };
 
@@ -2408,8 +2546,16 @@ const bufferTraceBuyIntent = async (params: {
     sourcePrice: number;
     reason: string;
     policyTrail?: ExecutionPolicyTrailEntry[];
+    allowBootstrapFlush?: boolean;
 }) => {
-    const { trade, requestedUsdc, sourcePrice, reason, policyTrail = [] } = params;
+    const {
+        trade,
+        requestedUsdc,
+        sourcePrice,
+        reason,
+        policyTrail = [],
+        allowBootstrapFlush = false,
+    } = params;
     const normalizedRequestedUsdc = Math.max(toSafeNumber(requestedUsdc), 0);
     if (normalizedRequestedUsdc <= 0) {
         return;
@@ -2431,7 +2577,9 @@ const bufferTraceBuyIntent = async (params: {
 
     const nextRequestedUsdc =
         Math.max(toSafeNumber(openBuffer?.requestedUsdc), 0) + normalizedRequestedUsdc;
-    const flushImmediately = nextRequestedUsdc >= MIN_MARKET_BUY_USDC;
+    const flushImmediately =
+        nextRequestedUsdc >= MIN_MARKET_BUY_USDC ||
+        (allowBootstrapFlush && nextRequestedUsdc >= BUY_MIN_TOP_UP_TRIGGER_USDC);
     const nextFlushAt = flushImmediately ? Date.now() : Date.now() + BUY_INTENT_BUFFER_MAX_MS;
     const nextReason = mergeReasons(openBuffer?.reason || '', reason);
     const nextPolicyTrail = mergePolicyTrail(openBuffer?.policyTrail, policyTrail, [
@@ -2439,7 +2587,9 @@ const bufferTraceBuyIntent = async (params: {
             TRACE_BUY_BUFFER_POLICY_ID,
             'DEFER',
             flushImmediately
-                ? `累计买单已达到 ${nextRequestedUsdc.toFixed(4)} USDC，准备生成批次`
+                ? nextRequestedUsdc >= MIN_MARKET_BUY_USDC
+                    ? `累计买单已达到 ${nextRequestedUsdc.toFixed(4)} USDC，准备生成批次`
+                    : `累计买单已达到 ${nextRequestedUsdc.toFixed(4)} USDC，准备按最小门槛补齐后生成批次`
                 : `累计买单 ${nextRequestedUsdc.toFixed(4)} USDC，继续等待凑满 ${MIN_MARKET_BUY_USDC} USDC`
         ),
     ]);
@@ -2804,6 +2954,7 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
     const resolvedConditionsHandled = new Set<string>();
     let resolvedConditionPortfolio: TracePortfolioDocument | null = null;
     let buyPlanningBalance: number | null | undefined;
+    let buyBootstrapBudgetRemainingUsdc: number | null | undefined;
 
     for (const trade of trades) {
         if (trade.type === 'MERGE' || trade.type === 'REDEEM') {
@@ -2859,11 +3010,15 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
         if (String(trade.side || '').toUpperCase() === 'BUY') {
             if (buyPlanningBalance === undefined) {
                 const portfolio = await ensurePortfolio();
-                const reservedBuyExposure = await loadReservedTraceBuyExposure();
+                const [reservedBuyExposure, bootstrapBudgetRemainingUsdc] = await Promise.all([
+                    loadReservedTraceBuyExposure(),
+                    loadBootstrapBudgetRemainingUsdc(portfolio),
+                ]);
                 buyPlanningBalance = Math.max(
                     toSafeNumber(portfolio.cashBalance) - reservedBuyExposure,
                     0
                 );
+                buyBootstrapBudgetRemainingUsdc = bootstrapBudgetRemainingUsdc;
             }
 
             const existingPosition = await loadExistingPosition(trade);
@@ -2881,13 +3036,19 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
                 openBuffer = null;
             }
             const activeBuyBatch = await loadActiveBuyBatchForTrade(trade);
+            const hasLocalExposure = Math.max(toSafeNumber(existingPosition.size), 0) > EPSILON;
+            const hasPendingBuyExposure = openBuffer !== null || activeBuyBatch !== null;
+            const bootstrapBudgetRemainingUsdc =
+                buyBootstrapBudgetRemainingUsdc ?? Number.POSITIVE_INFINITY;
 
             const evaluation = evaluateDirectBuyIntent({
                 trade,
                 availableBalance: buyPlanningBalance,
-                hasLocalExposure: Math.max(toSafeNumber(existingPosition.size), 0) > EPSILON,
-                hasPendingBuyExposure: openBuffer !== null || activeBuyBatch !== null,
+                hasLocalExposure,
+                hasPendingBuyExposure,
                 sourcePositionBeforeTradeSize: trade.sourcePositionSizeBeforeTrade,
+                allowLocalFirstEntryTicket: true,
+                bootstrapBudgetRemainingUsdc,
             });
             const shouldBufferTrade =
                 Math.max(toSafeNumber(evaluation.requestedUsdc), 0) > 0 &&
@@ -2902,6 +3063,10 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
                     sourcePrice: evaluation.sourcePrice,
                     reason: evaluation.reason,
                     policyTrail: evaluation.policyTrail,
+                    allowBootstrapFlush:
+                        !hasLocalExposure &&
+                        activeBuyBatch === null &&
+                        bootstrapBudgetRemainingUsdc + EPSILON >= MIN_MARKET_BUY_USDC,
                 });
                 buyPlanningBalance = Math.max(buyPlanningBalance - evaluation.requestedUsdc, 0);
                 logger.debug(
@@ -2933,6 +3098,15 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
                 policyTrail: evaluation.policyTrail,
             });
             buyPlanningBalance = Math.max(buyPlanningBalance - evaluation.requestedUsdc, 0);
+            if (
+                hasPolicyId(evaluation.policyTrail, [FIRST_ENTRY_TICKET_POLICY_ID]) &&
+                buyBootstrapBudgetRemainingUsdc !== undefined
+            ) {
+                buyBootstrapBudgetRemainingUsdc = Math.max(
+                    buyBootstrapBudgetRemainingUsdc - evaluation.requestedUsdc,
+                    0
+                );
+            }
             logger.debug(
                 `${formatTradeRef(trade)} 已创建模拟买入批次 ` +
                     `requestedUsdc=${formatAmount(evaluation.requestedUsdc)}` +
@@ -3019,6 +3193,7 @@ const executeReadyBatches = async (marketStream: ClobMarketStream) => {
                                   note: batch.reason,
                               }
                             : undefined,
+                    policyTrail: batch.policyTrail,
                 });
             } else {
                 updatePositionMark(existingPosition, toSafeNumber(latestTrade.price));

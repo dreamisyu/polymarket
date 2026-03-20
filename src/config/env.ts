@@ -329,6 +329,10 @@ export const ENV = {
         readEnv('BUY_MIN_TOP_UP_TRIGGER_USDC') || '0.7',
         'BUY_MIN_TOP_UP_TRIGGER_USDC'
     ),
+    BUY_BOOTSTRAP_MAX_ACTIVE_RATIO: parseNonNegativeNumber(
+        readEnv('BUY_BOOTSTRAP_MAX_ACTIVE_RATIO') || '0.15',
+        'BUY_BOOTSTRAP_MAX_ACTIVE_RATIO'
+    ),
     BUY_INTENT_BUFFER_MAX_MS: parsePositiveInteger(
         readEnv('BUY_INTENT_BUFFER_MAX_MS') || '2000',
         'BUY_INTENT_BUFFER_MAX_MS'
