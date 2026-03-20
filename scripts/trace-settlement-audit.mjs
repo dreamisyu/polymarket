@@ -119,7 +119,7 @@ if (argv.help) {
 说明:
   1. 默认读取当前工作目录或项目根目录的 .env
   2. 脚本会读取 trace 持仓/执行记录，并对照 Polymarket 市场页面的实际结算结果
-  3. 默认审计当前 trace 中的全部 condition，可通过 --condition-id 限定范围
+  3. 默认审计 trace 持仓、执行记录、源活动里出现过的全部 condition，可通过 --condition-id 限定范围
   4. --json 可输出机器可读结果，便于后续接入告警或 CI
 `);
     process.exit(0);
@@ -147,6 +147,13 @@ const sumBy = (items, getter) => items.reduce((sum, item) => sum + toSafeNumber(
 const formatUsd = (value) => `${toSafeNumber(value).toFixed(6)} USDC`;
 const formatNumber = (value) => toSafeNumber(value).toFixed(6);
 const unique = (items) => Array.from(new Set(items));
+const collectConditionIds = (...groups) =>
+    unique(
+        groups
+            .flatMap((items) => items)
+            .map((item) => String(item?.conditionId || '').trim())
+            .filter(Boolean)
+    );
 
 const getTraceCollectionNames = (walletAddress, traceId) => {
     const suffix = `${normalizeKey(walletAddress)}_${normalizeKey(traceId)}`;
@@ -523,9 +530,7 @@ const main = async () => {
         const effectiveConditionIds =
             argv.conditionIds.length > 0
                 ? argv.conditionIds
-                : unique(
-                      positions.map((item) => String(item.conditionId || '').trim()).filter(Boolean)
-                  );
+                : collectConditionIds(positions, executions, sourceActivities);
 
         const filteredPositions = positions.filter((item) =>
             effectiveConditionIds.includes(String(item.conditionId || '').trim())
@@ -648,17 +653,24 @@ const main = async () => {
             })
         );
 
+        const hasExplicitConditionFilter = argv.conditionIds.length > 0;
         const resolvedWithWinner = conditionDetails.filter(
             (item) => isResolved(item) && String(item.winner || '').trim() !== ''
         );
         const expectedPositionValue = sumBy(conditionDetails, (item) => item.local.expectedValue);
         const currentPositionValue = sumBy(conditionDetails, (item) => item.local.currentValue);
         const cashBalance = toSafeNumber(portfolio?.cashBalance);
-        const currentTotalEquity =
+        const globalCurrentTotalEquity =
             portfolio?.totalEquity !== undefined
                 ? toSafeNumber(portfolio.totalEquity)
                 : cashBalance + currentPositionValue;
-        const expectedTotalEquity = cashBalance + expectedPositionValue;
+        const globalCurrentNetPnl =
+            portfolio?.netPnl !== undefined
+                ? toSafeNumber(portfolio.netPnl)
+                : globalCurrentTotalEquity - toSafeNumber(portfolio?.initialBalance);
+        const expectedTotalEquity = hasExplicitConditionFilter
+            ? null
+            : cashBalance + expectedPositionValue;
         const impossibleBinaryConditions = conditionDetails.filter(
             (item) => item.local.impossibleBinaryPrice
         );
@@ -674,25 +686,42 @@ const main = async () => {
             traceId,
             userAddress,
             mongoUri,
+            scope: {
+                conditionIds: effectiveConditionIds,
+                conditionCount: effectiveConditionIds.length,
+                hasExplicitConditionFilter,
+                derivedFrom: hasExplicitConditionFilter
+                    ? 'cli'
+                    : 'positions+executions+sourceActivities',
+            },
             collections: collectionNames,
             portfolio: {
+                scope: 'global',
                 initialBalance: toSafeNumber(portfolio?.initialBalance),
                 cashBalance,
                 currentPositionsMarketValue:
                     portfolio?.positionsMarketValue !== undefined
                         ? toSafeNumber(portfolio.positionsMarketValue)
                         : currentPositionValue,
-                currentTotalEquity,
-                currentNetPnl:
-                    portfolio?.netPnl !== undefined
-                        ? toSafeNumber(portfolio.netPnl)
-                        : currentTotalEquity - toSafeNumber(portfolio?.initialBalance),
+                currentTotalEquity: globalCurrentTotalEquity,
+                currentNetPnl: globalCurrentNetPnl,
+            },
+            scoped: {
+                scope: hasExplicitConditionFilter ? 'condition-filtered' : 'all-conditions',
+                currentPositionValue,
+                expectedPositionValue,
+                positionValueDelta: currentPositionValue - expectedPositionValue,
             },
             expected: {
-                expectedPositionValue,
                 expectedTotalEquity,
-                expectedNetPnl: expectedTotalEquity - toSafeNumber(portfolio?.initialBalance),
-                equityDeltaVsCurrent: currentTotalEquity - expectedTotalEquity,
+                expectedNetPnl:
+                    expectedTotalEquity === null
+                        ? null
+                        : expectedTotalEquity - toSafeNumber(portfolio?.initialBalance),
+                equityDeltaVsCurrent:
+                    expectedTotalEquity === null
+                        ? null
+                        : globalCurrentTotalEquity - expectedTotalEquity,
             },
             localExecutionSummary: {
                 totalExecutions: filteredExecutions.length,
@@ -745,6 +774,9 @@ const main = async () => {
                 impossibleBinaryConditions.length > 0
                     ? `检测到 ${impossibleBinaryConditions.length} 个二元市场价格违反 sum≈1 约束，存在 outcome 错配或标价串边风险。`
                     : '',
+                hasExplicitConditionFilter
+                    ? '当前启用了 --condition-id，portfolio/cash 仍代表全局组合，请优先关注 scoped 持仓价值偏差。'
+                    : '',
             ].filter(Boolean),
         };
 
@@ -759,16 +791,22 @@ const main = async () => {
         lines.push(`Trace ID: ${traceId}`);
         lines.push(`源钱包: ${userAddress}`);
         lines.push('');
-        lines.push('本地组合:');
+        lines.push('全局组合:');
         lines.push(`- 现金余额: ${formatUsd(summary.portfolio.cashBalance)}`);
         lines.push(`- 当前持仓市值: ${formatUsd(summary.portfolio.currentPositionsMarketValue)}`);
         lines.push(`- 当前总权益: ${formatUsd(summary.portfolio.currentTotalEquity)}`);
         lines.push(`- 当前净收益: ${formatUsd(summary.portfolio.currentNetPnl)}`);
         lines.push('');
-        lines.push('按实际结算重算:');
-        lines.push(`- 预期持仓价值: ${formatUsd(summary.expected.expectedPositionValue)}`);
-        lines.push(`- 预期总权益: ${formatUsd(summary.expected.expectedTotalEquity)}`);
-        lines.push(`- 相对当前账本偏差: ${formatUsd(summary.expected.equityDeltaVsCurrent)}`);
+        lines.push('当前审计范围:');
+        lines.push(`- 当前持仓价值: ${formatUsd(summary.scoped.currentPositionValue)}`);
+        lines.push(`- 预期持仓价值: ${formatUsd(summary.scoped.expectedPositionValue)}`);
+        lines.push(`- 持仓价值偏差: ${formatUsd(summary.scoped.positionValueDelta)}`);
+        if (summary.expected.expectedTotalEquity !== null) {
+            lines.push('');
+            lines.push('按实际结算重算:');
+            lines.push(`- 预期总权益: ${formatUsd(summary.expected.expectedTotalEquity)}`);
+            lines.push(`- 相对当前账本偏差: ${formatUsd(summary.expected.equityDeltaVsCurrent)}`);
+        }
         lines.push('');
         lines.push('执行概览:');
         lines.push(`- 总执行数: ${summary.localExecutionSummary.totalExecutions}`);
