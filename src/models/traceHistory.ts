@@ -120,6 +120,7 @@ const portfolioSchema = new Schema<TracePortfolioInterface>(
         traceId: { type: String, required: true },
         traceLabel: { type: String, required: true },
         sourceWallet: { type: String, required: true },
+        startedAt: { type: Number, required: true, default: 0 },
         initialBalance: { type: Number, required: true },
         cashBalance: { type: Number, required: true },
         realizedPnl: { type: Number, required: true, default: 0 },

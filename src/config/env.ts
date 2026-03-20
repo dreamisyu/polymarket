@@ -20,6 +20,7 @@ type ExecutionMode = 'live' | 'trace';
 type RelayerTransactionMode = 'SAFE' | 'PROXY';
 type WsChannel = 'market' | 'user';
 type BuyDustResidualMode = 'off' | 'defer' | 'trim';
+type BuySizingMode = 'ratio' | 'first_entry_ticket';
 type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
 
 const DEFAULT_CLOB_HTTP_URL = 'https://clob.polymarket.com';
@@ -145,6 +146,20 @@ const parseBuyDustResidualMode = (
     throw new Error('BUY_DUST_RESIDUAL_MODE must be off, defer or trim');
 };
 
+const parseBuySizingMode = (
+    rawValue: string | undefined,
+    fallback: BuySizingMode
+): BuySizingMode => {
+    const normalized = String(rawValue || fallback)
+        .trim()
+        .toLowerCase();
+    if (normalized === 'ratio' || normalized === 'first_entry_ticket') {
+        return normalized;
+    }
+
+    throw new Error('BUY_SIZING_MODE must be ratio or first_entry_ticket');
+};
+
 const buildWsChannelUrl = (baseUrl: string, channel: WsChannel) =>
     `${baseUrl.replace(/\/+$/, '')}/${channel}`;
 
@@ -168,6 +183,10 @@ const TRACE_ID = readEnv('TRACE_ID') || 'default';
 const TRACE_INITIAL_BALANCE = parsePositiveNumber(
     readEnv('TRACE_INITIAL_BALANCE') || '1000',
     'TRACE_INITIAL_BALANCE'
+);
+const TRACE_SOURCE_LOOKBACK_MS = parseNonNegativeInteger(
+    readEnv('TRACE_SOURCE_LOOKBACK_MS') || '0',
+    'TRACE_SOURCE_LOOKBACK_MS'
 );
 const LOG_DEFAULT_LEVEL = parseLogLevel(readEnv('LOG_LEVEL'), 'info');
 const LOG_CONSOLE_LEVEL = parseLogLevel(readEnv('LOG_CONSOLE_LEVEL'), LOG_DEFAULT_LEVEL);
@@ -238,6 +257,7 @@ export const ENV = {
     TRACE_ID,
     TRACE_LABEL: `trace:${TRACE_ID}`,
     TRACE_INITIAL_BALANCE,
+    TRACE_SOURCE_LOOKBACK_MS,
     USER_ADDRESS,
     MONGO_URI,
     LOG_LEVEL: LOG_DEFAULT_LEVEL,
@@ -312,6 +332,15 @@ export const ENV = {
     BUY_INTENT_BUFFER_MAX_MS: parsePositiveInteger(
         readEnv('BUY_INTENT_BUFFER_MAX_MS') || '2000',
         'BUY_INTENT_BUFFER_MAX_MS'
+    ),
+    BUY_SIZING_MODE: parseBuySizingMode(readEnv('BUY_SIZING_MODE'), 'ratio'),
+    BUY_FIRST_ENTRY_TICKET_USDC: parseNonNegativeNumber(
+        readEnv('BUY_FIRST_ENTRY_TICKET_USDC') || '1',
+        'BUY_FIRST_ENTRY_TICKET_USDC'
+    ),
+    BUY_FIRST_ENTRY_SIGNAL_MIN_USDC: parseNonNegativeNumber(
+        readEnv('BUY_FIRST_ENTRY_SIGNAL_MIN_USDC') || '0.05',
+        'BUY_FIRST_ENTRY_SIGNAL_MIN_USDC'
     ),
     BUY_DUST_RESIDUAL_MODE: parseBuyDustResidualMode(readEnv('BUY_DUST_RESIDUAL_MODE'), 'trim'),
     MARKET_CACHE_TTL_MS: parsePositiveInteger(

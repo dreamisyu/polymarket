@@ -79,6 +79,7 @@ export interface TracePortfolioInterface {
     traceId: string;
     traceLabel: string;
     sourceWallet: string;
+    startedAt: number;
     initialBalance: number;
     cashBalance: number;
     realizedPnl: number;
