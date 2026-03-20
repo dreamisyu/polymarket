@@ -135,9 +135,7 @@ const resolveWsUrl = (specificEnvName: 'CLOB_WS_URL' | 'USER_WS_URL', channel: W
 const resolveInitialSyncLookbackMs = () => {
     const lookbackSECOND = readEnv('INITIAL_SYNC_LOOKBACK_SECOND');
     if (lookbackSECOND !== undefined) {
-        return (
-            parseNonNegativeNumber(lookbackSECOND, 'INITIAL_SYNC_LOOKBACK_SECOND') * 1000
-        );
+        return parseNonNegativeNumber(lookbackSECOND, 'INITIAL_SYNC_LOOKBACK_SECOND') * 1000;
     }
 
     return (
@@ -274,23 +272,12 @@ export const ENV = {
         readEnv('SNAPSHOT_STALE_AFTER_MS') || '30000',
         'SNAPSHOT_STALE_AFTER_MS'
     ),
-    BUY_SOURCE_MERGE_WINDOW_MS: parseNonNegativeInteger(
-        readEnv('BUY_SOURCE_MERGE_WINDOW_MS') || '15000',
-        'BUY_SOURCE_MERGE_WINDOW_MS'
-    ),
-    BUY_INTENT_BUFFER_MAX_MS: parseNonNegativeInteger(
-        readEnv('BUY_INTENT_BUFFER_MAX_MS') || '300000',
-        'BUY_INTENT_BUFFER_MAX_MS'
-    ),
     BUY_MIN_TOP_UP_ENABLED: parseBoolean(readEnv('BUY_MIN_TOP_UP_ENABLED'), true),
     BUY_MIN_TOP_UP_TRIGGER_USDC: parseNonNegativeNumber(
         readEnv('BUY_MIN_TOP_UP_TRIGGER_USDC') || '0.7',
         'BUY_MIN_TOP_UP_TRIGGER_USDC'
     ),
-    BUY_DUST_RESIDUAL_MODE: parseBuyDustResidualMode(
-        readEnv('BUY_DUST_RESIDUAL_MODE'),
-        'trim'
-    ),
+    BUY_DUST_RESIDUAL_MODE: parseBuyDustResidualMode(readEnv('BUY_DUST_RESIDUAL_MODE'), 'trim'),
     MARKET_CACHE_TTL_MS: parsePositiveInteger(
         readEnv('MARKET_CACHE_TTL_MS') || '3000',
         'MARKET_CACHE_TTL_MS'

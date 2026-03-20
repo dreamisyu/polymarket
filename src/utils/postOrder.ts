@@ -90,7 +90,6 @@ const postOrder = async (
     sourcePositionAfterTrade: { size?: number } | undefined,
     trade: UserActivityInterface,
     myBalance: number,
-    sourceBalanceAfterTrade: number,
     executionTarget?: ExecutionTargetOverrides
 ): Promise<PostOrderResult> => {
     const orderIds: string[] = [];
@@ -114,7 +113,6 @@ const postOrder = async (
             myPositionSize: Math.max(Number(myPosition?.size) || 0, 0),
             sourcePositionAfterTradeSize: Math.max(Number(sourcePositionAfterTrade?.size) || 0, 0),
             availableBalance: myBalance,
-            sourceBalanceAfterTrade,
             marketSnapshot: workingSnapshot,
             remainingRequestedUsdc,
             remainingRequestedSize,

@@ -11,13 +11,7 @@ import { getUserActivityModel } from '../models/userHistory';
 import ClobMarketStream from './clobMarketStream';
 import ClobUserStream, { UserChannelStatusUpdate } from './clobUserStream';
 import confirmTransactionHashes from '../utils/confirmTransactionHashes';
-import {
-    buildBuyBufferExpireAt,
-    buildBuyBufferFlushAfter,
-    buildBuyBufferKey,
-    evaluateBuyBuffer,
-    sortTradesAsc,
-} from '../utils/copyIntentPlanning';
+import { evaluateDirectBuyIntent, sortTradesAsc } from '../utils/copyIntentPlanning';
 import fetchData from '../utils/fetchData';
 import getTradingGuardState from '../utils/getTradingGuardState';
 import createLogger from '../utils/logger';
@@ -28,6 +22,13 @@ import {
     normalizeOutcomeLabel,
 } from '../utils/polymarketMarketResolution';
 import resolveTradeCondition from '../utils/resolveTradeCondition';
+import {
+    getSourceActivityKeys,
+    getSourceEndedAt,
+    getSourceStartedAt,
+    getSourceTradeCount,
+    getSourceTransactionHashes,
+} from '../utils/sourceActivityAggregation';
 import spinner from '../utils/spinner';
 
 const USER_ADDRESS = ENV.USER_ADDRESS;
@@ -126,12 +127,6 @@ const buildReclaimableReadyBatchFilter = (leaseCutoff: number) => ({
     $and: [{ $or: [{ submittedAt: { $exists: false } }, { submittedAt: 0 }] }],
 });
 
-const buildReclaimableBufferFilter = (leaseCutoff: number) => ({
-    state: 'FLUSHING',
-    claimedAt: { $lt: leaseCutoff },
-    $and: [{ $or: [{ completedAt: { $exists: false } }, { completedAt: 0 }] }],
-});
-
 const readPendingTrades = async () =>
     (await UserActivity.find({
         $and: [
@@ -181,20 +176,6 @@ const readSubmittedTrades = async () =>
     })
         .sort({ botSubmittedAt: 1, timestamp: 1 })
         .exec()) as UserActivityInterface[];
-
-const readFlushableBuffers = async () =>
-    (await CopyIntentBuffer.find({
-        $or: [
-            {
-                state: 'OPEN',
-                flushAfter: { $lte: Date.now() },
-                ...buildClaimableFilter('claimedAt', buildLeaseCutoff()),
-            },
-            buildReclaimableBufferFilter(buildLeaseCutoff()),
-        ],
-    })
-        .sort({ flushAfter: 1, sourceStartedAt: 1 })
-        .exec()) as CopyIntentBufferInterface[];
 
 const readReadyBatches = async () =>
     (await CopyExecutionBatch.find({
@@ -281,29 +262,6 @@ const claimSubmittedTrade = async (trade: UserActivityInterface) => {
     return result.modifiedCount === 1;
 };
 
-const claimBuffer = async (buffer: CopyIntentBufferInterface) => {
-    const result = await CopyIntentBuffer.updateOne(
-        {
-            _id: buffer._id,
-            $or: [
-                {
-                    state: 'OPEN',
-                    ...buildClaimableFilter('claimedAt', buildLeaseCutoff()),
-                },
-                buildReclaimableBufferFilter(buildLeaseCutoff()),
-            ],
-        },
-        {
-            $set: {
-                state: 'FLUSHING',
-                claimedAt: Date.now(),
-            },
-        }
-    );
-
-    return result.modifiedCount === 1;
-};
-
 const claimReadyBatch = async (batch: CopyExecutionBatchInterface) => {
     const result = await CopyExecutionBatch.updateOne(
         {
@@ -377,6 +335,20 @@ const finalizeRetryableTrade = async (trade: UserActivityInterface, reason: stri
             },
             $inc: {
                 botExcutedTime: 1,
+            },
+        }
+    );
+};
+
+const releaseClaimedTrade = async (trade: UserActivityInterface, reason: string) => {
+    await UserActivity.updateOne(
+        { _id: trade._id },
+        {
+            $set: {
+                bot: false,
+                botStatus: 'PENDING',
+                botClaimedAt: 0,
+                botLastError: reason,
             },
         }
     );
@@ -482,32 +454,16 @@ const finalizeActivitiesByIds = async (
     );
 };
 
-const updateBufferedActivities = async (
-    tradeIds: UserActivityInterface['_id'][],
-    bufferId: CopyIntentBufferInterface['_id'],
+const finalizeSingleTradeWithTrail = async (
+    trade: UserActivityInterface,
+    status: 'CONFIRMED' | 'SKIPPED' | 'FAILED',
     reason: string,
-    trail: ExecutionPolicyTrailEntry[]
+    trail: ExecutionPolicyTrailEntry[],
+    confirmedAt?: number
 ) => {
-    if (tradeIds.length === 0) {
-        return;
-    }
-
-    await UserActivity.updateMany(
-        {
-            _id: { $in: tradeIds },
-        },
-        {
-            $set: {
-                bot: false,
-                botStatus: 'BUFFERED',
-                botBufferId: bufferId,
-                botClaimedAt: 0,
-                botBufferedAt: Date.now(),
-                botLastError: reason,
-                botPolicyTrail: trail,
-            },
-        }
-    );
+    await finalizeActivitiesByIds([trade._id], status, reason, null, trail, {
+        botConfirmedAt: confirmedAt || 0,
+    });
 };
 
 const updateBatchedActivities = async (
@@ -669,25 +625,6 @@ const finalizeBatchAndActivities = async (
             botConfirmedAt: confirmedAt || 0,
         }
     );
-};
-
-const releaseBuffer = async (
-    buffer: CopyIntentBufferInterface,
-    reason: string,
-    trail: ExecutionPolicyTrailEntry[]
-) => {
-    await CopyIntentBuffer.updateOne(
-        { _id: buffer._id },
-        {
-            $set: {
-                state: 'OPEN',
-                claimedAt: 0,
-                reason,
-                policyTrail: trail,
-            },
-        }
-    );
-    await updateBufferedActivities(buffer.sourceTradeIds, buffer._id, reason, trail);
 };
 
 const closeBuffer = async (
@@ -1069,6 +1006,7 @@ const validateTradeForExecution = (trade: UserActivityInterface) => {
 
     if (
         String(trade.side || '').toUpperCase() === 'BUY' &&
+        !Number.isFinite(trade.sourceBalanceBeforeTrade) &&
         !Number.isFinite(trade.sourceBalanceAfterTrade)
     ) {
         return {
@@ -1081,85 +1019,6 @@ const validateTradeForExecution = (trade: UserActivityInterface) => {
         status: 'OK' as const,
         reason: '',
     };
-};
-
-const appendTradeToBuyBuffer = async (trade: UserActivityInterface) => {
-    const now = Date.now();
-    const bufferKey = buildBuyBufferKey(trade);
-    const trail = [buildPolicyTrailEntry('source-trade-merge', 'DEFER', '已加入买单累计缓冲区')];
-    const existingBuffer = (await CopyIntentBuffer.findOne({
-        bufferKey,
-        state: 'OPEN',
-    }).exec()) as CopyIntentBufferInterface | null;
-
-    if (!existingBuffer) {
-        const createdBuffer = await CopyIntentBuffer.create({
-            sourceWallet: USER_ADDRESS,
-            bufferKey,
-            state: 'OPEN',
-            condition: 'buy',
-            asset: trade.asset,
-            conditionId: trade.conditionId,
-            title: trade.title,
-            outcome: trade.outcome,
-            side: trade.side,
-            sourceTradeIds: [trade._id],
-            sourceActivityKeys: [trade.activityKey || ''],
-            sourceTransactionHashes: [trade.transactionHash],
-            sourceTradeCount: 1,
-            sourceStartedAt: trade.timestamp,
-            sourceEndedAt: trade.timestamp,
-            flushAfter: buildBuyBufferFlushAfter(trade.timestamp),
-            expireAt: buildBuyBufferExpireAt(trade.timestamp),
-            claimedAt: 0,
-            reason: '已加入买单累计缓冲区',
-            policyTrail: trail,
-            completedAt: 0,
-        });
-        await updateBufferedActivities(
-            [trade._id],
-            createdBuffer._id,
-            '已加入买单累计缓冲区',
-            trail
-        );
-        return;
-    }
-
-    const mergedTrail = mergePolicyTrail(existingBuffer.policyTrail, trail);
-    await CopyIntentBuffer.updateOne(
-        {
-            _id: existingBuffer._id,
-        },
-        {
-            $set: {
-                sourceEndedAt: trade.timestamp,
-                flushAfter: buildBuyBufferFlushAfter(trade.timestamp),
-                expireAt: Math.max(
-                    toSafeNumber(existingBuffer.expireAt),
-                    buildBuyBufferExpireAt(trade.timestamp)
-                ),
-                title: trade.title,
-                outcome: trade.outcome,
-                side: trade.side,
-                reason: '已加入买单累计缓冲区',
-                policyTrail: mergedTrail,
-            },
-            $push: {
-                sourceTradeIds: trade._id,
-                sourceActivityKeys: trade.activityKey || '',
-                sourceTransactionHashes: trade.transactionHash,
-            },
-            $inc: {
-                sourceTradeCount: 1,
-            },
-        }
-    );
-    await updateBufferedActivities(
-        [trade._id],
-        existingBuffer._id,
-        '已加入买单累计缓冲区',
-        mergedTrail
-    );
 };
 
 const cancelOpenBuyBuffersForAsset = async (
@@ -1238,154 +1097,64 @@ const cancelReadyBuyBatchesForAsset = async (
     }
 };
 
-const createBatchFromSingleTrade = async (trade: UserActivityInterface) => {
+const createBatchFromSingleTrade = async (
+    trade: UserActivityInterface,
+    params?: {
+        condition?: string;
+        requestedUsdc?: number;
+        requestedSize?: number;
+        sourcePrice?: number;
+        reason?: string;
+        policyTrail?: ExecutionPolicyTrailEntry[];
+    }
+) => {
+    const condition =
+        params?.condition ||
+        resolveTradeCondition(trade.side, undefined, {
+            size: trade.sourcePositionSizeAfterTrade,
+        });
+    const policyTrail = params?.policyTrail || [];
     const batch = await CopyExecutionBatch.create({
         sourceWallet: USER_ADDRESS,
         status: 'READY',
-        condition: resolveTradeCondition(trade.side, undefined, {
-            size: trade.sourcePositionSizeAfterTrade,
-        }),
+        condition,
         asset: trade.asset,
         conditionId: trade.conditionId,
         title: trade.title,
         outcome: trade.outcome,
         side: trade.side,
         sourceTradeIds: [trade._id],
-        sourceActivityKeys: [trade.activityKey || ''],
-        sourceTransactionHashes: [trade.transactionHash],
-        sourceTradeCount: 1,
-        sourceStartedAt: trade.timestamp,
-        sourceEndedAt: trade.timestamp,
-        sourcePrice: Math.max(toSafeNumber(trade.price), 0),
-        requestedUsdc: 0,
-        requestedSize: 0,
+        sourceActivityKeys: getSourceActivityKeys(trade),
+        sourceTransactionHashes: getSourceTransactionHashes(trade),
+        sourceTradeCount: getSourceTradeCount(trade),
+        sourceStartedAt: getSourceStartedAt(trade),
+        sourceEndedAt: getSourceEndedAt(trade),
+        sourcePrice: Math.max(toSafeNumber(params?.sourcePrice), toSafeNumber(trade.price), 0),
+        requestedUsdc: Math.max(toSafeNumber(params?.requestedUsdc), 0),
+        requestedSize: Math.max(toSafeNumber(params?.requestedSize), 0),
         orderIds: [],
         transactionHashes: [],
-        policyTrail: [],
+        policyTrail,
         retryCount: 0,
         claimedAt: 0,
         submittedAt: 0,
         confirmedAt: 0,
         completedAt: 0,
-        reason: '',
+        reason: params?.reason || '',
         submissionStatus: 'SUBMITTED',
     });
-    await updateBatchedActivities([trade._id], batch._id, '已创建执行批次', []);
+    await updateBatchedActivities(
+        [trade._id],
+        batch._id,
+        params?.reason || '已创建执行批次',
+        policyTrail
+    );
 };
 
-const flushReadyBuffers = async (clobClient: ClobClient) => {
-    const buffers = await readFlushableBuffers();
-    for (const buffer of buffers) {
-        const claimed = await claimBuffer(buffer);
-        if (!claimed) {
-            continue;
-        }
+const processPendingTrades = async (clobClient: ClobClient, trades: UserActivityInterface[]) => {
+    let buyPlanningBalance: number | null | undefined;
+    let buyPlanningReason = '';
 
-        const tradingGuardState = await getTradingGuardState(clobClient);
-        if (tradingGuardState.skipReason) {
-            await releaseBuffer(
-                buffer,
-                `暂缓 flush：${tradingGuardState.skipReason}`,
-                buffer.policyTrail || []
-            );
-            continue;
-        }
-
-        if (tradingGuardState.availableBalance === null) {
-            await releaseBuffer(
-                buffer,
-                '暂缓 flush：代理钱包可用余额接口不可用',
-                buffer.policyTrail || []
-            );
-            continue;
-        }
-
-        const trades = await loadTradesByIds(buffer.sourceTradeIds);
-        if (trades.length === 0) {
-            await closeBuffer(
-                buffer,
-                'SKIPPED',
-                '累计缓冲缺少关联源交易',
-                buffer.policyTrail || []
-            );
-            continue;
-        }
-
-        const evaluation = evaluateBuyBuffer({
-            trades,
-            availableBalance: tradingGuardState.availableBalance,
-            expireAt: buffer.expireAt,
-            now: Date.now(),
-        });
-        const mergedTrail = mergePolicyTrail(buffer.policyTrail, evaluation.policyTrail);
-
-        if (evaluation.status === 'BUFFER') {
-            await releaseBuffer(buffer, evaluation.reason, mergedTrail);
-            continue;
-        }
-
-        if (evaluation.status === 'SKIP') {
-            await closeBuffer(buffer, 'SKIPPED', evaluation.reason, mergedTrail);
-            await finalizeActivitiesByIds(
-                buffer.sourceTradeIds,
-                'SKIPPED',
-                evaluation.reason,
-                null,
-                mergedTrail
-            );
-            logger.info(
-                `${formatBatchRef({ asset: buffer.asset, condition: 'buy', sourceTradeCount: buffer.sourceTradeCount })} 已跳过 reason=${evaluation.reason}`
-            );
-            continue;
-        }
-
-        const latestTrade = sortTradesAsc(trades).slice(-1)[0];
-        const batch = await CopyExecutionBatch.create({
-            sourceWallet: USER_ADDRESS,
-            bufferId: buffer._id,
-            status: 'READY',
-            condition: 'buy',
-            asset: latestTrade.asset,
-            conditionId: latestTrade.conditionId,
-            title: latestTrade.title,
-            outcome: latestTrade.outcome,
-            side: latestTrade.side,
-            sourceTradeIds: trades.map((trade) => trade._id),
-            sourceActivityKeys: trades.map((trade) => trade.activityKey || ''),
-            sourceTransactionHashes: trades.map((trade) => trade.transactionHash),
-            sourceTradeCount: trades.length,
-            sourceStartedAt: trades[0].timestamp,
-            sourceEndedAt: latestTrade.timestamp,
-            sourcePrice: Math.max(evaluation.sourcePrice, toSafeNumber(latestTrade.price), 0),
-            requestedUsdc: evaluation.requestedUsdc,
-            requestedSize: 0,
-            orderIds: [],
-            transactionHashes: [],
-            policyTrail: mergedTrail,
-            retryCount: 0,
-            claimedAt: 0,
-            submittedAt: 0,
-            confirmedAt: 0,
-            completedAt: 0,
-            reason: evaluation.reason,
-            submissionStatus: 'SUBMITTED',
-        });
-        await closeBuffer(buffer, 'CLOSED', evaluation.reason, mergedTrail);
-        await updateBatchedActivities(
-            trades.map((trade) => trade._id),
-            batch._id,
-            evaluation.reason,
-            mergedTrail,
-            buffer._id
-        );
-        logger.info(
-            `${formatBatchRef(batch)} 已创建 ` +
-                `requestedUsdc=${formatAmount(evaluation.requestedUsdc)}`
-        );
-    }
-};
-
-const processPendingTrades = async (trades: UserActivityInterface[]) => {
     for (const trade of trades) {
         const claimed = await claimTrade(trade);
         if (!claimed) {
@@ -1421,8 +1190,57 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
 
             const normalizedSide = String(trade.side || '').toUpperCase();
             if (normalizedSide === 'BUY') {
-                await appendTradeToBuyBuffer(trade);
-                logger.info(`${formatTradeRef(trade)} 已加入累计买单缓冲区`);
+                if (buyPlanningBalance === undefined) {
+                    const tradingGuardState = await getTradingGuardState(clobClient);
+                    if (tradingGuardState.skipReason) {
+                        buyPlanningReason = tradingGuardState.skipReason;
+                        buyPlanningBalance = null;
+                    } else if (tradingGuardState.availableBalance === null) {
+                        buyPlanningReason = '代理钱包可用余额接口不可用';
+                        buyPlanningBalance = null;
+                    } else {
+                        buyPlanningReason = '';
+                        buyPlanningBalance = Math.max(
+                            toSafeNumber(tradingGuardState.availableBalance),
+                            0
+                        );
+                    }
+                }
+
+                if (buyPlanningBalance === null) {
+                    await releaseClaimedTrade(trade, buyPlanningReason);
+                    logger.warn(`${formatTradeRef(trade)} 暂缓入批 reason=${buyPlanningReason}`);
+                    continue;
+                }
+
+                const evaluation = evaluateDirectBuyIntent({
+                    trade,
+                    availableBalance: buyPlanningBalance,
+                });
+                if (evaluation.status === 'SKIP') {
+                    await finalizeSingleTradeWithTrail(
+                        trade,
+                        'SKIPPED',
+                        evaluation.reason,
+                        evaluation.policyTrail
+                    );
+                    logger.info(`${formatTradeRef(trade)} 已跳过 reason=${evaluation.reason}`);
+                    continue;
+                }
+
+                await createBatchFromSingleTrade(trade, {
+                    condition: 'buy',
+                    requestedUsdc: evaluation.requestedUsdc,
+                    sourcePrice: evaluation.sourcePrice,
+                    reason: evaluation.reason,
+                    policyTrail: evaluation.policyTrail,
+                });
+                buyPlanningBalance = Math.max(buyPlanningBalance - evaluation.requestedUsdc, 0);
+                logger.info(
+                    `${formatTradeRef(trade)} 已创建直接买入批次 ` +
+                        `requestedUsdc=${formatAmount(evaluation.requestedUsdc)}` +
+                        (evaluation.reason ? ` reason=${evaluation.reason}` : '')
+                );
                 continue;
             }
 
@@ -1499,7 +1317,6 @@ const executeReadyBatches = async (
                 sourcePositionAfterTrade,
                 latestTrade,
                 tradingGuardState.availableBalance,
-                Math.max(toSafeNumber(latestTrade.sourceBalanceAfterTrade), 0),
                 batch.requestedUsdc > 0 || batch.requestedSize > 0
                     ? {
                           requestedUsdc: batch.requestedUsdc > 0 ? batch.requestedUsdc : undefined,
@@ -1555,16 +1372,12 @@ const tradeExecutor = async (
     logger.info('启动真实跟单');
     const processingCount = await UserActivity.countDocuments({ botStatus: 'PROCESSING' });
     const submittedCount = await UserActivity.countDocuments({ botStatus: 'SUBMITTED' });
-    const bufferedCount = await UserActivity.countDocuments({ botStatus: 'BUFFERED' });
     const batchedCount = await UserActivity.countDocuments({ botStatus: 'BATCHED' });
     if (processingCount > 0) {
         logger.warn(`检测到 ${processingCount} 条 PROCESSING 交易，超出租约的记录会自动回收`);
     }
     if (submittedCount > 0) {
         logger.warn(`检测到 ${submittedCount} 条 SUBMITTED 交易/批次，本次启动会优先补偿最终确认`);
-    }
-    if (bufferedCount > 0) {
-        logger.warn(`检测到 ${bufferedCount} 条 BUFFERED 交易，本次启动会继续沿用累计缓冲`);
     }
     if (batchedCount > 0) {
         logger.warn(`检测到 ${batchedCount} 条 BATCHED 交易，本次启动会继续执行既有批次`);
@@ -1578,10 +1391,9 @@ const tradeExecutor = async (
         if (pendingTrades.length > 0) {
             spinner.stop();
             logger.info(`发现 ${pendingTrades.length} 条待入批交易`);
-            await processPendingTrades(pendingTrades);
+            await processPendingTrades(clobClient, pendingTrades);
         }
 
-        await flushReadyBuffers(clobClient);
         await executeReadyBatches(clobClient, marketStream, userStream);
 
         if (pendingTrades.length === 0) {

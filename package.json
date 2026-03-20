@@ -12,7 +12,10 @@
         "audit:osv:all": "node scripts/osv-audit.mjs --include-dev",
         "audit:all": "npm run audit:npm:all && npm run audit:osv:all",
         "report:summary": "node scripts/execution-summary.mjs",
-        "report:trace-audit": "node scripts/trace-settlement-audit.mjs"
+        "report:trace-audit": "node scripts/trace-settlement-audit.mjs",
+        "report:db-improvement": "node scripts/db-improvement-report.mjs",
+        "report:log-improvement": "node scripts/log-improvement-report.mjs",
+        "report:target-profile": "node scripts/target-wallet-profile.mjs"
     },
     "keywords": [],
     "author": "BlackSky-jose",

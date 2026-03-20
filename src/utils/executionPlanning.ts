@@ -208,16 +208,15 @@ const collectSellLiquidity = (
     };
 };
 
-export const computeBuyTargetUsdc = (
-    trade: UserActivityInterface,
-    availableBalance: number,
-    sourceBalanceAfterTrade: number
-) => {
-    const denominator = sourceBalanceAfterTrade + Math.max(toSafeNumber(trade.usdcSize), 0);
-    if (denominator <= 0) {
+export const computeBuyTargetUsdc = (trade: UserActivityInterface, availableBalance: number) => {
+    const sourceCashBeforeTrade = Number.isFinite(trade.sourceBalanceBeforeTrade)
+        ? Math.max(toSafeNumber(trade.sourceBalanceBeforeTrade), 0)
+        : Math.max(toSafeNumber(trade.sourceBalanceAfterTrade), 0) +
+          Math.max(toSafeNumber(trade.usdcSize), 0);
+    if (sourceCashBeforeTrade <= 0) {
         return {
             status: 'SKIPPED' as const,
-            reason: '源账户余额快照无效，无法计算跟单比例',
+            reason: '源账户现金快照无效，无法计算跟单比例',
             requestedUsdc: 0,
             note: '',
         };
@@ -232,7 +231,7 @@ export const computeBuyTargetUsdc = (
         };
     }
 
-    const ratio = availableBalance / denominator;
+    const ratio = Math.min(availableBalance / sourceCashBeforeTrade, 1);
     let requestedUsdc = Math.min(
         Math.max(toSafeNumber(trade.usdcSize), 0) * ratio,
         availableBalance
@@ -310,7 +309,6 @@ export const buildChunkExecutionPlan = (params: {
     myPositionSize: number;
     sourcePositionAfterTradeSize: number;
     availableBalance: number;
-    sourceBalanceAfterTrade: number;
     marketSnapshot: MarketBookSnapshot;
     remainingRequestedUsdc?: number;
     remainingRequestedSize?: number;
@@ -325,7 +323,6 @@ export const buildChunkExecutionPlan = (params: {
         myPositionSize,
         sourcePositionAfterTradeSize,
         availableBalance,
-        sourceBalanceAfterTrade,
         marketSnapshot,
         remainingRequestedUsdc,
         remainingRequestedSize,
@@ -367,7 +364,7 @@ export const buildChunkExecutionPlan = (params: {
                                     .join('；')
                               : noteOverride || '',
                   }
-                : computeBuyTargetUsdc(trade, availableBalance, sourceBalanceAfterTrade);
+                : computeBuyTargetUsdc(trade, availableBalance);
         if (buyTarget.status !== 'READY') {
             return {
                 status: buyTarget.status,
@@ -496,8 +493,7 @@ export const buildChunkExecutionPlan = (params: {
         const sellTarget =
             requestedSizeOverride !== undefined
                 ? {
-                      status:
-                          requestedSizeOverride > 0 ? ('READY' as const) : ('SKIPPED' as const),
+                      status: requestedSizeOverride > 0 ? ('READY' as const) : ('SKIPPED' as const),
                       reason: requestedSizeOverride > 0 ? '' : '没有可卖出的数量',
                       requestedSize: Math.max(requestedSizeOverride, 0),
                   }
