@@ -18,6 +18,11 @@ export type ExecutionIntent = 'EXECUTE' | 'SYNC_ONLY';
 export interface UserActivityInterface {
     _id: mongoose.Types.ObjectId;
     activityKey?: string;
+    sourceActivityKeys?: string[];
+    sourceTransactionHashes?: string[];
+    sourceTradeCount?: number;
+    sourceStartedAt?: number;
+    sourceEndedAt?: number;
     proxyWallet: string;
     timestamp: number;
     conditionId: string;

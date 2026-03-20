@@ -10,7 +10,6 @@ import { getCopyExecutionBatchModel, getCopyIntentBufferModel } from '../models/
 import { getUserActivityModel } from '../models/userHistory';
 import ClobMarketStream from './clobMarketStream';
 import ClobUserStream, { UserChannelStatusUpdate } from './clobUserStream';
-import LiveSettlementReclaimer from './liveSettlementReclaimer';
 import confirmTransactionHashes from '../utils/confirmTransactionHashes';
 import {
     buildBuyBufferExpireAt,
@@ -21,11 +20,15 @@ import {
 } from '../utils/copyIntentPlanning';
 import fetchData from '../utils/fetchData';
 import getTradingGuardState from '../utils/getTradingGuardState';
+import createLogger from '../utils/logger';
 import postOrder, { PostOrderResult } from '../utils/postOrder';
+import {
+    fetchPolymarketMarketResolution,
+    isResolvedPolymarketMarket,
+    normalizeOutcomeLabel,
+} from '../utils/polymarketMarketResolution';
 import resolveTradeCondition from '../utils/resolveTradeCondition';
 import spinner from '../utils/spinner';
-import createLogger from '../utils/logger';
-import { normalizeOutcomeLabel } from '../utils/polymarketMarketResolution';
 
 const USER_ADDRESS = ENV.USER_ADDRESS;
 const PROXY_WALLET = ENV.PROXY_WALLET;
@@ -1390,6 +1393,21 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
         }
 
         try {
+            const resolution = await fetchPolymarketMarketResolution({
+                conditionId: trade.conditionId,
+                marketSlug: String(trade.eventSlug || trade.slug || '').trim(),
+                title: trade.title,
+            });
+            if (isResolvedPolymarketMarket(resolution)) {
+                const reason =
+                    `市场已 resolved winner=${resolution?.winnerOutcome || 'unknown'}，` +
+                    '已跳过真实执行并交由结算回收器处理';
+                await cancelOpenBuyBuffersForAsset(trade);
+                await cancelReadyBuyBatchesForAsset(trade);
+                await finalizeTerminalTradeWithLog(trade, 'SKIPPED', reason);
+                continue;
+            }
+
             const validation = validateTradeForExecution(trade);
             if (validation.status === 'SKIP') {
                 await finalizeTerminalTradeWithLog(trade, 'SKIPPED', validation.reason);
@@ -1535,7 +1553,6 @@ const tradeExecutor = async (
     userStream: ClobUserStream | null
 ) => {
     logger.info('启动真实跟单');
-    const settlementReclaimer = new LiveSettlementReclaimer();
     const processingCount = await UserActivity.countDocuments({ botStatus: 'PROCESSING' });
     const submittedCount = await UserActivity.countDocuments({ botStatus: 'SUBMITTED' });
     const bufferedCount = await UserActivity.countDocuments({ botStatus: 'BUFFERED' });
@@ -1556,7 +1573,6 @@ const tradeExecutor = async (
     while (true) {
         await syncSubmittedTrades(userStream);
         await syncSubmittedBatches(userStream);
-        await settlementReclaimer.runDue();
 
         const pendingTrades = await readPendingTrades();
         if (pendingTrades.length > 0) {

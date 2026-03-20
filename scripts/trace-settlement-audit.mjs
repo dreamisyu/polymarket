@@ -118,7 +118,7 @@ if (argv.help) {
 
 说明:
   1. 默认读取当前工作目录或项目根目录的 .env
-  2. 脚本会读取 trace 持仓/执行记录，并对照 Polymarket 市场页面的实际结算结果
+  2. 脚本会读取 trace 持仓/执行记录，并对照 Polymarket 官方 REST 市场接口的实际结算结果
   3. 默认审计 trace 持仓、执行记录、源活动里出现过的全部 condition，可通过 --condition-id 限定范围
   4. --json 可输出机器可读结果，便于后续接入告警或 CI
 `);
@@ -281,32 +281,90 @@ const buildSlugFromTitle = (title) => {
     return `btc-updown-${durationMinutes}m-${Math.floor(startUtc.getTime() / 1000)}`;
 };
 
-const decodeHtmlEntities = (value) =>
+const RESOLUTION_CACHE_RESOLVED_TTL_MS = 10 * 60 * 1000;
+const RESOLUTION_CACHE_UNRESOLVED_TTL_MS = 30 * 1000;
+const resolutionCache = new Map();
+
+const normalizeOutcomeLabel = (value) =>
     String(value || '')
-        .replace(/&quot;/g, '"')
-        .replace(/&#x27;/g, "'")
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>');
+        .trim()
+        .toLowerCase();
 
-const extractMetaContent = (html, key) => {
-    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const patterns = [
-        new RegExp(`<meta[^>]+property="${escaped}"[^>]+content="([^"]*)"`, 'i'),
-        new RegExp(`<meta[^>]+content="([^"]*)"[^>]+property="${escaped}"`, 'i'),
-        new RegExp(`<meta[^>]+name="${escaped}"[^>]+content="([^"]*)"`, 'i'),
-        new RegExp(`<meta[^>]+content="([^"]*)"[^>]+name="${escaped}"`, 'i'),
-    ];
-
-    for (const pattern of patterns) {
-        const matched = html.match(pattern);
-        if (matched?.[1]) {
-            return decodeHtmlEntities(matched[1]);
-        }
+const parseArrayLike = (value) => {
+    if (Array.isArray(value)) {
+        return value.map((item) => String(item || '').trim()).filter(Boolean);
     }
 
-    return '';
+    const normalized = String(value || '').trim();
+    if (!normalized) {
+        return [];
+    }
+
+    try {
+        const parsed = JSON.parse(normalized);
+        if (Array.isArray(parsed)) {
+            return parsed.map((item) => String(item || '').trim()).filter(Boolean);
+        }
+    } catch {
+        return normalized
+            .split(',')
+            .map((item) => String(item || '').trim())
+            .filter(Boolean);
+    }
+
+    return [];
 };
+
+const inferWinnerFromTokens = (tokens = []) =>
+    normalizeOutcomeLabel(tokens.find((token) => token?.winner)?.outcome || '');
+
+const inferWinnerFromOutcomePrices = (outcomes, outcomePrices) => {
+    const normalizedOutcomes = parseArrayLike(outcomes);
+    const normalizedPrices = parseArrayLike(outcomePrices).map((value) => toSafeNumber(value, -1));
+    if (normalizedOutcomes.length === 0 || normalizedOutcomes.length !== normalizedPrices.length) {
+        return '';
+    }
+
+    const winnerIndex = normalizedPrices.findIndex((value) => value >= 0.999);
+    if (winnerIndex < 0) {
+        return '';
+    }
+
+    const losingCount = normalizedPrices.filter(
+        (value, index) => index !== winnerIndex && value <= 0.001
+    ).length;
+    if (losingCount !== normalizedPrices.length - 1) {
+        return '';
+    }
+
+    return normalizeOutcomeLabel(normalizedOutcomes[winnerIndex]);
+};
+
+const deriveResolvedStatus = ({ winner, closed, acceptingOrders, umaResolutionStatus }) => {
+    const normalizedUmaStatus = String(umaResolutionStatus || '')
+        .trim()
+        .toLowerCase();
+    if (winner) {
+        return 'resolved';
+    }
+
+    if (
+        normalizedUmaStatus.includes('resolved') ||
+        normalizedUmaStatus.includes('finalized') ||
+        normalizedUmaStatus.includes('settled')
+    ) {
+        return 'resolved';
+    }
+
+    if (closed || acceptingOrders === false) {
+        return 'closed';
+    }
+
+    return 'open';
+};
+
+const mergeResolutionDescriptions = (...values) =>
+    [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))].join('；');
 
 const fetchPolymarketPositions = async (walletAddress) => {
     if (!walletAddress) {
@@ -342,53 +400,209 @@ const fetchPolymarketPositions = async (walletAddress) => {
     }
 };
 
-const fetchMarketResolution = async (marketSlug) => {
+const fetchGammaMarketBySlug = async (marketSlug) => {
     if (!marketSlug) {
+        return null;
+    }
+
+    try {
+        const bySlugResponse = await axios.get(
+            `https://gamma-api.polymarket.com/markets/slug/${marketSlug}`,
+            {
+                timeout: 10_000,
+                headers: {
+                    'User-Agent': 'polymarket-copytrading-bot/trace-settlement-audit',
+                },
+            }
+        );
+
+        if (Array.isArray(bySlugResponse.data)) {
+            return bySlugResponse.data[0] || null;
+        }
+
+        if (bySlugResponse.data && typeof bySlugResponse.data === 'object') {
+            return bySlugResponse.data;
+        }
+    } catch {}
+
+    try {
+        const listResponse = await axios.get(
+            `https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(marketSlug)}`,
+            {
+                timeout: 10_000,
+                headers: {
+                    'User-Agent': 'polymarket-copytrading-bot/trace-settlement-audit',
+                },
+            }
+        );
+
+        return Array.isArray(listResponse.data) ? listResponse.data[0] || null : null;
+    } catch {
+        return null;
+    }
+};
+
+const fetchMarketResolution = async (conditionId, marketSlug, title) => {
+    const normalizedConditionId = String(conditionId || '').trim();
+    const normalizedMarketSlug = String(marketSlug || '').trim();
+    const cacheKey = normalizedConditionId || `slug:${normalizedMarketSlug}`;
+    const cached = resolutionCache.get(cacheKey);
+    if (cached) {
+        const ttl =
+            String(cached.resolvedStatus || '').toLowerCase() === 'resolved' &&
+            String(cached.winner || '').trim()
+                ? RESOLUTION_CACHE_RESOLVED_TTL_MS
+                : RESOLUTION_CACHE_UNRESOLVED_TTL_MS;
+        if (Date.now() - cached.checkedAt < ttl) {
+            return cached.value;
+        }
+    }
+
+    if (!normalizedConditionId && !normalizedMarketSlug) {
         return {
             marketSlug: '',
             marketUrl: '',
             resolvedStatus: '',
             winner: '',
-            title: '',
+            title: String(title || '').trim(),
             updateDescription: '',
-            error: '缺少市场 slug，无法查询 Polymarket 页面',
+            error: '缺少 conditionId 与市场 slug，无法查询官方 REST 市场接口',
         };
     }
 
-    const marketUrl = `https://polymarket.com/event/${marketSlug}/${marketSlug}`;
-
     try {
-        const response = await axios.get(marketUrl, {
-            timeout: 10_000,
-            headers: {
-                'User-Agent': 'polymarket-copytrading-bot/trace-settlement-audit',
-            },
-        });
-        const html = String(response.data || '');
-        const resolvedStatus = extractMetaContent(html, 'og:temporal:status');
-        const updateDescription = extractMetaContent(html, 'og:temporal:event_update:description');
-        const title =
-            extractMetaContent(html, 'og:title') || extractMetaContent(html, 'og:image:alt');
-        const winnerMatch = updateDescription.match(/The winning outcome is ([A-Za-z]+)/i);
-
-        return {
-            marketSlug,
-            marketUrl,
-            resolvedStatus,
-            winner: winnerMatch?.[1] || '',
-            title,
-            updateDescription,
+        const clobResolution = normalizedConditionId
+            ? await axios.get(`https://clob.polymarket.com/markets/${normalizedConditionId}`, {
+                  timeout: 10_000,
+                  headers: {
+                      'User-Agent': 'polymarket-copytrading-bot/trace-settlement-audit',
+                  },
+              })
+            : null;
+        const clobMarket =
+            clobResolution?.data && typeof clobResolution.data === 'object'
+                ? clobResolution.data
+                : null;
+        const winner = inferWinnerFromTokens(clobMarket?.tokens || []);
+        const nextMarketSlug = String(clobMarket?.market_slug || '').trim() || normalizedMarketSlug;
+        const value = {
+            marketSlug: nextMarketSlug,
+            marketUrl: nextMarketSlug
+                ? `https://polymarket.com/event/${nextMarketSlug}/${nextMarketSlug}`
+                : '',
+            resolvedStatus: deriveResolvedStatus({
+                winner,
+                closed: Boolean(clobMarket?.closed),
+                acceptingOrders:
+                    typeof clobMarket?.accepting_orders === 'boolean'
+                        ? clobMarket.accepting_orders
+                        : null,
+            }),
+            winner,
+            title: String(clobMarket?.question || title || '').trim(),
+            updateDescription: winner
+                ? `source=clob winner=${winner}`
+                : `source=clob closed=${Boolean(clobMarket?.closed)}`,
             error: '',
         };
-    } catch (error) {
+        if (String(value.resolvedStatus || '').toLowerCase() === 'resolved' || !nextMarketSlug) {
+            resolutionCache.set(cacheKey, {
+                checkedAt: Date.now(),
+                resolvedStatus: value.resolvedStatus,
+                winner: value.winner,
+                value,
+            });
+            return value;
+        }
+
+        const gammaMarket = await fetchGammaMarketBySlug(nextMarketSlug);
+        if (gammaMarket) {
+            const gammaWinner =
+                inferWinnerFromTokens(gammaMarket.tokens || []) ||
+                inferWinnerFromOutcomePrices(gammaMarket.outcomes, gammaMarket.outcomePrices);
+            const mergedValue = {
+                ...value,
+                resolvedStatus: deriveResolvedStatus({
+                    winner: gammaWinner || value.winner,
+                    closed: Boolean(gammaMarket.closed || clobMarket?.closed),
+                    acceptingOrders:
+                        typeof gammaMarket.acceptingOrders === 'boolean'
+                            ? gammaMarket.acceptingOrders
+                            : typeof clobMarket?.accepting_orders === 'boolean'
+                              ? clobMarket.accepting_orders
+                              : null,
+                    umaResolutionStatus: gammaMarket.umaResolutionStatus,
+                }),
+                winner: gammaWinner || value.winner,
+                title: String(gammaMarket.question || value.title || title || '').trim(),
+                updateDescription: mergeResolutionDescriptions(
+                    value.updateDescription,
+                    `source=gamma umaResolutionStatus=${String(gammaMarket.umaResolutionStatus || '').trim()}`
+                ),
+            };
+            resolutionCache.set(cacheKey, {
+                checkedAt: Date.now(),
+                resolvedStatus: mergedValue.resolvedStatus,
+                winner: mergedValue.winner,
+                value: mergedValue,
+            });
+            return mergedValue;
+        }
+
+        resolutionCache.set(cacheKey, {
+            checkedAt: Date.now(),
+            resolvedStatus: value.resolvedStatus,
+            winner: value.winner,
+            value,
+        });
+        return value;
+    } catch (clobError) {
+        const gammaMarket = await fetchGammaMarketBySlug(normalizedMarketSlug);
+        if (gammaMarket) {
+            const winner =
+                inferWinnerFromTokens(gammaMarket.tokens || []) ||
+                inferWinnerFromOutcomePrices(gammaMarket.outcomes, gammaMarket.outcomePrices);
+            const value = {
+                marketSlug: normalizedMarketSlug,
+                marketUrl: normalizedMarketSlug
+                    ? `https://polymarket.com/event/${normalizedMarketSlug}/${normalizedMarketSlug}`
+                    : '',
+                resolvedStatus: deriveResolvedStatus({
+                    winner,
+                    closed: Boolean(gammaMarket.closed),
+                    acceptingOrders:
+                        typeof gammaMarket.acceptingOrders === 'boolean'
+                            ? gammaMarket.acceptingOrders
+                            : null,
+                    umaResolutionStatus: gammaMarket.umaResolutionStatus,
+                }),
+                winner,
+                title: String(gammaMarket.question || title || '').trim(),
+                updateDescription: `source=gamma umaResolutionStatus=${String(gammaMarket.umaResolutionStatus || '').trim()}`,
+                error: '',
+            };
+            resolutionCache.set(cacheKey, {
+                checkedAt: Date.now(),
+                resolvedStatus: value.resolvedStatus,
+                winner: value.winner,
+                value,
+            });
+            return value;
+        }
+
         return {
-            marketSlug,
-            marketUrl,
+            marketSlug: normalizedMarketSlug,
+            marketUrl: normalizedMarketSlug
+                ? `https://polymarket.com/event/${normalizedMarketSlug}/${normalizedMarketSlug}`
+                : '',
             resolvedStatus: '',
             winner: '',
-            title: '',
+            title: String(title || '').trim(),
             updateDescription: '',
-            error: error?.response?.data?.error || error?.message || '读取 Polymarket 页面失败',
+            error:
+                clobError?.response?.data?.error ||
+                clobError?.message ||
+                '读取官方 REST 市场接口失败',
         };
     }
 };
@@ -563,7 +777,11 @@ const main = async () => {
         const conditionDetails = await Promise.all(
             conditions.map(async ({ conditionId, positions: localPositions, activities }) => {
                 const metadata = selectConditionMetadata(activities, localPositions);
-                const resolution = await fetchMarketResolution(metadata.marketSlug);
+                const resolution = await fetchMarketResolution(
+                    conditionId,
+                    metadata.marketSlug,
+                    metadata.title
+                );
                 const winnerPosition = localPositions.find(
                     (item) =>
                         String(item.outcome || '')

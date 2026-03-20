@@ -1,6 +1,10 @@
+import { ENV } from '../config/env';
 import fetchData from './fetchData';
 
 const NEW_YORK_TIME_ZONE = 'America/New_York';
+const GAMMA_API_BASE_URL = 'https://gamma-api.polymarket.com';
+const RESOLUTION_CACHE_RESOLVED_TTL_MS = 10 * 60_000;
+const RESOLUTION_CACHE_UNRESOLVED_TTL_MS = 30_000;
 const TITLE_RE =
     /^Bitcoin Up or Down - ([A-Za-z]+) (\d+), (\d{1,2}:\d{2}[AP]M)-(\d{1,2}:\d{2}[AP]M) ET$/;
 const MONTH_INDEX: Record<string, number> = {
@@ -18,40 +22,281 @@ const MONTH_INDEX: Record<string, number> = {
     December: 11,
 };
 
+interface PolymarketMarketToken {
+    outcome?: string;
+    winner?: boolean;
+    price?: number | string;
+}
+
+interface ClobMarketResponse {
+    condition_id?: string;
+    conditionId?: string;
+    market_slug?: string;
+    marketSlug?: string;
+    question?: string;
+    closed?: boolean;
+    accepting_orders?: boolean;
+    acceptingOrders?: boolean;
+    active?: boolean;
+    archived?: boolean;
+    tokens?: PolymarketMarketToken[];
+}
+
+interface GammaMarketResponse {
+    conditionId?: string;
+    slug?: string;
+    question?: string;
+    closed?: boolean;
+    acceptingOrders?: boolean;
+    active?: boolean;
+    archived?: boolean;
+    umaResolutionStatus?: string | null;
+    outcomes?: string | string[] | null;
+    outcomePrices?: string | string[] | null;
+    tokens?: PolymarketMarketToken[];
+}
+
 export interface PolymarketMarketResolution {
+    conditionId: string;
     marketSlug: string;
     marketUrl: string;
     resolvedStatus: string;
     winnerOutcome: string;
     title: string;
     updateDescription: string;
+    source: 'clob' | 'gamma';
+    closed: boolean;
+    acceptingOrders: boolean | null;
+    active: boolean | null;
+    archived: boolean | null;
 }
 
-const decodeHtmlEntities = (value: string) =>
-    String(value || '')
-        .replace(/&quot;/g, '"')
-        .replace(/&#x27;/g, "'")
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>');
+const resolutionCache = new Map<
+    string,
+    {
+        checkedAt: number;
+        resolution: PolymarketMarketResolution | null;
+    }
+>();
 
-const extractMetaContent = (html: string, key: string) => {
-    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const patterns = [
-        new RegExp(`<meta[^>]+property="${escaped}"[^>]+content="([^"]*)"`, 'i'),
-        new RegExp(`<meta[^>]+content="([^"]*)"[^>]+property="${escaped}"`, 'i'),
-        new RegExp(`<meta[^>]+name="${escaped}"[^>]+content="([^"]*)"`, 'i'),
-        new RegExp(`<meta[^>]+content="([^"]*)"[^>]+name="${escaped}"`, 'i'),
-    ];
+export interface FetchPolymarketMarketResolutionParams {
+    conditionId?: string;
+    marketSlug?: string;
+    title?: string;
+}
 
-    for (const pattern of patterns) {
-        const matched = html.match(pattern);
-        if (matched?.[1]) {
-            return decodeHtmlEntities(matched[1]);
-        }
+const toSafeNumber = (value: unknown, fallback = 0) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const parseArrayLike = (value: unknown): string[] => {
+    if (Array.isArray(value)) {
+        return value.map((item) => String(item || '').trim()).filter(Boolean);
     }
 
-    return '';
+    const normalized = String(value || '').trim();
+    if (!normalized) {
+        return [];
+    }
+
+    try {
+        const parsed = JSON.parse(normalized);
+        if (Array.isArray(parsed)) {
+            return parsed.map((item) => String(item || '').trim()).filter(Boolean);
+        }
+    } catch {
+        return normalized
+            .split(',')
+            .map((item) => String(item || '').trim())
+            .filter(Boolean);
+    }
+
+    return [];
+};
+
+const buildMarketUrl = (marketSlug: string) =>
+    marketSlug ? `https://polymarket.com/event/${marketSlug}/${marketSlug}` : '';
+const mergeResolutionDescriptions = (...values: string[]) =>
+    [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))].join('；');
+
+const inferWinnerFromTokens = (tokens: PolymarketMarketToken[] = []) =>
+    normalizeOutcomeLabel(tokens.find((token) => token.winner)?.outcome || '');
+
+const inferWinnerFromOutcomePrices = (
+    outcomes: string | string[] | null | undefined,
+    outcomePrices: string | string[] | null | undefined
+) => {
+    const normalizedOutcomes = parseArrayLike(outcomes);
+    const normalizedPrices = parseArrayLike(outcomePrices).map((value) => toSafeNumber(value, -1));
+    if (normalizedOutcomes.length === 0 || normalizedOutcomes.length !== normalizedPrices.length) {
+        return '';
+    }
+
+    const winnerIndex = normalizedPrices.findIndex((value) => value >= 0.999);
+    if (winnerIndex < 0) {
+        return '';
+    }
+
+    const losingCount = normalizedPrices.filter(
+        (value, index) => index !== winnerIndex && value <= 0.001
+    ).length;
+    if (losingCount !== normalizedPrices.length - 1) {
+        return '';
+    }
+
+    return normalizeOutcomeLabel(normalizedOutcomes[winnerIndex]);
+};
+
+const deriveResolvedStatus = (params: {
+    winnerOutcome: string;
+    closed: boolean;
+    acceptingOrders: boolean | null;
+    umaResolutionStatus?: string | null;
+}) => {
+    const { winnerOutcome, closed, acceptingOrders, umaResolutionStatus = '' } = params;
+    const normalizedUmaStatus = String(umaResolutionStatus || '')
+        .trim()
+        .toLowerCase();
+
+    if (winnerOutcome) {
+        return 'resolved';
+    }
+
+    if (
+        normalizedUmaStatus.includes('resolved') ||
+        normalizedUmaStatus.includes('finalized') ||
+        normalizedUmaStatus.includes('settled')
+    ) {
+        return 'resolved';
+    }
+
+    if (closed || acceptingOrders === false) {
+        return 'closed';
+    }
+
+    return 'open';
+};
+
+const normalizeConditionId = (value: string) => String(value || '').trim();
+const buildResolutionCacheKey = (params: FetchPolymarketMarketResolutionParams) =>
+    normalizeConditionId(params.conditionId || '') ||
+    `slug:${String(params.marketSlug || '').trim()}`;
+
+const fetchClobMarketResolution = async (
+    conditionId: string
+): Promise<PolymarketMarketResolution | null> => {
+    if (!conditionId) {
+        return null;
+    }
+
+    const response = await fetchData<ClobMarketResponse>(
+        `${ENV.CLOB_HTTP_URL.replace(/\/+$/, '')}/markets/${conditionId}`
+    );
+    if (!response || typeof response !== 'object') {
+        return null;
+    }
+
+    const winnerOutcome = inferWinnerFromTokens(response.tokens || []);
+    const marketSlug =
+        String(response.market_slug || '').trim() || String(response.marketSlug || '').trim();
+
+    return {
+        conditionId: normalizeConditionId(
+            response.condition_id || response.conditionId || conditionId
+        ),
+        marketSlug,
+        marketUrl: buildMarketUrl(marketSlug),
+        resolvedStatus: deriveResolvedStatus({
+            winnerOutcome,
+            closed: Boolean(response.closed),
+            acceptingOrders:
+                typeof response.accepting_orders === 'boolean'
+                    ? response.accepting_orders
+                    : typeof response.acceptingOrders === 'boolean'
+                      ? response.acceptingOrders
+                      : null,
+        }),
+        winnerOutcome,
+        title: String(response.question || '').trim(),
+        updateDescription:
+            winnerOutcome || Boolean(response.closed)
+                ? `source=clob closed=${Boolean(response.closed)}`
+                : 'source=clob unresolved',
+        source: 'clob',
+        closed: Boolean(response.closed),
+        acceptingOrders:
+            typeof response.accepting_orders === 'boolean'
+                ? response.accepting_orders
+                : typeof response.acceptingOrders === 'boolean'
+                  ? response.acceptingOrders
+                  : null,
+        active: typeof response.active === 'boolean' ? response.active : null,
+        archived: typeof response.archived === 'boolean' ? response.archived : null,
+    };
+};
+
+const fetchGammaMarketBySlug = async (marketSlug: string): Promise<GammaMarketResponse | null> => {
+    if (!marketSlug) {
+        return null;
+    }
+
+    const bySlug = await fetchData<GammaMarketResponse | GammaMarketResponse[]>(
+        `${GAMMA_API_BASE_URL}/markets/slug/${marketSlug}`
+    );
+    if (Array.isArray(bySlug)) {
+        return bySlug[0] || null;
+    }
+
+    if (bySlug && typeof bySlug === 'object') {
+        return bySlug;
+    }
+
+    const listResponse = await fetchData<GammaMarketResponse[]>(
+        `${GAMMA_API_BASE_URL}/markets?slug=${encodeURIComponent(marketSlug)}`
+    );
+
+    return Array.isArray(listResponse) ? listResponse[0] || null : null;
+};
+
+const fetchGammaMarketResolution = async (
+    params: FetchPolymarketMarketResolutionParams
+): Promise<PolymarketMarketResolution | null> => {
+    const normalizedMarketSlug = String(params.marketSlug || '').trim();
+    if (!normalizedMarketSlug) {
+        return null;
+    }
+
+    const response = await fetchGammaMarketBySlug(normalizedMarketSlug);
+    if (!response) {
+        return null;
+    }
+
+    const winnerOutcome =
+        inferWinnerFromTokens(response.tokens || []) ||
+        inferWinnerFromOutcomePrices(response.outcomes, response.outcomePrices);
+
+    return {
+        conditionId: normalizeConditionId(response.conditionId || params.conditionId || ''),
+        marketSlug: normalizedMarketSlug,
+        marketUrl: buildMarketUrl(normalizedMarketSlug),
+        resolvedStatus: deriveResolvedStatus({
+            winnerOutcome,
+            closed: Boolean(response.closed),
+            acceptingOrders:
+                typeof response.acceptingOrders === 'boolean' ? response.acceptingOrders : null,
+            umaResolutionStatus: response.umaResolutionStatus,
+        }),
+        winnerOutcome,
+        title: String(response.question || params.title || '').trim(),
+        updateDescription: `source=gamma umaResolutionStatus=${String(response.umaResolutionStatus || '').trim()}`,
+        source: 'gamma',
+        closed: Boolean(response.closed),
+        acceptingOrders:
+            typeof response.acceptingOrders === 'boolean' ? response.acceptingOrders : null,
+        active: typeof response.active === 'boolean' ? response.active : null,
+        archived: typeof response.archived === 'boolean' ? response.archived : null,
+    };
 };
 
 const getOffsetMinutes = (date: Date, timeZone: string) => {
@@ -134,35 +379,97 @@ export const buildPolymarketMarketSlugFromTitle = (title: string) => {
     return `btc-updown-${durationMinutes}m-${Math.floor(startUtc.getTime() / 1000)}`;
 };
 
-export const isResolvedPolymarketMarket = (resolution: PolymarketMarketResolution | null) =>
-    String(resolution?.resolvedStatus || '').toLowerCase() === 'resolved' &&
-    normalizeOutcomeLabel(resolution?.winnerOutcome || '') !== '';
+export const isResolvedPolymarketMarket = (resolution: PolymarketMarketResolution | null) => {
+    const normalizedStatus = String(resolution?.resolvedStatus || '')
+        .trim()
+        .toLowerCase();
+    return (
+        (normalizedStatus === 'resolved' || normalizedStatus === 'closed') &&
+        normalizeOutcomeLabel(resolution?.winnerOutcome || '') !== ''
+    );
+};
 
 export const fetchPolymarketMarketResolution = async (
-    marketSlug: string
+    params: FetchPolymarketMarketResolutionParams
 ): Promise<PolymarketMarketResolution | null> => {
-    const normalizedMarketSlug = String(marketSlug || '').trim();
-    if (!normalizedMarketSlug) {
-        return null;
-    }
-
-    const marketUrl = `https://polymarket.com/event/${normalizedMarketSlug}/${normalizedMarketSlug}`;
-    const html = await fetchData<string>(marketUrl);
-    if (typeof html !== 'string' || !html.trim()) {
-        return null;
-    }
-
-    const resolvedStatus = extractMetaContent(html, 'og:temporal:status');
-    const updateDescription = extractMetaContent(html, 'og:temporal:event_update:description');
-    const title = extractMetaContent(html, 'og:title') || extractMetaContent(html, 'og:image:alt');
-    const winnerMatch = updateDescription.match(/The winning outcome is ([A-Za-z]+)/i);
-
-    return {
+    const normalizedConditionId = normalizeConditionId(params.conditionId || '');
+    const normalizedMarketSlug = String(params.marketSlug || '').trim();
+    const cacheKey = buildResolutionCacheKey({
+        conditionId: normalizedConditionId,
         marketSlug: normalizedMarketSlug,
-        marketUrl,
-        resolvedStatus,
-        winnerOutcome: winnerMatch?.[1] || '',
-        title,
-        updateDescription,
-    };
+    });
+    const cached = resolutionCache.get(cacheKey);
+    if (cached) {
+        const ttl = isResolvedPolymarketMarket(cached.resolution)
+            ? RESOLUTION_CACHE_RESOLVED_TTL_MS
+            : RESOLUTION_CACHE_UNRESOLVED_TTL_MS;
+        if (Date.now() - cached.checkedAt < ttl) {
+            return cached.resolution;
+        }
+    }
+
+    const clobResolution = normalizedConditionId
+        ? await fetchClobMarketResolution(normalizedConditionId)
+        : null;
+    if (clobResolution) {
+        const normalizedResolution: PolymarketMarketResolution = {
+            ...clobResolution,
+            marketSlug: clobResolution.marketSlug || normalizedMarketSlug,
+            marketUrl: buildMarketUrl(clobResolution.marketSlug || normalizedMarketSlug),
+            title: clobResolution.title || String(params.title || '').trim(),
+        };
+        if (
+            isResolvedPolymarketMarket(normalizedResolution) ||
+            !String(normalizedResolution.marketSlug || '').trim()
+        ) {
+            resolutionCache.set(cacheKey, {
+                checkedAt: Date.now(),
+                resolution: normalizedResolution,
+            });
+            return normalizedResolution;
+        }
+
+        const gammaResolution = await fetchGammaMarketResolution({
+            conditionId: normalizedConditionId,
+            marketSlug: normalizedResolution.marketSlug || normalizedMarketSlug,
+            title: normalizedResolution.title || params.title,
+        });
+        const mergedResolution = gammaResolution
+            ? {
+                  ...normalizedResolution,
+                  ...gammaResolution,
+                  conditionId: gammaResolution.conditionId || normalizedResolution.conditionId,
+                  marketSlug: gammaResolution.marketSlug || normalizedResolution.marketSlug,
+                  marketUrl:
+                      gammaResolution.marketUrl ||
+                      buildMarketUrl(gammaResolution.marketSlug || normalizedResolution.marketSlug),
+                  title: gammaResolution.title || normalizedResolution.title,
+                  closed: gammaResolution.closed || normalizedResolution.closed,
+                  acceptingOrders:
+                      gammaResolution.acceptingOrders ?? normalizedResolution.acceptingOrders,
+                  active: gammaResolution.active ?? normalizedResolution.active,
+                  archived: gammaResolution.archived ?? normalizedResolution.archived,
+                  updateDescription: mergeResolutionDescriptions(
+                      normalizedResolution.updateDescription,
+                      gammaResolution.updateDescription
+                  ),
+              }
+            : normalizedResolution;
+        resolutionCache.set(cacheKey, {
+            checkedAt: Date.now(),
+            resolution: mergedResolution,
+        });
+        return mergedResolution;
+    }
+
+    const gammaResolution = await fetchGammaMarketResolution({
+        conditionId: normalizedConditionId,
+        marketSlug: normalizedMarketSlug,
+        title: params.title,
+    });
+    resolutionCache.set(cacheKey, {
+        checkedAt: Date.now(),
+        resolution: gammaResolution,
+    });
+    return gammaResolution;
 };

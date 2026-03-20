@@ -6,10 +6,18 @@ import {
     Transaction,
 } from '@polymarket/builder-relayer-client';
 import { BuilderApiKeyCreds, BuilderConfig } from '@polymarket/builder-signing-sdk';
-import { UserPositionInterface } from '../interfaces/User';
+import { CopyExecutionBatchInterface, CopyIntentBufferInterface } from '../interfaces/Execution';
+import { UserActivityInterface, UserPositionInterface } from '../interfaces/User';
 import { ENV } from '../config/env';
+import { getCopyExecutionBatchModel, getCopyIntentBufferModel } from '../models/copyExecution';
+import { getUserActivityModel } from '../models/userHistory';
 import fetchData from '../utils/fetchData';
 import createLogger from '../utils/logger';
+import {
+    buildPolymarketMarketSlugFromTitle,
+    fetchPolymarketMarketResolution,
+    isResolvedPolymarketMarket,
+} from '../utils/polymarketMarketResolution';
 import { privateKeyToAccount } from 'viem/accounts';
 import { polygon } from 'viem/chains';
 import { Address, Hex, createWalletClient, encodeFunctionData, http, zeroHash } from 'viem';
@@ -19,6 +27,9 @@ const RELAYER_CHAIN_ID = 137;
 const PROXY_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${ENV.PROXY_WALLET}&sizeThreshold=0`;
 const AUTH_ERROR_BACKOFF_MS = 5 * 60 * 1000;
 const FAILURE_BACKOFF_MS = 60 * 1000;
+const UserActivity = getUserActivityModel(ENV.USER_ADDRESS);
+const CopyIntentBuffer = getCopyIntentBufferModel(ENV.USER_ADDRESS);
+const CopyExecutionBatch = getCopyExecutionBatchModel(ENV.USER_ADDRESS);
 
 const CTF_REDEEM_ABI = [
     {
@@ -148,8 +159,23 @@ const buildRedeemTransaction = (batch: RedeemBatch): Transaction => ({
     value: '0',
 });
 
+const mergeReasons = (...reasons: string[]) =>
+    [...new Set(reasons.map((reason) => String(reason || '').trim()).filter(Boolean))].join('；');
+
+const buildResolvedSkipReason = (winnerOutcome: string) =>
+    `市场已 resolved winner=${winnerOutcome || 'unknown'}，已停止继续跟单并等待自动回收`;
+
+const resolveMarketSlug = (subject: {
+    marketSlug?: string;
+    eventSlug?: string;
+    slug?: string;
+    title?: string;
+}) =>
+    String(subject.marketSlug || subject.eventSlug || subject.slug || '').trim() ||
+    buildPolymarketMarketSlugFromTitle(String(subject.title || '').trim());
+
 class LiveSettlementReclaimer {
-    private readonly enabled = ENV.AUTO_REDEEM_ENABLED;
+    private readonly autoRedeemEnabled = ENV.AUTO_REDEEM_ENABLED;
     private readonly intervalMs = ENV.AUTO_REDEEM_INTERVAL_MS;
     private readonly maxConditionsPerRun = ENV.AUTO_REDEEM_MAX_CONDITIONS_PER_RUN;
     private readonly relayClient: RelayClient | null;
@@ -160,7 +186,7 @@ class LiveSettlementReclaimer {
     private inflightConditionCount = 0;
 
     constructor() {
-        if (!this.enabled) {
+        if (!this.autoRedeemEnabled) {
             this.relayClient = null;
             return;
         }
@@ -279,17 +305,259 @@ class LiveSettlementReclaimer {
         }
     }
 
-    async runDue() {
-        if (!this.enabled || !this.relayClient || this.running) {
+    private async loadResolutionSubjects() {
+        const [pendingTrades, openBuffers, openBatches] = await Promise.all([
+            UserActivity.find(
+                {
+                    $and: [
+                        { type: 'TRADE' },
+                        {
+                            $or: [
+                                { executionIntent: 'EXECUTE' },
+                                { executionIntent: { $exists: false } },
+                            ],
+                        },
+                        {
+                            $or: [
+                                { botStatus: { $exists: false } },
+                                { botStatus: 'PENDING' },
+                                { botStatus: 'BUFFERED' },
+                                { botStatus: 'BATCHED' },
+                            ],
+                        },
+                    ],
+                },
+                {
+                    conditionId: 1,
+                    title: 1,
+                    slug: 1,
+                    eventSlug: 1,
+                }
+            ).exec() as Promise<
+                Array<Pick<UserActivityInterface, 'conditionId' | 'title' | 'slug' | 'eventSlug'>>
+            >,
+            CopyIntentBuffer.find(
+                {
+                    state: { $in: ['OPEN', 'FLUSHING'] },
+                    conditionId: { $exists: true, $ne: '' },
+                },
+                {
+                    conditionId: 1,
+                    title: 1,
+                }
+            ).exec() as Promise<Array<Pick<CopyIntentBufferInterface, 'conditionId' | 'title'>>>,
+            CopyExecutionBatch.find(
+                {
+                    status: { $in: ['READY', 'PROCESSING'] },
+                    conditionId: { $exists: true, $ne: '' },
+                },
+                {
+                    conditionId: 1,
+                    title: 1,
+                }
+            ).exec() as Promise<Array<Pick<CopyExecutionBatchInterface, 'conditionId' | 'title'>>>,
+        ]);
+
+        const subjects = new Map<
+            string,
+            {
+                conditionId: string;
+                marketSlug: string;
+                title: string;
+            }
+        >();
+        const register = (subject: {
+            conditionId?: string;
+            title?: string;
+            slug?: string;
+            eventSlug?: string;
+            marketSlug?: string;
+        }) => {
+            const conditionId = String(subject.conditionId || '').trim();
+            if (!conditionId) {
+                return;
+            }
+
+            const existing = subjects.get(conditionId) || {
+                conditionId,
+                marketSlug: '',
+                title: '',
+            };
+            existing.marketSlug = existing.marketSlug || resolveMarketSlug(subject);
+            existing.title = existing.title || String(subject.title || '').trim();
+            subjects.set(conditionId, existing);
+        };
+
+        pendingTrades.forEach(register);
+        openBuffers.forEach(register);
+        openBatches.forEach(register);
+
+        return [...subjects.values()];
+    }
+
+    private async skipResolvedPendingTrades(conditionId: string, reason: string) {
+        const result = await UserActivity.updateMany(
+            {
+                $and: [
+                    { conditionId },
+                    { type: 'TRADE' },
+                    {
+                        $or: [
+                            { executionIntent: 'EXECUTE' },
+                            { executionIntent: { $exists: false } },
+                        ],
+                    },
+                    {
+                        $or: [{ botStatus: { $exists: false } }, { botStatus: 'PENDING' }],
+                    },
+                    {
+                        $or: [{ botBufferId: { $exists: false } }, { botBufferId: null }],
+                    },
+                    {
+                        $or: [
+                            { botExecutionBatchId: { $exists: false } },
+                            { botExecutionBatchId: null },
+                        ],
+                    },
+                ],
+            },
+            {
+                $set: {
+                    bot: true,
+                    botStatus: 'SKIPPED',
+                    botExecutedAt: Date.now(),
+                    botClaimedAt: 0,
+                    botLastError: reason,
+                },
+            }
+        );
+
+        return result.modifiedCount;
+    }
+
+    private async cancelResolvedOpenBuffers(conditionId: string, reason: string) {
+        const buffers = (await CopyIntentBuffer.find({
+            conditionId,
+            state: { $in: ['OPEN', 'FLUSHING'] },
+        }).exec()) as CopyIntentBufferInterface[];
+
+        for (const buffer of buffers) {
+            await CopyIntentBuffer.updateOne(
+                { _id: buffer._id },
+                {
+                    $set: {
+                        state: 'SKIPPED',
+                        claimedAt: 0,
+                        reason,
+                        completedAt: Date.now(),
+                    },
+                }
+            );
+            await UserActivity.updateMany(
+                { _id: { $in: buffer.sourceTradeIds } },
+                {
+                    $set: {
+                        bot: true,
+                        botStatus: 'SKIPPED',
+                        botClaimedAt: 0,
+                        botExecutedAt: Date.now(),
+                        botLastError: reason,
+                    },
+                }
+            );
+        }
+
+        return buffers.length;
+    }
+
+    private async cancelResolvedReadyBatches(conditionId: string, reason: string) {
+        const batches = (await CopyExecutionBatch.find({
+            conditionId,
+            status: { $in: ['READY', 'PROCESSING'] },
+        }).exec()) as CopyExecutionBatchInterface[];
+
+        for (const batch of batches) {
+            await CopyExecutionBatch.updateOne(
+                { _id: batch._id },
+                {
+                    $set: {
+                        status: 'SKIPPED',
+                        claimedAt: 0,
+                        reason,
+                        completedAt: Date.now(),
+                        submissionStatus: 'SUBMITTED',
+                    },
+                }
+            );
+            await UserActivity.updateMany(
+                { _id: { $in: batch.sourceTradeIds } },
+                {
+                    $set: {
+                        bot: true,
+                        botStatus: 'SKIPPED',
+                        botClaimedAt: 0,
+                        botExecutedAt: Date.now(),
+                        botLastError: reason,
+                    },
+                }
+            );
+        }
+
+        return batches.length;
+    }
+
+    private async sweepResolvedConditions() {
+        const subjects = await this.loadResolutionSubjects();
+        if (subjects.length === 0) {
             return;
         }
 
-        if (Date.now() < this.nextRunAt) {
+        for (const subject of subjects) {
+            const resolution = await fetchPolymarketMarketResolution({
+                conditionId: subject.conditionId,
+                marketSlug: subject.marketSlug,
+                title: subject.title,
+            });
+            if (!isResolvedPolymarketMarket(resolution)) {
+                continue;
+            }
+
+            const reason = mergeReasons(
+                buildResolvedSkipReason(resolution?.winnerOutcome || ''),
+                resolution?.updateDescription || ''
+            );
+            const [pendingTradeCount, bufferCount, batchCount] = await Promise.all([
+                this.skipResolvedPendingTrades(subject.conditionId, reason),
+                this.cancelResolvedOpenBuffers(subject.conditionId, reason),
+                this.cancelResolvedReadyBatches(subject.conditionId, reason),
+            ]);
+
+            if (pendingTradeCount > 0 || bufferCount > 0 || batchCount > 0) {
+                logger.info(
+                    `resolved condition=${subject.conditionId} winner=${resolution?.winnerOutcome || 'unknown'} ` +
+                        `skippedTrades=${pendingTradeCount} skippedBuffers=${bufferCount} skippedBatches=${batchCount}`
+                );
+            }
+        }
+    }
+
+    async runDue() {
+        if (this.running) {
             return;
         }
 
         this.running = true;
         try {
+            await this.sweepResolvedConditions();
+
+            if (!this.autoRedeemEnabled || !this.relayClient) {
+                return;
+            }
+
+            if (Date.now() < this.nextRunAt) {
+                return;
+            }
+
             if (this.inflightTransactionId) {
                 await this.syncInflightTransaction();
                 return;

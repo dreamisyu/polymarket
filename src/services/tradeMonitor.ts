@@ -12,17 +12,33 @@ import buildActivityKey from '../utils/buildActivityKey';
 import fetchData from '../utils/fetchData';
 import getMyBalance from '../utils/getMyBalance';
 import createLogger from '../utils/logger';
+import {
+    flattenSourceActivityKeys,
+    flattenSourceTransactionHashes,
+    getSourceActivityKeys,
+    getSourceEndedAt,
+    getSourceStartedAt,
+    getSourceTradeCount,
+    sumSourceTradeCount,
+} from '../utils/sourceActivityAggregation';
 
 const USER_ADDRESS = ENV.USER_ADDRESS;
 const FETCH_INTERVAL = ENV.FETCH_INTERVAL;
 const INITIAL_SYNC_LOOKBACK_MS = ENV.INITIAL_SYNC_LOOKBACK_MS;
 const ACTIVITY_SYNC_LIMIT = ENV.ACTIVITY_SYNC_LIMIT;
 const ACTIVITY_SYNC_OVERLAP_MS = ENV.ACTIVITY_SYNC_OVERLAP_MS;
+const ACTIVITY_ADJACENT_MERGE_WINDOW_MS = ENV.ACTIVITY_ADJACENT_MERGE_WINDOW_MS;
 const MILLISECOND_TIMESTAMP_THRESHOLD = 1_000_000_000_000;
 const TRACKED_ACTIVITY_TYPES = new Set(['TRADE', 'MERGE', 'REDEEM']);
 const TRACE_EXECUTION_ACTIVITY_TYPES = new Set(['TRADE', 'MERGE', 'REDEEM']);
 const SOURCE_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}&sizeThreshold=0`;
 const logger = createLogger('monitor');
+const SNAPSHOT_STATUS_PRIORITY = {
+    COMPLETE: 0,
+    STALE: 1,
+    PARTIAL: 2,
+} as const;
+const SNAPSHOT_MERGE_TOLERANCE = 1e-6;
 
 if (!USER_ADDRESS) {
     throw new Error('USER_ADDRESS is not defined');
@@ -108,7 +124,8 @@ const normalizeTrade = (trade: UserActivityInterface): UserActivityInterface | n
 
     return {
         ...normalizedTrade,
-        activityKey: buildActivityKey(normalizedTrade),
+        activityKey:
+            String(baseTrade.activityKey || '').trim() || buildActivityKey(normalizedTrade),
     };
 };
 
@@ -151,6 +168,351 @@ const shouldUpdateSnapshot = (
     }
 
     return snapshotData.snapshotStatus === 'COMPLETE';
+};
+
+const toSafeNumber = (value: unknown, fallback = 0) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const normalizeSnapshotStatus = (value: string | undefined) =>
+    value === 'PARTIAL' || value === 'STALE' || value === 'COMPLETE' ? value : 'PARTIAL';
+
+const pickMergedSnapshotStatus = (
+    left: string | undefined,
+    right: string | undefined
+): 'COMPLETE' | 'PARTIAL' | 'STALE' => {
+    const normalizedLeft = normalizeSnapshotStatus(left);
+    const normalizedRight = normalizeSnapshotStatus(right);
+
+    return SNAPSHOT_STATUS_PRIORITY[normalizedLeft] >= SNAPSHOT_STATUS_PRIORITY[normalizedRight]
+        ? normalizedLeft
+        : normalizedRight;
+};
+
+const mergeReasons = (...reasons: string[]) =>
+    [...new Set(reasons.map((reason) => String(reason || '').trim()).filter(Boolean))].join('；');
+
+const approxEqual = (left: unknown, right: unknown, tolerance = SNAPSHOT_MERGE_TOLERANCE) =>
+    Math.abs(toSafeNumber(left) - toSafeNumber(right)) <= tolerance;
+
+const buildSnapshotFromTrade = (
+    trade: Partial<UserActivityInterface>,
+    fallbackCapturedAt: number
+): TradeSnapshotFields => ({
+    sourceBalanceAfterTrade: Number.isFinite(trade.sourceBalanceAfterTrade)
+        ? trade.sourceBalanceAfterTrade
+        : undefined,
+    sourceBalanceBeforeTrade: Number.isFinite(trade.sourceBalanceBeforeTrade)
+        ? trade.sourceBalanceBeforeTrade
+        : undefined,
+    sourcePositionSizeAfterTrade: Number.isFinite(trade.sourcePositionSizeAfterTrade)
+        ? trade.sourcePositionSizeAfterTrade
+        : undefined,
+    sourcePositionSizeBeforeTrade: Number.isFinite(trade.sourcePositionSizeBeforeTrade)
+        ? trade.sourcePositionSizeBeforeTrade
+        : undefined,
+    sourcePositionPriceAfterTrade: Number.isFinite(trade.sourcePositionPriceAfterTrade)
+        ? trade.sourcePositionPriceAfterTrade
+        : undefined,
+    sourceConditionMergeableSizeAfterTrade: Number.isFinite(
+        trade.sourceConditionMergeableSizeAfterTrade
+    )
+        ? trade.sourceConditionMergeableSizeAfterTrade
+        : undefined,
+    sourceConditionMergeableSizeBeforeTrade: Number.isFinite(
+        trade.sourceConditionMergeableSizeBeforeTrade
+    )
+        ? trade.sourceConditionMergeableSizeBeforeTrade
+        : undefined,
+    sourceSnapshotCapturedAt: toSafeNumber(trade.sourceSnapshotCapturedAt, fallbackCapturedAt),
+    snapshotStatus: normalizeSnapshotStatus(trade.snapshotStatus),
+    sourceSnapshotReason: String(trade.sourceSnapshotReason || '').trim(),
+});
+
+const buildActivityMergeKey = (trade: Partial<UserActivityInterface>) =>
+    [
+        String(trade.type || '')
+            .trim()
+            .toUpperCase(),
+        String(trade.conditionId || '').trim(),
+        String(trade.asset || '').trim(),
+        String(
+            Number.isFinite(trade.outcomeIndex) ? trade.outcomeIndex : String(trade.outcome || '')
+        ).trim(),
+        String(trade.side || '')
+            .trim()
+            .toUpperCase(),
+    ].join('|');
+
+const isExpandableStoredTrade = (trade: UserActivityInterface) =>
+    trade.type === 'TRADE' &&
+    resolveExecutionIntent(trade) === 'EXECUTE' &&
+    (!trade.botStatus || trade.botStatus === 'PENDING') &&
+    !trade.botBufferId &&
+    !trade.botExecutionBatchId;
+
+const canMergeAdjacentActivities = (
+    previousTrade: UserActivityInterface,
+    previousSnapshot: TradeSnapshotFields,
+    nextTrade: UserActivityInterface,
+    nextSnapshot: TradeSnapshotFields
+) => {
+    if (previousTrade.type !== 'TRADE' || nextTrade.type !== 'TRADE') {
+        return false;
+    }
+
+    if (buildActivityMergeKey(previousTrade) !== buildActivityMergeKey(nextTrade)) {
+        return false;
+    }
+
+    if (
+        previousSnapshot.snapshotStatus !== 'COMPLETE' ||
+        nextSnapshot.snapshotStatus !== 'COMPLETE'
+    ) {
+        return false;
+    }
+
+    if (
+        getSourceEndedAt(nextTrade) - getSourceStartedAt(previousTrade) <
+        getSourceEndedAt(previousTrade) - getSourceStartedAt(previousTrade)
+    ) {
+        return false;
+    }
+
+    if (
+        getSourceStartedAt(nextTrade) - getSourceEndedAt(previousTrade) >
+        ACTIVITY_ADJACENT_MERGE_WINDOW_MS
+    ) {
+        return false;
+    }
+
+    if (
+        !approxEqual(
+            previousSnapshot.sourcePositionSizeAfterTrade,
+            nextSnapshot.sourcePositionSizeBeforeTrade
+        )
+    ) {
+        return false;
+    }
+
+    if (
+        String(previousTrade.side || '')
+            .trim()
+            .toUpperCase() === 'BUY' &&
+        Number.isFinite(previousSnapshot.sourceBalanceAfterTrade) &&
+        Number.isFinite(nextSnapshot.sourceBalanceBeforeTrade) &&
+        !approxEqual(
+            previousSnapshot.sourceBalanceAfterTrade,
+            nextSnapshot.sourceBalanceBeforeTrade
+        )
+    ) {
+        return false;
+    }
+
+    return true;
+};
+
+const createMergedTradeCandidate = (
+    trade: UserActivityInterface,
+    snapshot: TradeSnapshotFields
+): {
+    trade: UserActivityInterface;
+    snapshot: TradeSnapshotFields;
+} => ({
+    trade: {
+        ...trade,
+        sourceActivityKeys: getSourceActivityKeys(trade),
+        sourceTransactionHashes: flattenSourceTransactionHashes([trade]),
+        sourceTradeCount: getSourceTradeCount(trade),
+        sourceStartedAt: getSourceStartedAt(trade),
+        sourceEndedAt: getSourceEndedAt(trade),
+        sourceBalanceAfterTrade: snapshot.sourceBalanceAfterTrade,
+        sourceBalanceBeforeTrade: snapshot.sourceBalanceBeforeTrade,
+        sourcePositionSizeAfterTrade: snapshot.sourcePositionSizeAfterTrade,
+        sourcePositionSizeBeforeTrade: snapshot.sourcePositionSizeBeforeTrade,
+        sourcePositionPriceAfterTrade: snapshot.sourcePositionPriceAfterTrade,
+        sourceConditionMergeableSizeAfterTrade: snapshot.sourceConditionMergeableSizeAfterTrade,
+        sourceConditionMergeableSizeBeforeTrade: snapshot.sourceConditionMergeableSizeBeforeTrade,
+        sourceSnapshotCapturedAt: snapshot.sourceSnapshotCapturedAt,
+        snapshotStatus: snapshot.snapshotStatus,
+        sourceSnapshotReason: snapshot.sourceSnapshotReason,
+    },
+    snapshot,
+});
+
+const mergeTradeCandidates = (
+    previousCandidate: {
+        trade: UserActivityInterface;
+        snapshot: TradeSnapshotFields;
+    },
+    nextTrade: UserActivityInterface,
+    nextSnapshot: TradeSnapshotFields
+) => {
+    const mergedSize = toSafeNumber(previousCandidate.trade.size) + toSafeNumber(nextTrade.size);
+    const mergedUsdc =
+        toSafeNumber(previousCandidate.trade.usdcSize) + toSafeNumber(nextTrade.usdcSize);
+    const mergedSnapshot: TradeSnapshotFields = {
+        sourceBalanceAfterTrade: nextSnapshot.sourceBalanceAfterTrade,
+        sourceBalanceBeforeTrade: previousCandidate.snapshot.sourceBalanceBeforeTrade,
+        sourcePositionSizeAfterTrade: nextSnapshot.sourcePositionSizeAfterTrade,
+        sourcePositionSizeBeforeTrade: previousCandidate.snapshot.sourcePositionSizeBeforeTrade,
+        sourcePositionPriceAfterTrade: nextSnapshot.sourcePositionPriceAfterTrade,
+        sourceConditionMergeableSizeAfterTrade: nextSnapshot.sourceConditionMergeableSizeAfterTrade,
+        sourceConditionMergeableSizeBeforeTrade:
+            previousCandidate.snapshot.sourceConditionMergeableSizeBeforeTrade,
+        sourceSnapshotCapturedAt: Math.max(
+            toSafeNumber(previousCandidate.snapshot.sourceSnapshotCapturedAt),
+            toSafeNumber(nextSnapshot.sourceSnapshotCapturedAt)
+        ),
+        snapshotStatus: pickMergedSnapshotStatus(
+            previousCandidate.snapshot.snapshotStatus,
+            nextSnapshot.snapshotStatus
+        ),
+        sourceSnapshotReason: mergeReasons(
+            previousCandidate.snapshot.sourceSnapshotReason,
+            nextSnapshot.sourceSnapshotReason
+        ),
+    };
+
+    return {
+        trade: {
+            ...previousCandidate.trade,
+            proxyWallet: nextTrade.proxyWallet,
+            timestamp: nextTrade.timestamp,
+            transactionHash: nextTrade.transactionHash,
+            price:
+                mergedSize > 0
+                    ? mergedUsdc / mergedSize
+                    : Math.max(toSafeNumber(nextTrade.price), 0),
+            size: mergedSize,
+            usdcSize: mergedUsdc,
+            title: nextTrade.title || previousCandidate.trade.title,
+            slug: nextTrade.slug || previousCandidate.trade.slug,
+            eventSlug: nextTrade.eventSlug || previousCandidate.trade.eventSlug,
+            outcome: nextTrade.outcome || previousCandidate.trade.outcome,
+            outcomeIndex: Number.isFinite(nextTrade.outcomeIndex)
+                ? nextTrade.outcomeIndex
+                : previousCandidate.trade.outcomeIndex,
+            sourceActivityKeys: flattenSourceActivityKeys([previousCandidate.trade, nextTrade]),
+            sourceTransactionHashes: flattenSourceTransactionHashes([
+                previousCandidate.trade,
+                nextTrade,
+            ]),
+            sourceTradeCount: sumSourceTradeCount([previousCandidate.trade, nextTrade]),
+            sourceStartedAt: Math.min(
+                getSourceStartedAt(previousCandidate.trade),
+                getSourceStartedAt(nextTrade)
+            ),
+            sourceEndedAt: Math.max(
+                getSourceEndedAt(previousCandidate.trade),
+                getSourceEndedAt(nextTrade)
+            ),
+            sourceBalanceAfterTrade: mergedSnapshot.sourceBalanceAfterTrade,
+            sourceBalanceBeforeTrade: mergedSnapshot.sourceBalanceBeforeTrade,
+            sourcePositionSizeAfterTrade: mergedSnapshot.sourcePositionSizeAfterTrade,
+            sourcePositionSizeBeforeTrade: mergedSnapshot.sourcePositionSizeBeforeTrade,
+            sourcePositionPriceAfterTrade: mergedSnapshot.sourcePositionPriceAfterTrade,
+            sourceConditionMergeableSizeAfterTrade:
+                mergedSnapshot.sourceConditionMergeableSizeAfterTrade,
+            sourceConditionMergeableSizeBeforeTrade:
+                mergedSnapshot.sourceConditionMergeableSizeBeforeTrade,
+            sourceSnapshotCapturedAt: mergedSnapshot.sourceSnapshotCapturedAt,
+            snapshotStatus: mergedSnapshot.snapshotStatus,
+            sourceSnapshotReason: mergedSnapshot.sourceSnapshotReason,
+        },
+        snapshot: mergedSnapshot,
+    };
+};
+
+const mergeFetchedTrades = (
+    fetchedTrades: UserActivityInterface[],
+    storedTrades: UserActivityInterface[],
+    snapshots: Map<string, TradeSnapshotFields>,
+    snapshotCapturedAt: number
+) => {
+    const mergedByActivityKey = new Map<
+        string,
+        {
+            trade: UserActivityInterface;
+            snapshot: TradeSnapshotFields;
+        }
+    >();
+    const mergeTargetByIdentity = new Map<
+        string,
+        {
+            trade: UserActivityInterface;
+            snapshot: TradeSnapshotFields;
+        }
+    >();
+
+    for (const storedTrade of storedTrades
+        .filter(isExpandableStoredTrade)
+        .sort((left, right) => left.timestamp - right.timestamp)) {
+        const activityKey = String(storedTrade.activityKey || '').trim();
+        if (!activityKey) {
+            continue;
+        }
+
+        mergeTargetByIdentity.set(buildActivityMergeKey(storedTrade), {
+            trade: storedTrade,
+            snapshot:
+                snapshots.get(activityKey) ||
+                buildSnapshotFromTrade(storedTrade, snapshotCapturedAt),
+        });
+    }
+
+    for (const trade of fetchedTrades) {
+        const activityKey = String(trade.activityKey || '').trim();
+        if (!activityKey) {
+            continue;
+        }
+
+        const nextSnapshot =
+            snapshots.get(activityKey) || buildSnapshotFromTrade(trade, snapshotCapturedAt);
+        const identity = buildActivityMergeKey(trade);
+        const currentCandidate = mergeTargetByIdentity.get(identity);
+
+        if (
+            currentCandidate &&
+            (String(currentCandidate.trade.activityKey || '').trim() === activityKey ||
+                getSourceActivityKeys(currentCandidate.trade).includes(activityKey))
+        ) {
+            continue;
+        }
+
+        if (
+            currentCandidate &&
+            canMergeAdjacentActivities(
+                currentCandidate.trade,
+                currentCandidate.snapshot,
+                trade,
+                nextSnapshot
+            )
+        ) {
+            const mergedCandidate = mergeTradeCandidates(currentCandidate, trade, nextSnapshot);
+            mergeTargetByIdentity.set(identity, mergedCandidate);
+            mergedByActivityKey.set(
+                String(mergedCandidate.trade.activityKey || ''),
+                mergedCandidate
+            );
+            continue;
+        }
+
+        const freshCandidate = createMergedTradeCandidate(trade, nextSnapshot);
+        mergeTargetByIdentity.set(identity, freshCandidate);
+        mergedByActivityKey.set(String(freshCandidate.trade.activityKey || ''), freshCandidate);
+    }
+
+    return {
+        trades: [...mergedByActivityKey.values()].map((candidate) => candidate.trade),
+        snapshots: new Map(
+            [...mergedByActivityKey.values()].map((candidate) => [
+                String(candidate.trade.activityKey || ''),
+                candidate.snapshot,
+            ])
+        ),
+    };
 };
 
 const fetchActivityWindow = async (startTimestamp: number, endTimestamp: number) => {
@@ -406,21 +768,33 @@ const fetchTradeData = async () => {
             currentBalance,
             snapshotCapturedAt
         );
+        const mergedFetchedTrades = mergeFetchedTrades(
+            fetchedTrades,
+            normalizedStoredTrades,
+            snapshotMap,
+            snapshotCapturedAt
+        );
 
         await syncStoredTrades(normalizedStoredTrades, snapshotMap);
-        await upsertTrades(fetchedTrades, normalizedStoredTrades, snapshotMap, snapshotCapturedAt);
+        await upsertTrades(
+            mergedFetchedTrades.trades,
+            normalizedStoredTrades,
+            mergedFetchedTrades.snapshots,
+            snapshotCapturedAt
+        );
         await writeSyncState(
             fetchedTrades.length > 0 ? fetchedTrades[fetchedTrades.length - 1] : null,
             endTimestamp
         );
 
-        const executeCount = fetchedTrades.filter(
+        const executeCount = mergedFetchedTrades.trades.filter(
             (trade) => resolveExecutionIntent(trade) === 'EXECUTE'
         ).length;
-        const syncOnlyCount = fetchedTrades.length - executeCount;
+        const syncOnlyCount = mergedFetchedTrades.trades.length - executeCount;
         if (executeCount > 0 || syncOnlyCount > 0) {
             logger.info(
-                `同步活动 ${fetchedTrades.length} 条，待执行 ${executeCount} 条，仅校准 ${syncOnlyCount} 条`
+                `同步原始活动 ${fetchedTrades.length} 条，合并后 ${mergedFetchedTrades.trades.length} 条，` +
+                    `待执行 ${executeCount} 条，仅校准 ${syncOnlyCount} 条`
             );
         }
     } catch (error) {

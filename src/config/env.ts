@@ -222,6 +222,10 @@ export const ENV = {
     CLOB_WS_URL: liveOnlyEnv.CLOB_WS_URL,
     USER_WS_URL: liveOnlyEnv.USER_WS_URL,
     FETCH_INTERVAL: parseInt(readEnv('FETCH_INTERVAL') || '1', 10),
+    SETTLEMENT_SWEEP_INTERVAL_MS: parsePositiveInteger(
+        readEnv('SETTLEMENT_SWEEP_INTERVAL_MS') || '5000',
+        'SETTLEMENT_SWEEP_INTERVAL_MS'
+    ),
     INITIAL_SYNC_LOOKBACK_MS,
     RETRY_LIMIT: parseInt(readEnv('RETRY_LIMIT') || '3', 10),
     MAX_SLIPPAGE_BPS: parseNonNegativeNumber(
@@ -257,6 +261,10 @@ export const ENV = {
     ACTIVITY_SYNC_LIMIT: parsePositiveInteger(
         readEnv('ACTIVITY_SYNC_LIMIT') || '500',
         'ACTIVITY_SYNC_LIMIT'
+    ),
+    ACTIVITY_ADJACENT_MERGE_WINDOW_MS: parsePositiveInteger(
+        readEnv('ACTIVITY_ADJACENT_MERGE_WINDOW_MS') || '15000',
+        'ACTIVITY_ADJACENT_MERGE_WINDOW_MS'
     ),
     ACTIVITY_SYNC_OVERLAP_MS: parsePositiveInteger(
         readEnv('ACTIVITY_SYNC_OVERLAP_MS') || '30000',

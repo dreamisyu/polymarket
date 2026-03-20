@@ -428,7 +428,11 @@ const loadConditionResolution = async (
         }
     }
 
-    const resolution = await fetchPolymarketMarketResolution(metadata.marketSlug);
+    const resolution = await fetchPolymarketMarketResolution({
+        conditionId: metadata.conditionId,
+        marketSlug: metadata.marketSlug,
+        title: metadata.title,
+    });
     if (resolution) {
         resolutionCache.set(metadata.conditionId, {
             checkedAt: Date.now(),
@@ -1736,15 +1740,30 @@ const loadPendingTrades = async () => {
     const [trades, trackedIds] = await Promise.all([
         SourceActivity.find({
             $and: [
-                { type: { $in: ['TRADE', 'MERGE', 'REDEEM'] } },
+                { type: 'TRADE' },
                 { $or: [{ executionIntent: 'EXECUTE' }, { executionIntent: { $exists: false } }] },
                 {
-                    $or: [
-                        { type: { $in: ['MERGE', 'REDEEM'] } },
-                        { snapshotStatus: 'COMPLETE' },
-                        { snapshotStatus: { $exists: false } },
-                    ],
+                    $or: [{ snapshotStatus: 'COMPLETE' }, { snapshotStatus: { $exists: false } }],
                 },
+                { transactionHash: { $exists: true, $ne: '' } },
+            ],
+        })
+            .sort({ timestamp: 1 })
+            .exec(),
+        readTrackedTradeIds(),
+    ]);
+
+    return (trades as UserActivityInterface[]).filter(
+        (trade) => !trackedIds.has(String(trade._id))
+    );
+};
+
+const loadPendingConditionTriggerTrades = async () => {
+    const [trades, trackedIds] = await Promise.all([
+        SourceActivity.find({
+            $and: [
+                { type: { $in: ['MERGE', 'REDEEM'] } },
+                { $or: [{ executionIntent: 'EXECUTE' }, { executionIntent: { $exists: false } }] },
                 { transactionHash: { $exists: true, $ne: '' } },
             ],
         })
@@ -2856,11 +2875,44 @@ const executeReadyBatches = async (marketStream: ClobMarketStream) => {
     }
 };
 
+export const createTraceSettlementScheduler = () => {
+    let lastTracePortfolioSyncAt = 0;
+    let lastSettlementTaskSyncAt = 0;
+
+    return {
+        async runDue() {
+            const conditionTriggerTrades = await loadPendingConditionTriggerTrades();
+            if (conditionTriggerTrades.length > 0) {
+                spinner.stop();
+                logger.info(
+                    `发现 ${conditionTriggerTrades.length} 条待处理 condition 结算触发活动`
+                );
+
+                for (const trade of conditionTriggerTrades) {
+                    await processConditionTriggerTrade(trade);
+                }
+            }
+
+            if (Date.now() - lastSettlementTaskSyncAt >= TRACE_SETTLEMENT_TASK_SYNC_INTERVAL_MS) {
+                await syncConditionSettlementTasksFromOpenPositions();
+                lastSettlementTaskSyncAt = Date.now();
+            }
+
+            await processReadyConditionSettlementTasks();
+            await sweepResolvedConditionOpenWork();
+
+            if (Date.now() - lastTracePortfolioSyncAt >= TRACE_PORTFOLIO_SYNC_INTERVAL_MS) {
+                const portfolio = await ensurePortfolio();
+                await syncTracePortfolioWithPolymarket(portfolio);
+                lastTracePortfolioSyncAt = Date.now();
+            }
+        },
+    };
+};
+
 const paperTradeExecutor = async (marketStream: ClobMarketStream) => {
     logger.info('启动模拟跟单');
     const processingCount = await TraceExecutionBatch.countDocuments({ status: 'PROCESSING' });
-    let lastTracePortfolioSyncAt = 0;
-    let lastSettlementTaskSyncAt = 0;
     if (processingCount > 0) {
         logger.warn(`检测到 ${processingCount} 个 PROCESSING 批次，本次启动会自动回收续跑`);
     }
@@ -2872,13 +2924,6 @@ const paperTradeExecutor = async (marketStream: ClobMarketStream) => {
             logger.info(`发现 ${pendingTrades.length} 条待处理模拟交易`);
             await processPendingTrades(pendingTrades);
         }
-
-        if (Date.now() - lastSettlementTaskSyncAt >= TRACE_SETTLEMENT_TASK_SYNC_INTERVAL_MS) {
-            await syncConditionSettlementTasksFromOpenPositions();
-            lastSettlementTaskSyncAt = Date.now();
-        }
-        await processReadyConditionSettlementTasks();
-        await sweepResolvedConditionOpenWork();
 
         await flushReadyBuffers();
         await executeReadyBatches(marketStream);
@@ -2892,11 +2937,6 @@ const paperTradeExecutor = async (marketStream: ClobMarketStream) => {
             }));
 
         if (pendingTrades.length === 0 && openWorkCount === 0) {
-            if (Date.now() - lastTracePortfolioSyncAt >= TRACE_PORTFOLIO_SYNC_INTERVAL_MS) {
-                const portfolio = await ensurePortfolio();
-                await syncTracePortfolioWithPolymarket(portfolio);
-                lastTracePortfolioSyncAt = Date.now();
-            }
             await spinner.start('等待新的模拟交易');
         }
 
