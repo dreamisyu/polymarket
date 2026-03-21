@@ -366,9 +366,21 @@ export const ENV = {
         readEnv('LIVE_STATE_REFRESH_MS') || '1000',
         'LIVE_STATE_REFRESH_MS'
     ),
+    LIVE_MAX_STALE_SNAPSHOT_MS: parsePositiveInteger(
+        readEnv('LIVE_MAX_STALE_SNAPSHOT_MS') || '5000',
+        'LIVE_MAX_STALE_SNAPSHOT_MS'
+    ),
     LIVE_EXECUTOR_LOOP_INTERVAL_MS: parsePositiveInteger(
         readEnv('LIVE_EXECUTOR_LOOP_INTERVAL_MS') || '100',
         'LIVE_EXECUTOR_LOOP_INTERVAL_MS'
+    ),
+    LIVE_CONFIRM_TIMEOUT_MS: parsePositiveInteger(
+        readEnv('LIVE_CONFIRM_TIMEOUT_MS') || readEnv('ORDER_CONFIRMATION_TIMEOUT_MS') || '45000',
+        'LIVE_CONFIRM_TIMEOUT_MS'
+    ),
+    LIVE_RECONCILE_AFTER_TIMEOUT_MS: parsePositiveInteger(
+        readEnv('LIVE_RECONCILE_AFTER_TIMEOUT_MS') || '3000',
+        'LIVE_RECONCILE_AFTER_TIMEOUT_MS'
     ),
     LIVE_PERSIST_MAX_QUEUE_SIZE: parsePositiveInteger(
         readEnv('LIVE_PERSIST_MAX_QUEUE_SIZE') || '2000',

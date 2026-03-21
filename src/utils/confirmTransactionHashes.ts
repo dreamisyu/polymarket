@@ -15,7 +15,12 @@ export interface TransactionConfirmationResult {
 }
 
 const confirmTransactionHashes = async (
-    transactionHashes: string[]
+    transactionHashes: string[],
+    options: {
+        timeoutMs?: number;
+        pollMs?: number;
+        confirmationBlocks?: number;
+    } = {}
 ): Promise<TransactionConfirmationResult> => {
     const uniqueHashes = [
         ...new Set(transactionHashes.map((hash) => String(hash || '').trim())),
@@ -30,8 +35,11 @@ const confirmTransactionHashes = async (
 
     const provider = getRpcProvider();
     const startedAt = Date.now();
+    const timeoutMs = options.timeoutMs || ORDER_CONFIRMATION_TIMEOUT_MS;
+    const pollMs = options.pollMs || ORDER_CONFIRMATION_POLL_MS;
+    const confirmationBlocks = options.confirmationBlocks || ORDER_CONFIRMATION_BLOCKS;
 
-    while (Date.now() - startedAt < ORDER_CONFIRMATION_TIMEOUT_MS) {
+    while (Date.now() - startedAt < timeoutMs) {
         let confirmedCount = 0;
 
         for (const hash of uniqueHashes) {
@@ -48,7 +56,7 @@ const confirmTransactionHashes = async (
             }
 
             const confirmations = await receipt.confirmations();
-            if (confirmations >= ORDER_CONFIRMATION_BLOCKS) {
+            if (confirmations >= confirmationBlocks) {
                 confirmedCount += 1;
             }
         }
@@ -61,12 +69,12 @@ const confirmTransactionHashes = async (
             };
         }
 
-        await sleep(ORDER_CONFIRMATION_POLL_MS);
+        await sleep(pollMs);
     }
 
     return {
         status: 'PENDING',
-        reason: `等待链上确认超时（${ORDER_CONFIRMATION_TIMEOUT_MS}ms）`,
+        reason: `等待链上确认超时（${timeoutMs}ms）`,
     };
 };
 

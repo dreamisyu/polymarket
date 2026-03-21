@@ -2,10 +2,13 @@ import mongoose from 'mongoose';
 
 export type ExecutionPolicyAction = 'PASS' | 'ADJUST' | 'DEFER' | 'SKIP' | 'RETRY';
 export type CopyIntentBufferState = 'OPEN' | 'FLUSHING' | 'CLOSED' | 'SKIPPED';
+export type ExecutionKind = 'TRADE' | 'MERGE' | 'REDEEM';
 export type CopyExecutionBatchStatus =
     | 'READY'
     | 'PROCESSING'
     | 'SUBMITTED'
+    | 'PENDING_CONFIRMATION'
+    | 'TIMEOUT'
     | 'CONFIRMED'
     | 'SKIPPED'
     | 'FAILED';
@@ -49,6 +52,7 @@ export interface CopyExecutionBatchInterface {
     sourceWallet: string;
     bufferId?: mongoose.Types.ObjectId;
     status: CopyExecutionBatchStatus;
+    executionKind?: ExecutionKind;
     condition: string;
     asset: string;
     conditionId: string;
@@ -72,6 +76,9 @@ export interface CopyExecutionBatchInterface {
     submittedAt?: number;
     confirmedAt?: number;
     completedAt?: number;
+    localPositionSizeBefore?: number;
+    localConditionMergeableSizeBefore?: number;
+    lastConfirmationSource?: 'user_stream' | 'chain' | 'reconcile';
     reason?: string;
     submissionStatus?: 'SUBMITTED' | 'MATCHED' | 'MINED' | 'RETRYING' | 'CONFIRMED' | 'FAILED';
 }

@@ -15,6 +15,14 @@ import { mergeObjectIds, mergeStringArrays, toSafeNumber } from '../utils/runtim
 
 const EPSILON = 1e-8;
 const BOOTSTRAP_POLICY_IDS = ['first-entry-ticket', 'buffer-min-top-up'];
+const ACTIVE_BUY_BATCH_STATUSES = [
+    'READY',
+    'PROCESSING',
+    'SUBMITTED',
+    'PENDING_CONFIRMATION',
+    'TIMEOUT',
+];
+const BLOCKING_CONFIRMATION_BATCH_STATUSES = ['SUBMITTED', 'PENDING_CONFIRMATION', 'TIMEOUT'];
 
 export interface LiveTradeRuntimeState {
     trade: UserActivityInterface;
@@ -241,7 +249,12 @@ class LiveStateStore {
                 continue;
             }
 
-            state.status = batch.status === 'SUBMITTED' ? 'SUBMITTED' : 'BATCHED';
+            state.status =
+                batch.status === 'PENDING_CONFIRMATION'
+                    ? 'PENDING_CONFIRMATION'
+                    : batch.status === 'SUBMITTED'
+                      ? 'SUBMITTED'
+                      : 'BATCHED';
             state.batchId = batch._id;
             state.bufferId = batch.bufferId;
             state.lastError = batch.reason || state.lastError;
@@ -282,7 +295,9 @@ class LiveStateStore {
     }
 
     listSubmittedBatches() {
-        return [...this.batchesById.values()].filter((batch) => batch.status === 'SUBMITTED');
+        return [...this.batchesById.values()].filter((batch) =>
+            ['SUBMITTED', 'PENDING_CONFIRMATION', 'TIMEOUT'].includes(batch.status)
+        );
     }
 
     markBatchProcessing(batchId: mongoose.Types.ObjectId) {
@@ -332,6 +347,37 @@ class LiveStateStore {
         return batch;
     }
 
+    markBatchPendingConfirmation(
+        batchId: mongoose.Types.ObjectId,
+        reason: string,
+        submissionStatus?: CopyExecutionBatchInterface['submissionStatus']
+    ) {
+        const batch = this.getBatch(batchId);
+        if (!batch) {
+            return null;
+        }
+
+        batch.status = 'PENDING_CONFIRMATION';
+        batch.reason = reason;
+        batch.claimedAt = 0;
+        if (submissionStatus) {
+            batch.submissionStatus = submissionStatus;
+        }
+        return batch;
+    }
+
+    markBatchTimeout(batchId: mongoose.Types.ObjectId, reason: string) {
+        const batch = this.getBatch(batchId);
+        if (!batch) {
+            return null;
+        }
+
+        batch.status = 'TIMEOUT';
+        batch.reason = reason;
+        batch.claimedAt = 0;
+        return batch;
+    }
+
     markBatchTerminal(
         batchId: mongoose.Types.ObjectId,
         status: 'CONFIRMED' | 'SKIPPED' | 'FAILED',
@@ -356,7 +402,7 @@ class LiveStateStore {
             (batch) =>
                 batch.asset === asset &&
                 batch.condition === 'buy' &&
-                ['READY', 'PROCESSING', 'SUBMITTED'].includes(batch.status)
+                ACTIVE_BUY_BATCH_STATUSES.includes(batch.status)
         );
     }
 
@@ -368,7 +414,7 @@ class LiveStateStore {
                         batch.asset === trade.asset &&
                         batch.conditionId === trade.conditionId &&
                         batch.condition === 'buy' &&
-                        ['READY', 'PROCESSING', 'SUBMITTED'].includes(batch.status)
+                        ACTIVE_BUY_BATCH_STATUSES.includes(batch.status)
                 )
                 .sort(
                     (left, right) =>
@@ -384,10 +430,24 @@ class LiveStateStore {
             ),
             ...[...this.batchesById.values()].filter(
                 (batch) =>
-                    ['READY', 'PROCESSING', 'SUBMITTED'].includes(batch.status) &&
-                    batch.condition === 'buy'
+                    ACTIVE_BUY_BATCH_STATUSES.includes(batch.status) && batch.condition === 'buy'
             ),
         ].reduce((sum, item) => sum + Math.max(toSafeNumber(item.requestedUsdc), 0), 0);
+    }
+
+    findBlockingBatch(
+        subject: Pick<UserActivityInterface, 'asset' | 'conditionId'>,
+        excludeBatchId?: mongoose.Types.ObjectId | string
+    ) {
+        return (
+            [...this.batchesById.values()].find(
+                (batch) =>
+                    batch.asset === subject.asset &&
+                    batch.conditionId === subject.conditionId &&
+                    BLOCKING_CONFIRMATION_BATCH_STATUSES.includes(batch.status) &&
+                    String(batch._id) !== String(excludeBatchId || '')
+            ) || null
+        );
     }
 
     activeBootstrapExposureUsdc() {
@@ -400,7 +460,7 @@ class LiveStateStore {
             ),
             ...[...this.batchesById.values()].filter(
                 (batch) =>
-                    ['READY', 'PROCESSING', 'SUBMITTED'].includes(batch.status) &&
+                    ACTIVE_BUY_BATCH_STATUSES.includes(batch.status) &&
                     batch.condition === 'buy' &&
                     hasPolicyId(batch.policyTrail, BOOTSTRAP_POLICY_IDS)
             ),

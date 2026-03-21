@@ -42,6 +42,7 @@ import {
     PolymarketMarketResolution,
 } from '../utils/polymarketMarketResolution';
 import resolveTradeCondition from '../utils/resolveTradeCondition';
+import { validateExecutableSnapshot } from '../utils/executionSemantics';
 import {
     getSourceActivityKeys,
     getSourceEndedAt,
@@ -2097,11 +2098,11 @@ const recordTraceExecution = async (params: {
 };
 
 const validateTradeForTrace = (trade: UserActivityInterface) => {
-    if (trade.snapshotStatus === 'PARTIAL') {
-        return {
-            status: 'RETRY' as const,
-            reason: trade.sourceSnapshotReason || '源账户快照尚未完整',
-        };
+    const snapshotValidation = validateExecutableSnapshot(trade, {
+        mode: 'trace',
+    });
+    if (snapshotValidation.status !== 'OK') {
+        return snapshotValidation;
     }
 
     if (!Number.isFinite(trade.sourcePositionSizeAfterTrade)) {

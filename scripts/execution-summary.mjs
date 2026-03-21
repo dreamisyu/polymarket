@@ -254,7 +254,11 @@ const isCompletedLiveStatus = (status) => ['CONFIRMED', 'COMPLETED'].includes(st
 
 const buildFailureItems = (items, statusResolver) =>
     items
-        .filter((item) => ['FAILED', 'PROCESSING', 'SUBMITTED'].includes(statusResolver(item)))
+        .filter((item) =>
+            ['FAILED', 'PROCESSING', 'SUBMITTED', 'PENDING_CONFIRMATION', 'TIMEOUT'].includes(
+                statusResolver(item)
+            )
+        )
         .sort((left, right) => toSafeNumber(right.timestamp) - toSafeNumber(left.timestamp))
         .slice(0, 10)
         .map((item) => ({
@@ -269,7 +273,14 @@ const buildFailureItems = (items, statusResolver) =>
 const buildBatchAttentionItems = (batches) =>
     batches
         .filter((batch) =>
-            ['FAILED', 'PROCESSING', 'SUBMITTED', 'READY'].includes(normalizeStatus(batch.status))
+            [
+                'FAILED',
+                'PROCESSING',
+                'SUBMITTED',
+                'PENDING_CONFIRMATION',
+                'TIMEOUT',
+                'READY',
+            ].includes(normalizeStatus(batch.status))
         )
         .sort((left, right) => getBatchTimestamp(right) - getBatchTimestamp(left))
         .slice(0, 10)
@@ -308,8 +319,8 @@ const mergeAttentionItems = (...groups) =>
         .slice(0, 10);
 
 const summarizeSourceTrades = (activities) => {
-    const tradeActivities = activities.filter(
-        (activity) => String(activity.type || '').toUpperCase() === 'TRADE'
+    const tradeActivities = activities.filter((activity) =>
+        ['TRADE', 'MERGE', 'REDEEM'].includes(String(activity.type || '').toUpperCase())
     );
     return {
         totalCount: tradeActivities.length,
@@ -321,9 +332,8 @@ const summarizeSourceTrades = (activities) => {
             tradeActivities,
             (activity) => String(activity.side || '').toUpperCase() === 'SELL'
         ),
-        mergeCount: countItems(
-            tradeActivities,
-            (activity) => String(activity.side || '').toUpperCase() === 'MERGE'
+        mergeCount: countItems(tradeActivities, (activity) =>
+            ['MERGE'].includes(String(activity.type || activity.side || '').toUpperCase())
         ),
     };
 };
@@ -352,6 +362,11 @@ const summarizeExecutionBatches = (batches) => {
             batches,
             (batch) => normalizeStatus(batch.status) === 'SUBMITTED'
         ),
+        pendingConfirmationCount: countItems(
+            batches,
+            (batch) => normalizeStatus(batch.status) === 'PENDING_CONFIRMATION'
+        ),
+        timeoutCount: countItems(batches, (batch) => normalizeStatus(batch.status) === 'TIMEOUT'),
         confirmedCount: confirmedBatches.length,
         skippedCount: countItems(batches, (batch) => normalizeStatus(batch.status) === 'SKIPPED'),
         failedCount: countItems(batches, (batch) => normalizeStatus(batch.status) === 'FAILED'),
@@ -425,7 +440,11 @@ const summarizeIntentBuffers = (buffers) => {
 
 const summarizeLiveMode = async ({ userAddress, settlementWallet }) => {
     const [activities, buffers, batches] = await Promise.all([
-        fetchCollectionDocs(`user_activities_${userAddress}`, { type: 'TRADE' }, { timestamp: 1 }),
+        fetchCollectionDocs(
+            `user_activities_${userAddress}`,
+            { type: { $in: ['TRADE', 'MERGE', 'REDEEM'] } },
+            { timestamp: 1 }
+        ),
         fetchCollectionDocs(
             getCopyIntentBufferCollectionName(userAddress),
             {},
@@ -487,6 +506,14 @@ const summarizeLiveMode = async ({ userAddress, settlementWallet }) => {
                 ? batchSummary.submittedCount
                 : activities.filter((activity) => resolveLiveStatus(activity) === 'SUBMITTED')
                       .length,
+            pendingConfirmationCount: hasBatchSummary
+                ? batchSummary.pendingConfirmationCount
+                : activities.filter(
+                      (activity) => resolveLiveStatus(activity) === 'PENDING_CONFIRMATION'
+                  ).length,
+            timeoutCount: hasBatchSummary
+                ? batchSummary.timeoutCount
+                : activities.filter((activity) => resolveLiveStatus(activity) === 'TIMEOUT').length,
             bufferedCount: activities.filter(
                 (activity) => resolveLiveStatus(activity) === 'BUFFERED'
             ).length,
@@ -725,10 +752,12 @@ const printHumanReadable = (summary) => {
     }
     if (summary.batchSummary?.totalCount) {
         lines.push(
-            `- 批次 READY/PROCESSING/SUBMITTED/CONFIRMED/SKIPPED/FAILED: ` +
+            `- 批次 READY/PROCESSING/SUBMITTED/PENDING_CONFIRMATION/TIMEOUT/CONFIRMED/SKIPPED/FAILED: ` +
                 `${toSafeNumber(summary.batchSummary.readyCount)}/` +
                 `${toSafeNumber(summary.batchSummary.processingCount)}/` +
                 `${toSafeNumber(summary.batchSummary.submittedCount)}/` +
+                `${toSafeNumber(summary.batchSummary.pendingConfirmationCount)}/` +
+                `${toSafeNumber(summary.batchSummary.timeoutCount)}/` +
                 `${toSafeNumber(summary.batchSummary.confirmedCount)}/` +
                 `${toSafeNumber(summary.batchSummary.skippedCount)}/` +
                 `${toSafeNumber(summary.batchSummary.failedCount)}`

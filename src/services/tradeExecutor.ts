@@ -3,6 +3,7 @@ import { ClobClient } from '@polymarket/clob-client';
 import {
     CopyExecutionBatchInterface,
     CopyIntentBufferInterface,
+    ExecutionKind,
     ExecutionPolicyTrailEntry,
 } from '../interfaces/Execution';
 import { UserActivityInterface, UserPositionInterface } from '../interfaces/User';
@@ -14,11 +15,21 @@ import ClobUserStream, { UserChannelStatusUpdate } from './clobUserStream';
 import LivePersistenceQueue from './livePersistenceQueue';
 import LiveStateStore, { BOOTSTRAP_POLICY_IDS, LiveTradeRuntimeState } from './liveStateStore';
 import confirmTransactionHashes from '../utils/confirmTransactionHashes';
+import {
+    buildConditionOutcomeKey,
+    computeConditionMergeableSize,
+} from '../utils/conditionPositionMath';
 import { evaluateDirectBuyIntent, sortTradesAsc } from '../utils/copyIntentPlanning';
 import { buildPolicyTrailEntry, hasPolicyId, mergePolicyTrail } from '../utils/executionPolicy';
+import {
+    resolveExecutionIntent,
+    resolveTradeAction,
+    validateExecutableSnapshot,
+} from '../utils/executionSemantics';
 import fetchData from '../utils/fetchData';
 import getTradingGuardState from '../utils/getTradingGuardState';
 import createLogger from '../utils/logger';
+import postConditionMerge from '../utils/postConditionMerge';
 import postOrder from '../utils/postOrder';
 import {
     fetchPolymarketMarketResolution,
@@ -51,6 +62,9 @@ const BUY_MIN_TOP_UP_TRIGGER_USDC = ENV.BUY_MIN_TOP_UP_TRIGGER_USDC;
 const BUY_BOOTSTRAP_MAX_ACTIVE_RATIO = ENV.BUY_BOOTSTRAP_MAX_ACTIVE_RATIO;
 const LOOP_INTERVAL_MS = ENV.LIVE_EXECUTOR_LOOP_INTERVAL_MS;
 const CONTEXT_TTL_MS = ENV.LIVE_STATE_REFRESH_MS;
+const LIVE_MAX_STALE_SNAPSHOT_MS = ENV.LIVE_MAX_STALE_SNAPSHOT_MS;
+const LIVE_CONFIRM_TIMEOUT_MS = ENV.LIVE_CONFIRM_TIMEOUT_MS;
+const LIVE_RECONCILE_AFTER_TIMEOUT_MS = ENV.LIVE_RECONCILE_AFTER_TIMEOUT_MS;
 const EPSILON = 1e-8;
 const NO_LIQUIDITY_REASONS = [
     '盘口暂无卖单',
@@ -61,6 +75,7 @@ const NO_LIQUIDITY_REASONS = [
 const SOURCE_TRADE_BUFFER_POLICY_ID = 'source-trade-merge';
 const LIVE_BUY_BUFFER_POLICY_ID = 'live-buy-intent-buffer';
 const BUFFER_MIN_TOP_UP_POLICY_ID = 'buffer-min-top-up';
+const MERGE_EXECUTION_POLICY_ID = 'live-condition-merge';
 const PROXY_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${PROXY_WALLET}&sizeThreshold=0`;
 const logger = createLogger('live');
 
@@ -74,6 +89,16 @@ interface TradingContext {
     skipReason: string;
     totalEquity: number;
     refreshedAt: number;
+}
+
+interface MergeExecutionPlan {
+    status: 'READY' | 'SKIPPED' | 'RETRY';
+    reason: string;
+    requestedSize: number;
+    sourceMergeRatio: number;
+    localMergeableBefore: number;
+    partition: bigint[];
+    policyTrail: ExecutionPolicyTrailEntry[];
 }
 
 const findPositionForTrade = (
@@ -93,7 +118,7 @@ const findPositionForTrade = (
     );
 
 const formatTradeRef = (trade: Pick<UserActivityInterface, 'transactionHash' | 'asset' | 'side'>) =>
-    `tx=${trade.transactionHash} side=${String(trade.side || '').toUpperCase()} asset=${trade.asset}`;
+    `tx=${trade.transactionHash} side=${resolveTradeAction(trade)} asset=${trade.asset}`;
 
 const formatBatchRef = (
     batch: Pick<CopyExecutionBatchInterface, 'asset' | 'condition' | 'sourceTradeCount'>
@@ -135,13 +160,12 @@ const buildBootstrapBudgetRemainingUsdc = (context: TradingContext, stateStore: 
 };
 
 const validateTradeForExecution = (trade: UserActivityInterface) => {
-    if (trade.snapshotStatus && trade.snapshotStatus !== 'COMPLETE') {
-        return {
-            status: 'SKIP' as const,
-            reason:
-                trade.sourceSnapshotReason ||
-                `源账户快照状态为 ${trade.snapshotStatus}，已跳过真实执行`,
-        };
+    const snapshotValidation = validateExecutableSnapshot(trade, {
+        mode: 'live',
+        maxLiveStaleSnapshotMs: LIVE_MAX_STALE_SNAPSHOT_MS,
+    });
+    if (snapshotValidation.status !== 'OK') {
+        return snapshotValidation;
     }
 
     if (!Number.isFinite(trade.sourcePositionSizeAfterTrade)) {
@@ -152,7 +176,7 @@ const validateTradeForExecution = (trade: UserActivityInterface) => {
     }
 
     if (
-        String(trade.side || '').toUpperCase() === 'BUY' &&
+        resolveTradeAction(trade) === 'BUY' &&
         !Number.isFinite(trade.sourceBalanceBeforeTrade) &&
         !Number.isFinite(trade.sourceBalanceAfterTrade)
     ) {
@@ -206,9 +230,7 @@ class LiveTradeExecutorRuntime {
 
     ingestSourceTrades = (trades: UserActivityInterface[]) => {
         const executableTrades = trades.filter(
-            (trade) =>
-                String(trade.type || '').toUpperCase() === 'TRADE' &&
-                (trade.executionIntent === 'EXECUTE' || !trade.executionIntent)
+            (trade) => resolveExecutionIntent(trade, 'live') === 'EXECUTE'
         );
         const accepted = this.stateStore.ingestTrades(executableTrades);
         if (accepted > 0) {
@@ -243,7 +265,7 @@ class LiveTradeExecutorRuntime {
         const [recoverableTrades, openBuffers, activeBatches] = await Promise.all([
             UserActivity.find({
                 $and: [
-                    { type: 'TRADE' },
+                    { type: { $in: ['TRADE', 'MERGE'] } },
                     {
                         $or: [
                             { executionIntent: 'EXECUTE' },
@@ -262,6 +284,8 @@ class LiveTradeExecutorRuntime {
                                         'BUFFERED',
                                         'BATCHED',
                                         'SUBMITTED',
+                                        'PENDING_CONFIRMATION',
+                                        'TIMEOUT',
                                     ],
                                 },
                             },
@@ -278,7 +302,9 @@ class LiveTradeExecutorRuntime {
                 .sort({ sourceStartedAt: 1, createdAt: 1 })
                 .exec() as Promise<CopyIntentBufferInterface[]>,
             CopyExecutionBatch.find({
-                status: { $in: ['READY', 'PROCESSING', 'SUBMITTED'] },
+                status: {
+                    $in: ['READY', 'PROCESSING', 'SUBMITTED', 'PENDING_CONFIRMATION', 'TIMEOUT'],
+                },
             })
                 .sort({ sourceStartedAt: 1, createdAt: 1 })
                 .exec() as Promise<CopyExecutionBatchInterface[]>,
@@ -448,8 +474,6 @@ class LiveTradeExecutorRuntime {
             botTransactionHashes: batch.transactionHashes,
             botSubmittedAt: batch.submittedAt || 0,
             botConfirmedAt: batch.confirmedAt || 0,
-            botMatchedAt: 0,
-            botMinedAt: 0,
             botSubmissionStatus: batch.submissionStatus || 'SUBMITTED',
             botPolicyTrail: batch.policyTrail || [],
             ...(statusOverride === 'CONFIRMED' ||
@@ -515,6 +539,263 @@ class LiveTradeExecutorRuntime {
             resolution,
         });
         return resolution;
+    }
+
+    private buildConditionPartition(
+        trade: Pick<UserActivityInterface, 'conditionId'>,
+        positions: UserPositionInterface[]
+    ) {
+        return positions
+            .filter(
+                (position) =>
+                    position.conditionId === trade.conditionId &&
+                    Math.max(toSafeNumber(position.size), 0) > EPSILON &&
+                    Number.isInteger(position.outcomeIndex) &&
+                    position.outcomeIndex >= 0
+            )
+            .map((position) => 1n << BigInt(position.outcomeIndex))
+            .filter((value, index, values) => values.findIndex((item) => item === value) === index)
+            .sort((left, right) => Number(left - right));
+    }
+
+    private computeLocalConditionMergeableSize(
+        trade: Pick<UserActivityInterface, 'conditionId' | 'asset' | 'outcomeIndex' | 'outcome'>,
+        positions: UserPositionInterface[]
+    ) {
+        const outcomeKeys = [
+            ...new Set(
+                positions
+                    .filter((position) => position.conditionId === trade.conditionId)
+                    .map((position) => buildConditionOutcomeKey(position))
+                    .filter(Boolean)
+            ),
+        ];
+        const sizeByOutcomeKey = new Map<string, number>();
+        for (const position of positions) {
+            if (position.conditionId !== trade.conditionId) {
+                continue;
+            }
+
+            const outcomeKey = buildConditionOutcomeKey(position);
+            if (!outcomeKey) {
+                continue;
+            }
+
+            sizeByOutcomeKey.set(outcomeKey, Math.max(toSafeNumber(position.size), 0));
+        }
+
+        return computeConditionMergeableSize(outcomeKeys, sizeByOutcomeKey);
+    }
+
+    private buildMergeExecutionPlan(
+        trade: UserActivityInterface,
+        positions: UserPositionInterface[]
+    ): MergeExecutionPlan {
+        const sourceMergeRequestedSize = Math.max(
+            toSafeNumber(trade.size),
+            toSafeNumber(trade.usdcSize)
+        );
+        const sourceMergeableBefore = Math.max(
+            toSafeNumber(
+                trade.sourceConditionMergeableSizeBeforeTrade,
+                toSafeNumber(trade.sourceConditionMergeableSizeAfterTrade) +
+                    sourceMergeRequestedSize
+            ),
+            0
+        );
+        const localMergeableBefore = this.computeLocalConditionMergeableSize(trade, positions);
+        const partition = this.buildConditionPartition(trade, positions);
+
+        if (sourceMergeRequestedSize <= EPSILON) {
+            return {
+                status: 'SKIPPED',
+                reason: '源 MERGE 数量无效，已跳过真实 condition merge',
+                requestedSize: 0,
+                sourceMergeRatio: 0,
+                localMergeableBefore,
+                partition,
+                policyTrail: [],
+            };
+        }
+
+        if (sourceMergeableBefore <= EPSILON) {
+            return {
+                status: 'RETRY',
+                reason: '缺少源账户 condition mergeable 快照，暂缓真实 condition merge',
+                requestedSize: 0,
+                sourceMergeRatio: 0,
+                localMergeableBefore,
+                partition,
+                policyTrail: [],
+            };
+        }
+
+        if (localMergeableBefore <= EPSILON) {
+            return {
+                status: 'SKIPPED',
+                reason: '本地无可 merge 的 complete set',
+                requestedSize: 0,
+                sourceMergeRatio: 0,
+                localMergeableBefore,
+                partition,
+                policyTrail: [],
+            };
+        }
+
+        if (partition.length < 2) {
+            return {
+                status: 'SKIPPED',
+                reason: '本地缺少完整 outcome partition，无法执行链上 merge',
+                requestedSize: 0,
+                sourceMergeRatio: 0,
+                localMergeableBefore,
+                partition,
+                policyTrail: [],
+            };
+        }
+
+        const sourceMergeRatio = Math.min(sourceMergeRequestedSize / sourceMergeableBefore, 1);
+        const requestedSize = Math.max(localMergeableBefore * sourceMergeRatio, 0);
+        if (requestedSize <= EPSILON) {
+            return {
+                status: 'SKIPPED',
+                reason: '按比例换算后的本地 merge 数量为 0',
+                requestedSize: 0,
+                sourceMergeRatio,
+                localMergeableBefore,
+                partition,
+                policyTrail: [],
+            };
+        }
+
+        const reason = `根据源账户 MERGE 比例 ${(sourceMergeRatio * 100).toFixed(2)}% 执行链上 condition merge`;
+        return {
+            status: 'READY',
+            reason,
+            requestedSize,
+            sourceMergeRatio,
+            localMergeableBefore,
+            partition,
+            policyTrail: [buildPolicyTrailEntry(MERGE_EXECUTION_POLICY_ID, 'ADJUST', reason)],
+        };
+    }
+
+    private markBatchPendingConfirmation(
+        batch: CopyExecutionBatchInterface,
+        reason: string,
+        submissionStatus?: CopyExecutionBatchInterface['submissionStatus']
+    ) {
+        const pendingBatch = this.stateStore.markBatchPendingConfirmation(
+            batch._id,
+            reason,
+            submissionStatus
+        );
+        if (!pendingBatch) {
+            return null;
+        }
+
+        this.queuePersistBatch(pendingBatch);
+        this.queuePersistTradesByBatch(pendingBatch, 'PENDING_CONFIRMATION');
+        this.stateStore.markTradesByBatch(pendingBatch, {
+            status: 'PENDING_CONFIRMATION',
+            lastError: reason,
+            submittedAt: pendingBatch.submittedAt,
+            batchId: pendingBatch._id,
+            policyTrail: pendingBatch.policyTrail || [],
+        });
+        return pendingBatch;
+    }
+
+    private markBatchTimeout(batch: CopyExecutionBatchInterface, reason: string) {
+        const timeoutBatch = this.stateStore.markBatchTimeout(batch._id, reason);
+        if (!timeoutBatch) {
+            return null;
+        }
+
+        this.queuePersistBatch(timeoutBatch);
+        this.queuePersistTradesByBatch(timeoutBatch, 'TIMEOUT');
+        this.stateStore.markTradesByBatch(timeoutBatch, {
+            status: 'TIMEOUT',
+            lastError: reason,
+            submittedAt: timeoutBatch.submittedAt,
+            batchId: timeoutBatch._id,
+            policyTrail: timeoutBatch.policyTrail || [],
+        });
+        return timeoutBatch;
+    }
+
+    private async reconcileTimedOutBatch(
+        batch: CopyExecutionBatchInterface,
+        trade: UserActivityInterface
+    ) {
+        const chainConfirmation = await confirmTransactionHashes(batch.transactionHashes || [], {
+            timeoutMs: LIVE_RECONCILE_AFTER_TIMEOUT_MS,
+        });
+        if (chainConfirmation.status === 'CONFIRMED') {
+            batch.lastConfirmationSource = 'reconcile';
+            this.finalizeBatch(
+                batch,
+                'CONFIRMED',
+                mergeReasons(batch.reason, '确认超时后通过链上补偿确认完成'),
+                chainConfirmation.confirmedAt
+            );
+            return;
+        }
+
+        const context = await this.refreshTradingContext(true);
+        const currentPosition = findPositionForTrade(context.positions, trade);
+        const currentPositionSize = Math.max(toSafeNumber(currentPosition?.size), 0);
+        const beforePositionSize = Math.max(toSafeNumber(batch.localPositionSizeBefore), 0);
+        const currentConditionMergeableSize = this.computeLocalConditionMergeableSize(
+            trade,
+            context.positions
+        );
+        const beforeConditionMergeableSize = Math.max(
+            toSafeNumber(batch.localConditionMergeableSizeBefore),
+            0
+        );
+
+        if (
+            batch.executionKind === 'MERGE' &&
+            currentConditionMergeableSize + EPSILON < beforeConditionMergeableSize
+        ) {
+            batch.lastConfirmationSource = 'reconcile';
+            this.finalizeBatch(
+                batch,
+                'CONFIRMED',
+                mergeReasons(batch.reason, '确认超时后通过持仓变化补偿确认 merge 已执行'),
+                Date.now()
+            );
+            return;
+        }
+
+        if (batch.condition === 'buy' && currentPositionSize > beforePositionSize + EPSILON) {
+            batch.lastConfirmationSource = 'reconcile';
+            this.finalizeBatch(
+                batch,
+                'CONFIRMED',
+                mergeReasons(batch.reason, '确认超时后通过持仓变化补偿确认买单已成交'),
+                Date.now()
+            );
+            return;
+        }
+
+        if (batch.condition === 'sell' && currentPositionSize + EPSILON < beforePositionSize) {
+            batch.lastConfirmationSource = 'reconcile';
+            this.finalizeBatch(
+                batch,
+                'CONFIRMED',
+                mergeReasons(batch.reason, '确认超时后通过持仓变化补偿确认卖单已成交'),
+                Date.now()
+            );
+            return;
+        }
+
+        this.finalizeBatch(
+            batch,
+            'FAILED',
+            mergeReasons(batch.reason, '确认超时，reconcile 未观测到预期仓位变化')
+        );
     }
 
     private finalizeTradeState(
@@ -653,7 +934,7 @@ class LiveTradeExecutorRuntime {
     ) {
         const batches = this.stateStore
             .listActiveBuyBatchesForAsset(trade.asset)
-            .filter((batch) => batch.status !== 'SUBMITTED');
+            .filter((batch) => !['SUBMITTED', 'PENDING_CONFIRMATION'].includes(batch.status));
         if (batches.length === 0) {
             return;
         }
@@ -677,9 +958,12 @@ class LiveTradeExecutorRuntime {
     private async createBatch(params: {
         trades: UserActivityInterface[];
         condition?: string;
+        executionKind?: ExecutionKind;
         requestedUsdc?: number;
         requestedSize?: number;
         sourcePrice?: number;
+        localPositionSizeBefore?: number;
+        localConditionMergeableSizeBefore?: number;
         reason?: string;
         policyTrail?: ExecutionPolicyTrailEntry[];
         bufferId?: mongoose.Types.ObjectId;
@@ -700,12 +984,15 @@ class LiveTradeExecutorRuntime {
             sourceWallet: USER_ADDRESS,
             bufferId: params.bufferId,
             status: 'READY',
+            executionKind:
+                params.executionKind ||
+                (String(latestTrade.type || '').toUpperCase() === 'MERGE' ? 'MERGE' : 'TRADE'),
             condition,
             asset: latestTrade.asset,
             conditionId: latestTrade.conditionId,
             title: latestTrade.title,
             outcome: latestTrade.outcome,
-            side: latestTrade.side,
+            side: resolveTradeAction(latestTrade),
             sourceTradeIds: orderedTrades.map((trade) => trade._id),
             sourceActivityKeys: mergeStringArrays(
                 ...orderedTrades.map((trade) => getSourceActivityKeys(trade))
@@ -734,6 +1021,12 @@ class LiveTradeExecutorRuntime {
             submittedAt: 0,
             confirmedAt: 0,
             completedAt: 0,
+            localPositionSizeBefore: Math.max(toSafeNumber(params.localPositionSizeBefore), 0),
+            localConditionMergeableSizeBefore: Math.max(
+                toSafeNumber(params.localConditionMergeableSizeBefore),
+                0
+            ),
+            lastConfirmationSource: '',
             reason: params.reason || '',
             submissionStatus: 'SUBMITTED',
         };
@@ -828,12 +1121,14 @@ class LiveTradeExecutorRuntime {
             trades,
             bufferId: buffer._id,
             condition: 'buy',
+            executionKind: 'TRADE',
             requestedUsdc: finalRequestedUsdc,
             sourcePrice: Math.max(
                 toSafeNumber(buffer.sourcePrice),
                 toSafeNumber(latestTrade.price),
                 0
             ),
+            localPositionSizeBefore: Math.max(toSafeNumber(existingPosition?.size), 0),
             reason: finalReason,
             policyTrail: finalPolicyTrail,
         });
@@ -963,8 +1258,18 @@ class LiveTradeExecutorRuntime {
                     continue;
                 }
 
-                const normalizedSide = String(trade.side || '').toUpperCase();
-                if (normalizedSide === 'BUY') {
+                const blockingBatch = this.stateStore.findBlockingBatch(trade);
+                if (blockingBatch) {
+                    const reason = `同资产存在未确认批次 ${String(blockingBatch._id)}，等待前序 ${blockingBatch.condition} 确认后再继续`;
+                    this.stateStore.markTradePending(trade, reason);
+                    state.lastError = reason;
+                    this.queuePersistSingleTradeState(state);
+                    logger.warn(`${formatTradeRef(trade)} 暂缓入批 reason=${reason}`);
+                    continue;
+                }
+
+                const tradeAction = resolveTradeAction(trade);
+                if (tradeAction === 'BUY') {
                     const context = await this.refreshTradingContext();
                     if (context.skipReason) {
                         this.stateStore.markTradePending(trade, context.skipReason);
@@ -1065,18 +1370,84 @@ class LiveTradeExecutorRuntime {
                     await this.createBatch({
                         trades: [trade],
                         condition: 'buy',
+                        executionKind: 'TRADE',
                         requestedUsdc: evaluation.requestedUsdc,
                         sourcePrice: evaluation.sourcePrice,
+                        localPositionSizeBefore: Math.max(toSafeNumber(existingPosition?.size), 0),
                         reason: evaluation.reason,
                         policyTrail: evaluation.policyTrail,
                     });
                     continue;
                 }
 
+                const context = await this.refreshTradingContext();
+                if (context.skipReason) {
+                    this.stateStore.markTradePending(trade, context.skipReason);
+                    state.lastError = context.skipReason;
+                    this.queuePersistSingleTradeState(state);
+                    logger.warn(`${formatTradeRef(trade)} 暂缓入批 reason=${context.skipReason}`);
+                    continue;
+                }
+
                 await this.cancelOpenBuyBuffersForAsset(trade);
                 await this.cancelReadyBuyBatchesForAsset(trade);
+                if (tradeAction === 'MERGE') {
+                    const mergePlan = this.buildMergeExecutionPlan(trade, context.positions);
+                    if (mergePlan.status === 'RETRY') {
+                        state.retryCount += 1;
+                        if (state.retryCount >= RETRY_LIMIT) {
+                            this.finalizeTradeState(state, 'FAILED', mergePlan.reason);
+                        } else {
+                            this.stateStore.markTradePending(trade, mergePlan.reason);
+                            state.lastError = mergePlan.reason;
+                            this.queuePersistSingleTradeState(state);
+                            logger.warn(
+                                `${formatTradeRef(trade)} 待重试 reason=${mergePlan.reason}`
+                            );
+                        }
+                        continue;
+                    }
+
+                    if (mergePlan.status === 'SKIPPED') {
+                        this.finalizeTradeState(
+                            state,
+                            'SKIPPED',
+                            mergePlan.reason,
+                            mergePlan.policyTrail
+                        );
+                        continue;
+                    }
+
+                    const existingPosition = findPositionForTrade(context.positions, trade);
+                    await this.createBatch({
+                        trades: [trade],
+                        condition: 'merge',
+                        executionKind: 'MERGE',
+                        requestedUsdc: mergePlan.requestedSize,
+                        requestedSize: mergePlan.requestedSize,
+                        sourcePrice: Math.max(toSafeNumber(trade.price), 1),
+                        localPositionSizeBefore: Math.max(toSafeNumber(existingPosition?.size), 0),
+                        localConditionMergeableSizeBefore: mergePlan.localMergeableBefore,
+                        reason: mergePlan.reason,
+                        policyTrail: mergePlan.policyTrail,
+                    });
+                    continue;
+                }
+
+                const existingPosition = findPositionForTrade(context.positions, trade);
+                const sourcePositionAfterTrade = {
+                    size: trade.sourcePositionSizeAfterTrade,
+                };
                 await this.createBatch({
                     trades: [trade],
+                    condition: resolveTradeCondition(
+                        tradeAction,
+                        existingPosition,
+                        sourcePositionAfterTrade
+                    ),
+                    executionKind: 'TRADE',
+                    localPositionSizeBefore: Math.max(toSafeNumber(existingPosition?.size), 0),
+                    sourcePrice: Math.max(toSafeNumber(trade.price), 0),
                 });
             } catch (error) {
                 state.retryCount += 1;
@@ -1122,6 +1493,15 @@ class LiveTradeExecutorRuntime {
                 return;
             }
 
+            const blockingBatch = this.stateStore.findBlockingBatch(latestTrade, claimedBatch._id);
+            if (blockingBatch) {
+                const reason = `同资产存在未确认批次 ${String(blockingBatch._id)}，等待前序 ${blockingBatch.condition} 确认后再执行`;
+                this.stateStore.markBatchReady(claimedBatch._id, reason);
+                claimedBatch.reason = reason;
+                this.queuePersistBatch(claimedBatch);
+                return;
+            }
+
             const context = await this.refreshTradingContext(true);
             if (context.skipReason) {
                 this.stateStore.markBatchReady(claimedBatch._id, context.skipReason);
@@ -1130,7 +1510,7 @@ class LiveTradeExecutorRuntime {
                 return;
             }
 
-            if (context.availableBalance === null) {
+            if (claimedBatch.condition === 'buy' && context.availableBalance === null) {
                 const reason = '代理钱包可用余额接口不可用';
                 this.stateStore.markBatchReady(claimedBatch._id, reason);
                 claimedBatch.reason = reason;
@@ -1144,31 +1524,57 @@ class LiveTradeExecutorRuntime {
             };
             const condition =
                 claimedBatch.condition ||
-                resolveTradeCondition(latestTrade.side, myPosition, sourcePositionAfterTrade);
-            const result = await postOrder(
-                this.clobClient,
-                this.marketStream,
-                condition,
-                myPosition,
-                sourcePositionAfterTrade,
-                latestTrade,
-                context.availableBalance,
-                claimedBatch.requestedUsdc > 0 || claimedBatch.requestedSize > 0
-                    ? {
-                          requestedUsdc:
-                              claimedBatch.requestedUsdc > 0
-                                  ? claimedBatch.requestedUsdc
-                                  : undefined,
-                          requestedSize:
-                              claimedBatch.requestedSize > 0
-                                  ? claimedBatch.requestedSize
-                                  : undefined,
-                          sourcePrice:
-                              claimedBatch.sourcePrice > 0 ? claimedBatch.sourcePrice : undefined,
-                          note: claimedBatch.reason,
-                      }
-                    : undefined
-            );
+                resolveTradeCondition(
+                    resolveTradeAction(latestTrade),
+                    myPosition,
+                    sourcePositionAfterTrade
+                );
+            const result =
+                claimedBatch.executionKind === 'MERGE'
+                    ? await (async () => {
+                          const mergeResult = await postConditionMerge({
+                              conditionId: latestTrade.conditionId,
+                              partition: this.buildConditionPartition(
+                                  latestTrade,
+                                  context.positions
+                              ),
+                              requestedSize:
+                                  claimedBatch.requestedSize > 0
+                                      ? claimedBatch.requestedSize
+                                      : claimedBatch.requestedUsdc,
+                              note: claimedBatch.reason,
+                          });
+                          return {
+                              ...mergeResult,
+                              orderIds: [],
+                          };
+                      })()
+                    : await postOrder(
+                          this.clobClient,
+                          this.marketStream,
+                          condition,
+                          myPosition,
+                          sourcePositionAfterTrade,
+                          latestTrade,
+                          context.availableBalance || 0,
+                          claimedBatch.requestedUsdc > 0 || claimedBatch.requestedSize > 0
+                              ? {
+                                    requestedUsdc:
+                                        claimedBatch.requestedUsdc > 0
+                                            ? claimedBatch.requestedUsdc
+                                            : undefined,
+                                    requestedSize:
+                                        claimedBatch.requestedSize > 0
+                                            ? claimedBatch.requestedSize
+                                            : undefined,
+                                    sourcePrice:
+                                        claimedBatch.sourcePrice > 0
+                                            ? claimedBatch.sourcePrice
+                                            : undefined,
+                                    note: claimedBatch.reason,
+                                }
+                              : undefined
+                      );
 
             if (result.status === 'RETRYABLE_ERROR') {
                 const noLiquidityRetry = isNoLiquidityReason(result.reason);
@@ -1194,10 +1600,10 @@ class LiveTradeExecutorRuntime {
                 return;
             }
 
-            if (result.orderIds.length > 0 || result.transactionHashes.length > 0) {
+            if ((result.orderIds || []).length > 0 || (result.transactionHashes || []).length > 0) {
                 claimedBatch.reason = result.reason;
-                claimedBatch.orderIds = result.orderIds;
-                claimedBatch.transactionHashes = result.transactionHashes;
+                claimedBatch.orderIds = result.orderIds || [];
+                claimedBatch.transactionHashes = result.transactionHashes || [];
                 claimedBatch.submissionStatus = result.submissionStatus || 'SUBMITTED';
                 claimedBatch.submittedAt = Date.now();
                 claimedBatch.claimedAt = Date.now();
@@ -1215,7 +1621,7 @@ class LiveTradeExecutorRuntime {
                     policyTrail: claimedBatch.policyTrail || [],
                 });
                 logger.debug(
-                    `${formatBatchRef(claimedBatch)} 已提交 orderIds=${result.orderIds.length} txHashes=${result.transactionHashes.length}`
+                    `${formatBatchRef(claimedBatch)} 已提交 orderIds=${(result.orderIds || []).length} txHashes=${(result.transactionHashes || []).length}`
                 );
                 return;
             }
@@ -1258,26 +1664,62 @@ class LiveTradeExecutorRuntime {
                 return;
             }
 
+            if (batch.status === 'TIMEOUT') {
+                await this.reconcileTimedOutBatch(batch, latestTrade);
+                return;
+            }
+
+            const pendingBatch =
+                batch.status === 'SUBMITTED'
+                    ? this.markBatchPendingConfirmation(
+                          batch,
+                          mergeReasons(batch.reason, '已提交，等待订单流或链上确认'),
+                          batch.submissionStatus
+                      ) || batch
+                    : batch;
             const orderIds = (batch.orderIds || []).filter(Boolean);
-            let normalizedConfirmation;
-            if (this.userStream && orderIds.length > 0) {
-                normalizedConfirmation = await this.userStream.waitForOrders({
+            if (pendingBatch.executionKind !== 'MERGE' && this.userStream && orderIds.length > 0) {
+                const userConfirmation = await this.userStream.waitForOrders({
                     conditionId: latestTrade.conditionId,
                     orderIds,
+                    timeoutMs: LIVE_CONFIRM_TIMEOUT_MS,
                     onStatus: async (update: UserChannelStatusUpdate) => {
-                        batch.reason = update.reason;
+                        pendingBatch.reason = mergeReasons(pendingBatch.reason, update.reason);
                         if (update.confirmedAt) {
-                            batch.confirmedAt = update.confirmedAt;
+                            pendingBatch.confirmedAt = update.confirmedAt;
                         }
                         if (update.status && update.status !== 'SUBMITTED') {
-                            batch.submissionStatus = update.status;
+                            pendingBatch.submissionStatus = update.status;
                         }
-                        this.queuePersistBatchProgress(batch, update);
+                        this.queuePersistBatchProgress(pendingBatch, update);
                     },
                 });
-            } else {
+
+                if (userConfirmation.confirmationStatus === 'CONFIRMED') {
+                    pendingBatch.lastConfirmationSource = 'user_stream';
+                    this.finalizeBatch(
+                        pendingBatch,
+                        'CONFIRMED',
+                        mergeReasons(pendingBatch.reason, userConfirmation.reason),
+                        userConfirmation.confirmedAt
+                    );
+                    return;
+                }
+
+                if (userConfirmation.confirmationStatus === 'FAILED') {
+                    this.finalizeBatch(
+                        pendingBatch,
+                        'FAILED',
+                        mergeReasons(pendingBatch.reason, userConfirmation.reason)
+                    );
+                    return;
+                }
+
                 const chainConfirmation = await confirmTransactionHashes(
-                    batch.transactionHashes || []
+                    pendingBatch.transactionHashes || [],
+                    {
+                        timeoutMs: LIVE_RECONCILE_AFTER_TIMEOUT_MS,
+                    }
                 );
                 const update: UserChannelStatusUpdate = {
                     status:
@@ -1289,47 +1731,86 @@ class LiveTradeExecutorRuntime {
                     reason: chainConfirmation.reason,
                     confirmedAt: chainConfirmation.confirmedAt,
                 };
-                this.queuePersistBatchProgress(batch, update);
-                normalizedConfirmation = {
-                    confirmationStatus: chainConfirmation.status,
-                    ...update,
-                };
-            }
+                this.queuePersistBatchProgress(pendingBatch, update);
 
-            if (normalizedConfirmation.confirmationStatus === 'PENDING') {
-                if (
-                    normalizedConfirmation.status &&
-                    normalizedConfirmation.status !== 'SUBMITTED'
-                ) {
-                    batch.submissionStatus = normalizedConfirmation.status;
+                if (chainConfirmation.status === 'CONFIRMED') {
+                    pendingBatch.lastConfirmationSource = 'chain';
+                    this.finalizeBatch(
+                        pendingBatch,
+                        'CONFIRMED',
+                        mergeReasons(
+                            pendingBatch.reason,
+                            userConfirmation.reason,
+                            chainConfirmation.reason
+                        ),
+                        chainConfirmation.confirmedAt
+                    );
+                    return;
                 }
-                batch.reason = mergeReasons(batch.reason, normalizedConfirmation.reason);
-                this.queuePersistBatch(batch);
+
+                if (chainConfirmation.status === 'FAILED') {
+                    this.finalizeBatch(
+                        pendingBatch,
+                        'FAILED',
+                        mergeReasons(
+                            pendingBatch.reason,
+                            userConfirmation.reason,
+                            chainConfirmation.reason
+                        )
+                    );
+                    return;
+                }
+
+                const timeoutReason = mergeReasons(
+                    pendingBatch.reason,
+                    userConfirmation.reason,
+                    chainConfirmation.reason,
+                    `等待真实确认超时（${LIVE_CONFIRM_TIMEOUT_MS}ms）`
+                );
+                this.markBatchTimeout(pendingBatch, timeoutReason);
                 logger.warn(
-                    `${formatBatchRef(batch)} 等待确认，稍后继续监听 reason=${batch.reason}`
+                    `${formatBatchRef(pendingBatch)} 确认超时，开始补偿对账 reason=${timeoutReason}`
                 );
+                await this.reconcileTimedOutBatch(pendingBatch, latestTrade);
                 return;
             }
 
-            if (normalizedConfirmation.confirmationStatus === 'FAILED') {
-                this.finalizeBatch(
-                    batch,
-                    'FAILED',
-                    mergeReasons(batch.reason, normalizedConfirmation.reason)
-                );
-                return;
-            }
-
-            const finalStatus =
-                normalizedConfirmation.status === 'FAILED' || batch.submissionStatus === 'FAILED'
-                    ? 'FAILED'
-                    : 'CONFIRMED';
-            this.finalizeBatch(
-                batch,
-                finalStatus,
-                normalizedConfirmation.reason,
-                normalizedConfirmation.confirmedAt
+            const chainConfirmation = await confirmTransactionHashes(
+                pendingBatch.transactionHashes || [],
+                {
+                    timeoutMs: LIVE_CONFIRM_TIMEOUT_MS,
+                }
             );
+            if (chainConfirmation.status === 'CONFIRMED') {
+                pendingBatch.lastConfirmationSource = 'chain';
+                this.finalizeBatch(
+                    pendingBatch,
+                    'CONFIRMED',
+                    mergeReasons(pendingBatch.reason, chainConfirmation.reason),
+                    chainConfirmation.confirmedAt
+                );
+                return;
+            }
+
+            if (chainConfirmation.status === 'FAILED') {
+                this.finalizeBatch(
+                    pendingBatch,
+                    'FAILED',
+                    mergeReasons(pendingBatch.reason, chainConfirmation.reason)
+                );
+                return;
+            }
+
+            const timeoutReason = mergeReasons(
+                pendingBatch.reason,
+                chainConfirmation.reason,
+                `等待真实确认超时（${LIVE_CONFIRM_TIMEOUT_MS}ms）`
+            );
+            this.markBatchTimeout(pendingBatch, timeoutReason);
+            logger.warn(
+                `${formatBatchRef(pendingBatch)} 确认超时，开始补偿对账 reason=${timeoutReason}`
+            );
+            await this.reconcileTimedOutBatch(pendingBatch, latestTrade);
         } catch (error) {
             logger.error(`${formatBatchRef(batch)} 确认异常`, error);
         }

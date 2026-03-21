@@ -7,6 +7,8 @@ export type BotExecutionStatus =
     | 'BUFFERED'
     | 'BATCHED'
     | 'SUBMITTED'
+    | 'PENDING_CONFIRMATION'
+    | 'TIMEOUT'
     | 'CONFIRMED'
     | 'COMPLETED'
     | 'SKIPPED'

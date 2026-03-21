@@ -1,7 +1,6 @@
 import { ENV } from '../config/env';
 import {
     BotExecutionStatus,
-    ExecutionIntent,
     UserActivityInterface,
     UserActivitySyncStateInterface,
     UserPositionInterface,
@@ -12,6 +11,7 @@ import buildActivityKey from '../utils/buildActivityKey';
 import fetchData from '../utils/fetchData';
 import getMyBalance from '../utils/getMyBalance';
 import createLogger from '../utils/logger';
+import { resolveExecutionIntent } from '../utils/executionSemantics';
 import {
     flattenSourceActivityKeys,
     flattenSourceTransactionHashes,
@@ -30,7 +30,6 @@ const ACTIVITY_SYNC_OVERLAP_MS = ENV.ACTIVITY_SYNC_OVERLAP_MS;
 const ACTIVITY_ADJACENT_MERGE_WINDOW_MS = ENV.ACTIVITY_ADJACENT_MERGE_WINDOW_MS;
 const MILLISECOND_TIMESTAMP_THRESHOLD = 1_000_000_000_000;
 const TRACKED_ACTIVITY_TYPES = new Set(['TRADE', 'MERGE', 'REDEEM']);
-const TRACE_EXECUTION_ACTIVITY_TYPES = new Set(['TRADE', 'MERGE', 'REDEEM']);
 const SOURCE_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${USER_ADDRESS}&sizeThreshold=0`;
 const logger = createLogger('monitor');
 const SNAPSHOT_STATUS_PRIORITY = {
@@ -90,14 +89,6 @@ const normalizeTimestampToSeconds = (rawTimestamp: number): number | null => {
 
     return Math.trunc(normalizedTimestamp / 1000);
 };
-
-const resolveExecutionIntent = (trade: UserActivityInterface): ExecutionIntent =>
-    TRACE_EXECUTION_ACTIVITY_TYPES.has(String(trade.type || '').toUpperCase()) &&
-    ENV.EXECUTION_MODE === 'trace'
-        ? 'EXECUTE'
-        : String(trade.type || '').toUpperCase() === 'TRADE'
-          ? 'EXECUTE'
-          : 'SYNC_ONLY';
 
 const getDefaultBotStatus = (trade: UserActivityInterface): BotExecutionStatus => {
     if (resolveExecutionIntent(trade) === 'SYNC_ONLY') {
