@@ -23,7 +23,11 @@ export const main = async () => {
             `启动完成 mode=${ENV.EXECUTION_MODE} source=${ENV.USER_ADDRESS} target=${executor.label}`
         );
 
-        startWorker('监视器', tradeMonitor);
+        startWorker('监视器', () =>
+            tradeMonitor({
+                onSourceTradesSynced: executor.onSourceTradesSynced,
+            })
+        );
         startWorker(executor.name, executor.run);
         startWorker(settlementWorker.name, settlementWorker.run);
     } catch (error) {

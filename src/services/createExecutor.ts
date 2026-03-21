@@ -5,11 +5,13 @@ import ClobMarketStream from './clobMarketStream';
 import ClobUserStream from './clobUserStream';
 import tradeExecutor from './tradeExecutor';
 import paperTradeExecutor from './paperTradeExecutor';
+import { UserActivityInterface } from '../interfaces/User';
 
 interface ExecutorRuntime {
     label: string;
     name: string;
     run: () => Promise<void>;
+    onSourceTradesSynced?: (trades: UserActivityInterface[]) => void;
 }
 
 const createExecutor = async (): Promise<ExecutorRuntime> => {
@@ -28,11 +30,13 @@ const createExecutor = async (): Promise<ExecutorRuntime> => {
     const clobClient = await createClobClient();
     const marketStream = new ClobMarketStream((assetId) => clobClient.getOrderBook(assetId));
     const userStream = clobClient.creds ? new ClobUserStream(clobClient.creds) : null;
+    const runtime = tradeExecutor(clobClient, marketStream, userStream);
 
     return {
         label: ENV.PROXY_WALLET,
         name: '实盘执行器',
-        run: () => tradeExecutor(clobClient, marketStream, userStream),
+        run: runtime.run,
+        onSourceTradesSynced: runtime.ingestSourceTrades,
     };
 };
 

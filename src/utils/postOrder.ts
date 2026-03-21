@@ -8,6 +8,7 @@ import {
     cloneMarketSnapshot,
     consumeMarketLiquidity,
 } from './executionPlanning';
+import { sleep } from './runtime';
 
 const RETRY_LIMIT = ENV.RETRY_LIMIT;
 const logger = createLogger('order');
@@ -28,8 +29,6 @@ export interface ExecutionTargetOverrides {
     sourcePrice?: number;
     note?: string;
 }
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const dedupeStrings = (values: string[]) =>
     [...new Set(values.map((value) => value.trim()))].filter(Boolean);

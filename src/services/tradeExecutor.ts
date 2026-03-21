@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { ClobClient } from '@polymarket/clob-client';
 import {
     CopyExecutionBatchInterface,
@@ -10,12 +11,15 @@ import { getCopyExecutionBatchModel, getCopyIntentBufferModel } from '../models/
 import { getUserActivityModel } from '../models/userHistory';
 import ClobMarketStream from './clobMarketStream';
 import ClobUserStream, { UserChannelStatusUpdate } from './clobUserStream';
+import LivePersistenceQueue from './livePersistenceQueue';
+import LiveStateStore, { BOOTSTRAP_POLICY_IDS, LiveTradeRuntimeState } from './liveStateStore';
 import confirmTransactionHashes from '../utils/confirmTransactionHashes';
 import { evaluateDirectBuyIntent, sortTradesAsc } from '../utils/copyIntentPlanning';
+import { buildPolicyTrailEntry, hasPolicyId, mergePolicyTrail } from '../utils/executionPolicy';
 import fetchData from '../utils/fetchData';
 import getTradingGuardState from '../utils/getTradingGuardState';
 import createLogger from '../utils/logger';
-import postOrder, { PostOrderResult } from '../utils/postOrder';
+import postOrder from '../utils/postOrder';
 import {
     fetchPolymarketMarketResolution,
     isResolvedPolymarketMarket,
@@ -30,12 +34,33 @@ import {
     getSourceTradeCount,
     getSourceTransactionHashes,
 } from '../utils/sourceActivityAggregation';
-import spinner from '../utils/spinner';
+import {
+    formatAmount,
+    mergeReasons,
+    mergeStringArrays,
+    sleep,
+    toSafeNumber,
+} from '../utils/runtime';
 
 const USER_ADDRESS = ENV.USER_ADDRESS;
 const PROXY_WALLET = ENV.PROXY_WALLET;
 const RETRY_LIMIT = ENV.RETRY_LIMIT;
-const PROCESSING_LEASE_MS = ENV.PROCESSING_LEASE_MS;
+const MIN_MARKET_BUY_USDC = 1;
+const BUY_INTENT_BUFFER_MAX_MS = ENV.BUY_INTENT_BUFFER_MAX_MS;
+const BUY_MIN_TOP_UP_TRIGGER_USDC = ENV.BUY_MIN_TOP_UP_TRIGGER_USDC;
+const BUY_BOOTSTRAP_MAX_ACTIVE_RATIO = ENV.BUY_BOOTSTRAP_MAX_ACTIVE_RATIO;
+const LOOP_INTERVAL_MS = ENV.LIVE_EXECUTOR_LOOP_INTERVAL_MS;
+const CONTEXT_TTL_MS = ENV.LIVE_STATE_REFRESH_MS;
+const EPSILON = 1e-8;
+const NO_LIQUIDITY_REASONS = [
+    '盘口暂无卖单',
+    '盘口暂无买单',
+    '盘口可成交金额不足',
+    '盘口可成交数量不足',
+];
+const SOURCE_TRADE_BUFFER_POLICY_ID = 'source-trade-merge';
+const LIVE_BUY_BUFFER_POLICY_ID = 'live-buy-intent-buffer';
+const BUFFER_MIN_TOP_UP_POLICY_ID = 'buffer-min-top-up';
 const PROXY_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${PROXY_WALLET}&sizeThreshold=0`;
 const logger = createLogger('live');
 
@@ -43,9 +68,17 @@ const UserActivity = getUserActivityModel(USER_ADDRESS);
 const CopyIntentBuffer = getCopyIntentBufferModel(USER_ADDRESS);
 const CopyExecutionBatch = getCopyExecutionBatchModel(USER_ADDRESS);
 
+interface TradingContext {
+    positions: UserPositionInterface[];
+    availableBalance: number | null;
+    skipReason: string;
+    totalEquity: number;
+    refreshedAt: number;
+}
+
 const findPositionForTrade = (
     positions: UserPositionInterface[],
-    trade: UserActivityInterface
+    trade: Pick<UserActivityInterface, 'asset' | 'conditionId' | 'outcomeIndex' | 'outcome'>
 ): UserPositionInterface | undefined =>
     positions.find((position) => position.asset === trade.asset) ||
     positions.find(
@@ -59,933 +92,46 @@ const findPositionForTrade = (
             normalizeOutcomeLabel(position.outcome) === normalizeOutcomeLabel(trade.outcome)
     );
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const mergeReasons = (...reasons: string[]) =>
-    [...new Set(reasons.map((reason) => String(reason || '').trim()))].filter(Boolean).join('；');
-const mergePolicyTrail = (
-    ...groups: Array<ExecutionPolicyTrailEntry[] | undefined>
-): ExecutionPolicyTrailEntry[] => {
-    const merged = groups.flatMap((group) => group || []);
-    const seen = new Set<string>();
-    return merged.filter((entry) => {
-        const key = `${entry.policyId}:${entry.action}:${entry.reason}`;
-        if (seen.has(key)) {
-            return false;
-        }
-        seen.add(key);
-        return true;
-    });
-};
-const buildPolicyTrailEntry = (
-    policyId: string,
-    action: ExecutionPolicyTrailEntry['action'],
-    reason: string
-): ExecutionPolicyTrailEntry => ({
-    policyId,
-    action,
-    reason,
-    timestamp: Date.now(),
-});
-const toSafeNumber = (value: unknown, fallback = 0) => {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : fallback;
-};
-const formatAmount = (value: unknown) => toSafeNumber(value).toFixed(4);
 const formatTradeRef = (trade: Pick<UserActivityInterface, 'transactionHash' | 'asset' | 'side'>) =>
     `tx=${trade.transactionHash} side=${String(trade.side || '').toUpperCase()} asset=${trade.asset}`;
+
 const formatBatchRef = (
     batch: Pick<CopyExecutionBatchInterface, 'asset' | 'condition' | 'sourceTradeCount'>
 ) => `condition=${batch.condition} asset=${batch.asset} trades=${batch.sourceTradeCount}`;
+
 const formatTerminalStatus = (status: 'CONFIRMED' | 'SKIPPED' | 'FAILED') =>
     status === 'CONFIRMED' ? '已确认' : status === 'SKIPPED' ? '已跳过' : '已失败';
 
-const buildLeaseCutoff = () => Date.now() - PROCESSING_LEASE_MS;
-const buildClaimableFilter = (fieldName: string, leaseCutoff: number) => ({
-    $or: [
-        { [fieldName]: { $exists: false } },
-        { [fieldName]: 0 },
-        { [fieldName]: { $lt: leaseCutoff } },
-    ],
-});
+const buildLiveBuyBufferKey = (trade: Pick<UserActivityInterface, 'asset' | 'conditionId'>) =>
+    `buy:${trade.conditionId}:${trade.asset}`;
 
-const buildReclaimableProcessingTradeFilter = (leaseCutoff: number) => ({
-    botStatus: 'PROCESSING',
-    botClaimedAt: { $lt: leaseCutoff },
-    $and: [
-        {
-            $or: [{ botOrderIds: { $exists: false } }, { 'botOrderIds.0': { $exists: false } }],
-        },
-        {
-            $or: [{ botSubmittedAt: { $exists: false } }, { botSubmittedAt: 0 }],
-        },
-    ],
-});
+const shouldFlushBufferBeforeAppendingTrade = (
+    buffer: Pick<CopyIntentBufferInterface, 'sourceEndedAt'>,
+    trade: Pick<UserActivityInterface, 'timestamp'>
+) =>
+    toSafeNumber(buffer.sourceEndedAt) > 0 &&
+    trade.timestamp > toSafeNumber(buffer.sourceEndedAt) &&
+    trade.timestamp - toSafeNumber(buffer.sourceEndedAt) > BUY_INTENT_BUFFER_MAX_MS;
 
-const buildReclaimableReadyBatchFilter = (leaseCutoff: number) => ({
-    status: 'PROCESSING',
-    claimedAt: { $lt: leaseCutoff },
-    $and: [{ $or: [{ submittedAt: { $exists: false } }, { submittedAt: 0 }] }],
-});
+const isNoLiquidityReason = (reason: string) =>
+    NO_LIQUIDITY_REASONS.some((token) => reason.includes(token));
 
-const readPendingTrades = async () =>
-    (await UserActivity.find({
-        $and: [
-            { type: 'TRADE' },
-            {
-                $or: [{ executionIntent: 'EXECUTE' }, { executionIntent: { $exists: false } }],
-            },
-            { transactionHash: { $exists: true, $ne: '' } },
-            { bot: { $ne: true } },
-            {
-                $or: [
-                    { botStatus: { $exists: false } },
-                    { botStatus: 'PENDING' },
-                    buildReclaimableProcessingTradeFilter(buildLeaseCutoff()),
-                ],
-            },
-            {
-                $or: [
-                    { botExcutedTime: { $exists: false } },
-                    { botExcutedTime: { $lt: RETRY_LIMIT } },
-                ],
-            },
-        ],
-    })
-        .sort({ timestamp: 1 })
-        .exec()) as UserActivityInterface[];
-
-const readSubmittedTrades = async () =>
-    (await UserActivity.find({
-        $and: [
-            { type: 'TRADE' },
-            {
-                $or: [{ executionIntent: 'EXECUTE' }, { executionIntent: { $exists: false } }],
-            },
-            { transactionHash: { $exists: true, $ne: '' } },
-            { bot: { $ne: true } },
-            { botStatus: 'SUBMITTED' },
-            { $or: [{ botExecutionBatchId: { $exists: false } }, { botExecutionBatchId: null }] },
-            buildClaimableFilter('botClaimedAt', buildLeaseCutoff()),
-            {
-                $or: [
-                    { 'botTransactionHashes.0': { $exists: true } },
-                    { 'botOrderIds.0': { $exists: true } },
-                ],
-            },
-        ],
-    })
-        .sort({ botSubmittedAt: 1, timestamp: 1 })
-        .exec()) as UserActivityInterface[];
-
-const readReadyBatches = async () =>
-    (await CopyExecutionBatch.find({
-        $and: [
-            {
-                $or: [
-                    {
-                        status: 'READY',
-                        ...buildClaimableFilter('claimedAt', buildLeaseCutoff()),
-                    },
-                    buildReclaimableReadyBatchFilter(buildLeaseCutoff()),
-                ],
-            },
-            {
-                $or: [{ retryCount: { $exists: false } }, { retryCount: { $lt: RETRY_LIMIT } }],
-            },
-        ],
-    })
-        .sort({ sourceStartedAt: 1, createdAt: 1 })
-        .exec()) as CopyExecutionBatchInterface[];
-
-const readSubmittedBatches = async () =>
-    (await CopyExecutionBatch.find({
-        $and: [
-            { status: 'SUBMITTED' },
-            buildClaimableFilter('claimedAt', buildLeaseCutoff()),
-            {
-                $or: [
-                    { 'transactionHashes.0': { $exists: true } },
-                    { 'orderIds.0': { $exists: true } },
-                ],
-            },
-        ],
-    })
-        .sort({ submittedAt: 1, sourceStartedAt: 1 })
-        .exec()) as CopyExecutionBatchInterface[];
-
-const loadTradesByIds = async (tradeIds: UserActivityInterface['_id'][]) =>
-    (await UserActivity.find({
-        _id: {
-            $in: tradeIds,
-        },
-    })
-        .sort({ timestamp: 1 })
-        .exec()) as UserActivityInterface[];
-
-const claimTrade = async (trade: UserActivityInterface) => {
-    const result = await UserActivity.updateOne(
-        {
-            _id: trade._id,
-            bot: { $ne: true },
-            $or: [
-                { botStatus: { $exists: false } },
-                { botStatus: 'PENDING' },
-                buildReclaimableProcessingTradeFilter(buildLeaseCutoff()),
-            ],
-        },
-        {
-            $set: {
-                botStatus: 'PROCESSING',
-                botClaimedAt: Date.now(),
-                botLastError: '',
-            },
-        }
-    );
-
-    return result.modifiedCount === 1;
+const serializeBuffer = (buffer: CopyIntentBufferInterface) => {
+    const { _id, ...rest } = buffer;
+    return rest;
 };
 
-const claimSubmittedTrade = async (trade: UserActivityInterface) => {
-    const result = await UserActivity.updateOne(
-        {
-            _id: trade._id,
-            botStatus: 'SUBMITTED',
-            ...buildClaimableFilter('botClaimedAt', buildLeaseCutoff()),
-        },
-        {
-            $set: {
-                botClaimedAt: Date.now(),
-            },
-        }
-    );
-
-    return result.modifiedCount === 1;
+const serializeBatch = (batch: CopyExecutionBatchInterface) => {
+    const { _id, ...rest } = batch;
+    return rest;
 };
 
-const claimReadyBatch = async (batch: CopyExecutionBatchInterface) => {
-    const result = await CopyExecutionBatch.updateOne(
-        {
-            _id: batch._id,
-            $or: [
-                {
-                    status: 'READY',
-                    ...buildClaimableFilter('claimedAt', buildLeaseCutoff()),
-                },
-                buildReclaimableReadyBatchFilter(buildLeaseCutoff()),
-            ],
-        },
-        {
-            $set: {
-                status: 'PROCESSING',
-                claimedAt: Date.now(),
-            },
-        }
+const buildBootstrapBudgetRemainingUsdc = (context: TradingContext, stateStore: LiveStateStore) => {
+    const activeBootstrapExposureUsdc = stateStore.activeBootstrapExposureUsdc();
+    return Math.max(
+        context.totalEquity * BUY_BOOTSTRAP_MAX_ACTIVE_RATIO - activeBootstrapExposureUsdc,
+        0
     );
-
-    return result.modifiedCount === 1;
-};
-
-const claimSubmittedBatch = async (batch: CopyExecutionBatchInterface) => {
-    const result = await CopyExecutionBatch.updateOne(
-        {
-            _id: batch._id,
-            status: 'SUBMITTED',
-            ...buildClaimableFilter('claimedAt', buildLeaseCutoff()),
-        },
-        {
-            $set: {
-                claimedAt: Date.now(),
-            },
-        }
-    );
-
-    return result.modifiedCount === 1;
-};
-
-const finalizeRetryableTrade = async (trade: UserActivityInterface, reason: string) => {
-    const nextRetryCount = Number(trade.botExcutedTime || 0) + 1;
-
-    if (nextRetryCount >= RETRY_LIMIT) {
-        await UserActivity.updateOne(
-            { _id: trade._id },
-            {
-                $set: {
-                    bot: true,
-                    botStatus: 'FAILED',
-                    botExecutedAt: Date.now(),
-                    botClaimedAt: 0,
-                    botLastError: reason,
-                },
-                $inc: {
-                    botExcutedTime: 1,
-                },
-            }
-        );
-        return;
-    }
-
-    await UserActivity.updateOne(
-        { _id: trade._id },
-        {
-            $set: {
-                bot: false,
-                botStatus: 'PENDING',
-                botClaimedAt: 0,
-                botLastError: reason,
-            },
-            $inc: {
-                botExcutedTime: 1,
-            },
-        }
-    );
-};
-
-const releaseClaimedTrade = async (trade: UserActivityInterface, reason: string) => {
-    await UserActivity.updateOne(
-        { _id: trade._id },
-        {
-            $set: {
-                bot: false,
-                botStatus: 'PENDING',
-                botClaimedAt: 0,
-                botLastError: reason,
-            },
-        }
-    );
-};
-
-const finalizeTerminalTrade = async (
-    trade: UserActivityInterface,
-    status: 'CONFIRMED' | 'SKIPPED' | 'FAILED',
-    reason: string,
-    confirmedAt?: number
-) => {
-    await UserActivity.updateOne(
-        { _id: trade._id },
-        {
-            $set: {
-                bot: true,
-                botStatus: status,
-                botExecutedAt: Date.now(),
-                botClaimedAt: 0,
-                botLastError: reason,
-                botConfirmedAt: confirmedAt || 0,
-                botSubmissionStatus:
-                    status === 'CONFIRMED'
-                        ? 'CONFIRMED'
-                        : status === 'FAILED'
-                          ? 'FAILED'
-                          : trade.botSubmissionStatus || 'SUBMITTED',
-            },
-        }
-    );
-};
-
-const finalizeRetryableTradeWithLog = async (trade: UserActivityInterface, reason: string) => {
-    const nextRetryCount = Number(trade.botExcutedTime || 0) + 1;
-    await finalizeRetryableTrade(trade, reason);
-
-    if (nextRetryCount >= RETRY_LIMIT) {
-        logger.error(`${formatTradeRef(trade)} 已失败 reason=${reason}`);
-        return;
-    }
-
-    logger.warn(`${formatTradeRef(trade)} 待重试 reason=${reason}`);
-};
-
-const finalizeTerminalTradeWithLog = async (
-    trade: UserActivityInterface,
-    status: 'CONFIRMED' | 'SKIPPED' | 'FAILED',
-    reason: string,
-    confirmedAt?: number
-) => {
-    await finalizeTerminalTrade(trade, status, reason, confirmedAt);
-
-    const message = [
-        `${formatTradeRef(trade)} ${formatTerminalStatus(status)}`,
-        reason ? `reason=${reason}` : '',
-        confirmedAt ? `confirmedAt=${confirmedAt}` : '',
-    ]
-        .filter(Boolean)
-        .join(' ');
-
-    if (status === 'FAILED') {
-        logger.error(message);
-        return;
-    }
-
-    logger.debug(message);
-};
-
-const finalizeActivitiesByIds = async (
-    tradeIds: UserActivityInterface['_id'][],
-    status: 'CONFIRMED' | 'SKIPPED' | 'FAILED',
-    reason: string,
-    batchId: CopyExecutionBatchInterface['_id'] | null,
-    trail: ExecutionPolicyTrailEntry[],
-    update: Partial<UserActivityInterface> = {}
-) => {
-    if (tradeIds.length === 0) {
-        return;
-    }
-
-    await UserActivity.updateMany(
-        {
-            _id: { $in: tradeIds },
-        },
-        {
-            $set: {
-                bot: true,
-                botStatus: status,
-                botExecutedAt: Date.now(),
-                botClaimedAt: 0,
-                botLastError: reason,
-                botExecutionBatchId: batchId || undefined,
-                botPolicyTrail: trail,
-                botSubmissionStatus:
-                    status === 'CONFIRMED'
-                        ? 'CONFIRMED'
-                        : status === 'FAILED'
-                          ? 'FAILED'
-                          : update.botSubmissionStatus || 'SUBMITTED',
-                ...update,
-            },
-        }
-    );
-};
-
-const finalizeSingleTradeWithTrail = async (
-    trade: UserActivityInterface,
-    status: 'CONFIRMED' | 'SKIPPED' | 'FAILED',
-    reason: string,
-    trail: ExecutionPolicyTrailEntry[],
-    confirmedAt?: number
-) => {
-    await finalizeActivitiesByIds([trade._id], status, reason, null, trail, {
-        botConfirmedAt: confirmedAt || 0,
-    });
-};
-
-const updateBatchedActivities = async (
-    tradeIds: UserActivityInterface['_id'][],
-    batchId: CopyExecutionBatchInterface['_id'],
-    reason: string,
-    trail: ExecutionPolicyTrailEntry[],
-    bufferId?: CopyIntentBufferInterface['_id']
-) => {
-    if (tradeIds.length === 0) {
-        return;
-    }
-
-    await UserActivity.updateMany(
-        {
-            _id: { $in: tradeIds },
-        },
-        {
-            $set: {
-                bot: false,
-                botStatus: 'BATCHED',
-                botExecutionBatchId: batchId,
-                botBufferId: bufferId,
-                botClaimedAt: 0,
-                botLastError: reason,
-                botPolicyTrail: trail,
-            },
-        }
-    );
-};
-
-const updateSubmittedActivities = async (
-    tradeIds: UserActivityInterface['_id'][],
-    batchId: CopyExecutionBatchInterface['_id'],
-    result: PostOrderResult,
-    trail: ExecutionPolicyTrailEntry[]
-) => {
-    if (tradeIds.length === 0) {
-        return;
-    }
-
-    await UserActivity.updateMany(
-        {
-            _id: { $in: tradeIds },
-        },
-        {
-            $set: {
-                bot: false,
-                botStatus: 'SUBMITTED',
-                botExecutionBatchId: batchId,
-                botSubmittedAt: Date.now(),
-                botClaimedAt: Date.now(),
-                botLastError: result.reason,
-                botOrderIds: result.orderIds,
-                botTransactionHashes: result.transactionHashes,
-                botSubmissionStatus: result.submissionStatus || 'SUBMITTED',
-                botMatchedAt: 0,
-                botMinedAt: 0,
-                botConfirmedAt: 0,
-                botPolicyTrail: trail,
-            },
-        }
-    );
-};
-
-const releaseReadyBatch = async (batch: CopyExecutionBatchInterface, reason: string) => {
-    await CopyExecutionBatch.updateOne(
-        { _id: batch._id },
-        {
-            $set: {
-                status: 'READY',
-                claimedAt: 0,
-                reason,
-            },
-        }
-    );
-    await UserActivity.updateMany(
-        {
-            _id: { $in: batch.sourceTradeIds },
-        },
-        {
-            $set: {
-                botStatus: 'BATCHED',
-                botClaimedAt: 0,
-                botLastError: reason,
-            },
-        }
-    );
-};
-
-const retryBatchExecution = async (batch: CopyExecutionBatchInterface, reason: string) => {
-    const nextRetryCount = Number(batch.retryCount || 0) + 1;
-    if (nextRetryCount >= RETRY_LIMIT) {
-        await finalizeBatchAndActivities(batch, 'FAILED', reason);
-        logger.error(`${formatBatchRef(batch)} 已失败 reason=${reason}`);
-        return;
-    }
-
-    await CopyExecutionBatch.updateOne(
-        { _id: batch._id },
-        {
-            $set: {
-                status: 'READY',
-                claimedAt: 0,
-                reason,
-            },
-            $inc: {
-                retryCount: 1,
-            },
-        }
-    );
-    await UserActivity.updateMany(
-        {
-            _id: { $in: batch.sourceTradeIds },
-        },
-        {
-            $set: {
-                botStatus: 'BATCHED',
-                botClaimedAt: 0,
-                botLastError: reason,
-            },
-        }
-    );
-    logger.warn(`${formatBatchRef(batch)} 待重试 reason=${reason}`);
-};
-
-const finalizeBatchAndActivities = async (
-    batch: CopyExecutionBatchInterface,
-    status: 'CONFIRMED' | 'SKIPPED' | 'FAILED',
-    reason: string,
-    confirmedAt?: number
-) => {
-    await CopyExecutionBatch.updateOne(
-        { _id: batch._id },
-        {
-            $set: {
-                status,
-                reason,
-                claimedAt: 0,
-                confirmedAt: confirmedAt || 0,
-                completedAt: Date.now(),
-                submissionStatus:
-                    status === 'CONFIRMED'
-                        ? 'CONFIRMED'
-                        : status === 'FAILED'
-                          ? 'FAILED'
-                          : batch.submissionStatus || 'SUBMITTED',
-            },
-        }
-    );
-
-    await finalizeActivitiesByIds(
-        batch.sourceTradeIds,
-        status,
-        reason,
-        batch._id,
-        batch.policyTrail || [],
-        {
-            botConfirmedAt: confirmedAt || 0,
-        }
-    );
-};
-
-const closeBuffer = async (
-    buffer: CopyIntentBufferInterface,
-    state: 'CLOSED' | 'SKIPPED',
-    reason: string,
-    trail: ExecutionPolicyTrailEntry[]
-) => {
-    await CopyIntentBuffer.updateOne(
-        { _id: buffer._id },
-        {
-            $set: {
-                state,
-                claimedAt: 0,
-                reason,
-                policyTrail: trail,
-                completedAt: Date.now(),
-            },
-        }
-    );
-};
-
-const syncSubmittedTradeProgress = async (
-    trade: UserActivityInterface,
-    update: UserChannelStatusUpdate
-) => {
-    const updateSet: Record<string, unknown> = {
-        botLastError: update.reason,
-    };
-
-    if (update.status && update.status !== 'SUBMITTED') {
-        updateSet.botSubmissionStatus = update.status;
-    }
-
-    if (update.matchedAt) {
-        updateSet.botMatchedAt = update.matchedAt;
-    }
-
-    if (update.minedAt) {
-        updateSet.botMinedAt = update.minedAt;
-    }
-
-    if (update.confirmedAt) {
-        updateSet.botConfirmedAt = update.confirmedAt;
-    }
-
-    await UserActivity.updateOne(
-        { _id: trade._id },
-        {
-            $set: updateSet,
-        }
-    );
-};
-
-const syncSubmittedBatchProgress = async (
-    batch: CopyExecutionBatchInterface,
-    update: UserChannelStatusUpdate
-) => {
-    const updateSet: Record<string, unknown> = {
-        reason: update.reason,
-    };
-
-    if (update.status && update.status !== 'SUBMITTED') {
-        updateSet.submissionStatus = update.status;
-    }
-
-    if (update.confirmedAt) {
-        updateSet.confirmedAt = update.confirmedAt;
-    }
-
-    await CopyExecutionBatch.updateOne(
-        { _id: batch._id },
-        {
-            $set: updateSet,
-        }
-    );
-
-    await UserActivity.updateMany(
-        {
-            _id: { $in: batch.sourceTradeIds },
-        },
-        {
-            $set: {
-                botLastError: update.reason,
-                ...(update.status && update.status !== 'SUBMITTED'
-                    ? { botSubmissionStatus: update.status }
-                    : {}),
-                ...(update.matchedAt ? { botMatchedAt: update.matchedAt } : {}),
-                ...(update.minedAt ? { botMinedAt: update.minedAt } : {}),
-                ...(update.confirmedAt ? { botConfirmedAt: update.confirmedAt } : {}),
-            },
-        }
-    );
-};
-
-const markTradeSubmitted = async (trade: UserActivityInterface, result: PostOrderResult) => {
-    await UserActivity.updateOne(
-        { _id: trade._id },
-        {
-            $set: {
-                bot: false,
-                botStatus: 'SUBMITTED',
-                botSubmittedAt: Date.now(),
-                botClaimedAt: Date.now(),
-                botLastError: result.reason,
-                botOrderIds: result.orderIds,
-                botTransactionHashes: result.transactionHashes,
-                botSubmissionStatus: result.submissionStatus || 'SUBMITTED',
-                botMatchedAt: 0,
-                botMinedAt: 0,
-                botConfirmedAt: 0,
-            },
-        }
-    );
-};
-
-const markBatchSubmitted = async (batch: CopyExecutionBatchInterface, result: PostOrderResult) => {
-    await CopyExecutionBatch.updateOne(
-        { _id: batch._id },
-        {
-            $set: {
-                status: 'SUBMITTED',
-                submittedAt: Date.now(),
-                claimedAt: Date.now(),
-                reason: result.reason,
-                orderIds: result.orderIds,
-                transactionHashes: result.transactionHashes,
-                submissionStatus: result.submissionStatus || 'SUBMITTED',
-            },
-        }
-    );
-    await updateSubmittedActivities(
-        batch.sourceTradeIds,
-        batch._id,
-        result,
-        batch.policyTrail || []
-    );
-};
-
-const releaseSubmittedTrade = async (trade: UserActivityInterface, reason: string) => {
-    await UserActivity.updateOne(
-        { _id: trade._id },
-        {
-            $set: {
-                botStatus: 'SUBMITTED',
-                botClaimedAt: 0,
-                botLastError: reason,
-            },
-        }
-    );
-};
-
-const releaseSubmittedBatch = async (batch: CopyExecutionBatchInterface, reason: string) => {
-    await CopyExecutionBatch.updateOne(
-        { _id: batch._id },
-        {
-            $set: {
-                status: 'SUBMITTED',
-                claimedAt: 0,
-                reason,
-            },
-        }
-    );
-    await UserActivity.updateMany(
-        {
-            _id: { $in: batch.sourceTradeIds },
-        },
-        {
-            $set: {
-                botStatus: 'SUBMITTED',
-                botClaimedAt: 0,
-                botLastError: reason,
-            },
-        }
-    );
-};
-
-const confirmSubmittedTrade = async (
-    trade: UserActivityInterface,
-    userStream: ClobUserStream | null
-) => {
-    try {
-        const orderIds = (trade.botOrderIds || []).filter(Boolean);
-        let normalizedConfirmation;
-        if (userStream && orderIds.length > 0) {
-            normalizedConfirmation = await userStream.waitForOrders({
-                conditionId: trade.conditionId,
-                orderIds,
-                onStatus: async (update: UserChannelStatusUpdate) => {
-                    await syncSubmittedTradeProgress(trade, update);
-                },
-            });
-        } else {
-            const chainConfirmation = await confirmTransactionHashes(
-                trade.botTransactionHashes || []
-            );
-            const update: UserChannelStatusUpdate = {
-                status:
-                    chainConfirmation.status === 'CONFIRMED'
-                        ? 'CONFIRMED'
-                        : chainConfirmation.status === 'FAILED'
-                          ? 'FAILED'
-                          : 'SUBMITTED',
-                reason: chainConfirmation.reason,
-                confirmedAt: chainConfirmation.confirmedAt,
-            };
-            await syncSubmittedTradeProgress(trade, update);
-            normalizedConfirmation = {
-                confirmationStatus: chainConfirmation.status,
-                ...update,
-            };
-        }
-
-        if (normalizedConfirmation.confirmationStatus === 'PENDING') {
-            const reason = mergeReasons(trade.botLastError || '', normalizedConfirmation.reason);
-            await releaseSubmittedTrade(trade, reason);
-            logger.warn(`${formatTradeRef(trade)} 等待确认，稍后重试 reason=${reason}`);
-            return;
-        }
-
-        if (normalizedConfirmation.confirmationStatus === 'FAILED') {
-            await finalizeTerminalTradeWithLog(
-                trade,
-                'FAILED',
-                mergeReasons(trade.botLastError || '', normalizedConfirmation.reason)
-            );
-            return;
-        }
-
-        const finalStatus =
-            normalizedConfirmation.status === 'FAILED' || trade.botSubmissionStatus === 'FAILED'
-                ? 'FAILED'
-                : 'CONFIRMED';
-        await finalizeTerminalTradeWithLog(
-            trade,
-            finalStatus,
-            normalizedConfirmation.reason,
-            normalizedConfirmation.confirmedAt
-        );
-    } catch (error) {
-        logger.error(`${formatTradeRef(trade)} 确认异常`, error);
-        await releaseSubmittedTrade(trade, 'User Channel 确认查询失败，稍后重试');
-    }
-};
-
-const confirmSubmittedBatch = async (
-    batch: CopyExecutionBatchInterface,
-    userStream: ClobUserStream | null
-) => {
-    try {
-        const trades = await loadTradesByIds(batch.sourceTradeIds);
-        const latestTrade = sortTradesAsc(trades).slice(-1)[0];
-        if (!latestTrade) {
-            await finalizeBatchAndActivities(batch, 'FAILED', '批次缺少关联源交易');
-            return;
-        }
-
-        const orderIds = (batch.orderIds || []).filter(Boolean);
-        let normalizedConfirmation;
-        if (userStream && orderIds.length > 0) {
-            normalizedConfirmation = await userStream.waitForOrders({
-                conditionId: latestTrade.conditionId,
-                orderIds,
-                onStatus: async (update: UserChannelStatusUpdate) => {
-                    await syncSubmittedBatchProgress(batch, update);
-                },
-            });
-        } else {
-            const chainConfirmation = await confirmTransactionHashes(batch.transactionHashes || []);
-            const update: UserChannelStatusUpdate = {
-                status:
-                    chainConfirmation.status === 'CONFIRMED'
-                        ? 'CONFIRMED'
-                        : chainConfirmation.status === 'FAILED'
-                          ? 'FAILED'
-                          : 'SUBMITTED',
-                reason: chainConfirmation.reason,
-                confirmedAt: chainConfirmation.confirmedAt,
-            };
-            await syncSubmittedBatchProgress(batch, update);
-            normalizedConfirmation = {
-                confirmationStatus: chainConfirmation.status,
-                ...update,
-            };
-        }
-
-        if (normalizedConfirmation.confirmationStatus === 'PENDING') {
-            const reason = mergeReasons(batch.reason || '', normalizedConfirmation.reason);
-            await releaseSubmittedBatch(batch, reason);
-            logger.warn(`${formatBatchRef(batch)} 等待确认，稍后重试 reason=${reason}`);
-            return;
-        }
-
-        if (normalizedConfirmation.confirmationStatus === 'FAILED') {
-            await finalizeBatchAndActivities(
-                batch,
-                'FAILED',
-                mergeReasons(batch.reason || '', normalizedConfirmation.reason)
-            );
-            logger.error(
-                `${formatBatchRef(batch)} 已失败 ` +
-                    `reason=${mergeReasons(batch.reason || '', normalizedConfirmation.reason)}`
-            );
-            return;
-        }
-
-        const finalStatus =
-            normalizedConfirmation.status === 'FAILED' || batch.submissionStatus === 'FAILED'
-                ? 'FAILED'
-                : 'CONFIRMED';
-        await finalizeBatchAndActivities(
-            batch,
-            finalStatus,
-            normalizedConfirmation.reason,
-            normalizedConfirmation.confirmedAt
-        );
-        logger.debug(
-            `${formatBatchRef(batch)} ${formatTerminalStatus(finalStatus)} ` +
-                (normalizedConfirmation.reason ? `reason=${normalizedConfirmation.reason}` : '')
-        );
-    } catch (error) {
-        logger.error(`${formatBatchRef(batch)} 确认异常`, error);
-        await releaseSubmittedBatch(batch, 'User Channel 确认查询失败，稍后重试');
-    }
-};
-
-const syncSubmittedTrades = async (userStream: ClobUserStream | null) => {
-    const submittedTrades = await readSubmittedTrades();
-    if (submittedTrades.length === 0) {
-        return;
-    }
-
-    logger.debug(`待确认交易 ${submittedTrades.length} 条，开始补偿`);
-
-    for (const trade of submittedTrades) {
-        const claimed = await claimSubmittedTrade(trade);
-        if (!claimed) {
-            continue;
-        }
-
-        await confirmSubmittedTrade(trade, userStream);
-    }
-};
-
-const syncSubmittedBatches = async (userStream: ClobUserStream | null) => {
-    const submittedBatches = await readSubmittedBatches();
-    if (submittedBatches.length === 0) {
-        return;
-    }
-
-    logger.debug(`待确认批次 ${submittedBatches.length} 个，开始补偿`);
-
-    for (const batch of submittedBatches) {
-        const claimed = await claimSubmittedBatch(batch);
-        if (!claimed) {
-            continue;
-        }
-
-        await confirmSubmittedBatch(batch, userStream);
-    }
 };
 
 const validateTradeForExecution = (trade: UserActivityInterface) => {
@@ -1022,387 +168,1189 @@ const validateTradeForExecution = (trade: UserActivityInterface) => {
     };
 };
 
-const cancelOpenBuyBuffersForAsset = async (
-    trade: Pick<UserActivityInterface, 'asset' | 'transactionHash'>
-) => {
-    const buffers = (await CopyIntentBuffer.find({
-        state: 'OPEN',
-        condition: 'buy',
-        asset: trade.asset,
-    }).exec()) as CopyIntentBufferInterface[];
+class LiveTradeExecutorRuntime {
+    private readonly clobClient: ClobClient;
+    private readonly marketStream: ClobMarketStream;
+    private readonly userStream: ClobUserStream | null;
+    private readonly stateStore = new LiveStateStore();
+    private readonly persistenceQueue = new LivePersistenceQueue({
+        maxQueueSize: ENV.LIVE_PERSIST_MAX_QUEUE_SIZE,
+        retryDelayMs: ENV.LIVE_PERSIST_RETRY_MS,
+    });
+    private readonly executingBatchIds = new Set<string>();
+    private readonly confirmingBatchIds = new Set<string>();
+    private readonly marketResolutionCache = new Map<
+        string,
+        {
+            updatedAt: number;
+            resolution: Awaited<ReturnType<typeof fetchPolymarketMarketResolution>>;
+        }
+    >();
+    private tradingContext: TradingContext = {
+        positions: [],
+        availableBalance: null,
+        skipReason: '',
+        totalEquity: 0,
+        refreshedAt: 0,
+    };
 
-    if (buffers.length === 0) {
-        return;
+    constructor(
+        clobClient: ClobClient,
+        marketStream: ClobMarketStream,
+        userStream: ClobUserStream | null
+    ) {
+        this.clobClient = clobClient;
+        this.marketStream = marketStream;
+        this.userStream = userStream;
     }
 
-    const reason = `检测到 asset=${trade.asset} 的非买入源交易，已放弃未执行的累计买单`;
-    const trail = [
-        buildPolicyTrailEntry(
-            'source-trade-merge',
-            'SKIP',
-            `检测到 tx=${trade.transactionHash} 的反向/非买入交易，已关闭累计缓冲`
-        ),
-    ];
+    ingestSourceTrades = (trades: UserActivityInterface[]) => {
+        const executableTrades = trades.filter(
+            (trade) =>
+                String(trade.type || '').toUpperCase() === 'TRADE' &&
+                (trade.executionIntent === 'EXECUTE' || !trade.executionIntent)
+        );
+        const accepted = this.stateStore.ingestTrades(executableTrades);
+        if (accepted > 0) {
+            logger.debug(`内存队列新增源交易 ${accepted} 条`);
+        }
+    };
 
-    for (const buffer of buffers) {
-        const mergedTrail = mergePolicyTrail(buffer.policyTrail, trail);
-        await closeBuffer(buffer, 'SKIPPED', reason, mergedTrail);
-        await finalizeActivitiesByIds(buffer.sourceTradeIds, 'SKIPPED', reason, null, mergedTrail);
-    }
-};
+    async run() {
+        logger.info('启动真实跟单（内存主状态 + 异步持久化）');
+        await this.hydrateRecoveryState();
 
-const cancelReadyBuyBatchesForAsset = async (
-    trade: Pick<UserActivityInterface, 'asset' | 'transactionHash'>
-) => {
-    const batches = (await CopyExecutionBatch.find({
-        status: 'READY',
-        condition: 'buy',
-        asset: trade.asset,
-    }).exec()) as CopyExecutionBatchInterface[];
+        while (true) {
+            try {
+                await this.refreshTradingContext();
+                const pendingTrades = this.stateStore.listPendingTrades();
+                if (pendingTrades.length > 0) {
+                    await this.processPendingTrades(pendingTrades);
+                }
 
-    if (batches.length === 0) {
-        return;
-    }
-
-    const reason = `检测到 asset=${trade.asset} 的非买入源交易，已取消未执行的买入批次`;
-    const trail = [
-        buildPolicyTrailEntry(
-            'source-trade-merge',
-            'SKIP',
-            `检测到 tx=${trade.transactionHash} 的反向/非买入交易，已取消待执行买入批次`
-        ),
-    ];
-
-    for (const batch of batches) {
-        const mergedTrail = mergePolicyTrail(batch.policyTrail, trail);
-        await CopyExecutionBatch.updateOne(
-            { _id: batch._id },
-            {
-                $set: {
-                    status: 'SKIPPED',
-                    claimedAt: 0,
-                    completedAt: Date.now(),
-                    reason,
-                    policyTrail: mergedTrail,
-                    submissionStatus: 'SUBMITTED',
-                },
+                await this.flushDueBuyBuffers();
+                this.executeReadyBatches();
+                this.syncSubmittedBatches();
+            } catch (error) {
+                logger.error('实盘执行主循环异常', error);
             }
-        );
-        await finalizeActivitiesByIds(
-            batch.sourceTradeIds,
-            'SKIPPED',
-            reason,
-            batch._id,
-            mergedTrail
-        );
-    }
-};
 
-const createBatchFromSingleTrade = async (
-    trade: UserActivityInterface,
-    params?: {
+            await sleep(LOOP_INTERVAL_MS);
+        }
+    }
+
+    private async hydrateRecoveryState() {
+        const [recoverableTrades, openBuffers, activeBatches] = await Promise.all([
+            UserActivity.find({
+                $and: [
+                    { type: 'TRADE' },
+                    {
+                        $or: [
+                            { executionIntent: 'EXECUTE' },
+                            { executionIntent: { $exists: false } },
+                        ],
+                    },
+                    { transactionHash: { $exists: true, $ne: '' } },
+                    {
+                        $or: [
+                            { botStatus: { $exists: false } },
+                            {
+                                botStatus: {
+                                    $in: [
+                                        'PENDING',
+                                        'PROCESSING',
+                                        'BUFFERED',
+                                        'BATCHED',
+                                        'SUBMITTED',
+                                    ],
+                                },
+                            },
+                        ],
+                    },
+                ],
+            })
+                .sort({ timestamp: 1 })
+                .exec() as Promise<UserActivityInterface[]>,
+            CopyIntentBuffer.find({
+                state: 'OPEN',
+                condition: 'buy',
+            })
+                .sort({ sourceStartedAt: 1, createdAt: 1 })
+                .exec() as Promise<CopyIntentBufferInterface[]>,
+            CopyExecutionBatch.find({
+                status: { $in: ['READY', 'PROCESSING', 'SUBMITTED'] },
+            })
+                .sort({ sourceStartedAt: 1, createdAt: 1 })
+                .exec() as Promise<CopyExecutionBatchInterface[]>,
+        ]);
+
+        this.stateStore.ingestTrades(recoverableTrades);
+        for (const buffer of openBuffers) {
+            const normalizedBuffer =
+                typeof (
+                    buffer as CopyIntentBufferInterface & {
+                        toObject?: () => CopyIntentBufferInterface;
+                    }
+                ).toObject === 'function'
+                    ? (
+                          buffer as CopyIntentBufferInterface & {
+                              toObject: () => CopyIntentBufferInterface;
+                          }
+                      ).toObject()
+                    : buffer;
+            this.stateStore.createOrUpdateBuffer({
+                ...normalizedBuffer,
+                state: 'OPEN',
+                claimedAt: 0,
+            });
+        }
+
+        for (const batch of activeBatches) {
+            const normalizedBatch =
+                typeof (
+                    batch as CopyExecutionBatchInterface & {
+                        toObject?: () => CopyExecutionBatchInterface;
+                    }
+                ).toObject === 'function'
+                    ? (
+                          batch as CopyExecutionBatchInterface & {
+                              toObject: () => CopyExecutionBatchInterface;
+                          }
+                      ).toObject()
+                    : batch;
+            this.stateStore.createBatch({
+                ...normalizedBatch,
+                status: normalizedBatch.status === 'PROCESSING' ? 'READY' : normalizedBatch.status,
+                claimedAt: 0,
+            });
+        }
+
+        if (recoverableTrades.length > 0 || openBuffers.length > 0 || activeBatches.length > 0) {
+            logger.warn(
+                `已恢复 live 状态 trades=${recoverableTrades.length} buffers=${openBuffers.length} batches=${activeBatches.length}`
+            );
+        }
+    }
+
+    private async refreshTradingContext(force = false) {
+        if (!force && Date.now() - this.tradingContext.refreshedAt < CONTEXT_TTL_MS) {
+            return this.tradingContext;
+        }
+
+        const [positionsRaw, guardState] = await Promise.all([
+            fetchData<UserPositionInterface[]>(PROXY_POSITIONS_URL),
+            getTradingGuardState(this.clobClient),
+        ]);
+        const positions = Array.isArray(positionsRaw)
+            ? positionsRaw
+            : this.tradingContext.positions;
+        this.stateStore.updateProxyPositions(positions);
+
+        const totalPositionValue = positions.reduce(
+            (sum, position) => sum + Math.max(toSafeNumber(position.currentValue), 0),
+            0
+        );
+        const availableBalance = guardState.availableBalance;
+        this.tradingContext = {
+            positions,
+            availableBalance,
+            skipReason: guardState.skipReason,
+            totalEquity: Math.max(toSafeNumber(availableBalance), 0) + totalPositionValue,
+            refreshedAt: Date.now(),
+        };
+
+        return this.tradingContext;
+    }
+
+    private queuePersistBuffer(buffer: CopyIntentBufferInterface) {
+        this.persistenceQueue.enqueue(`buffer:${String(buffer._id)}`, async () => {
+            await CopyIntentBuffer.updateOne(
+                { _id: buffer._id },
+                {
+                    $set: serializeBuffer(buffer),
+                },
+                {
+                    upsert: true,
+                }
+            );
+        });
+    }
+
+    private queuePersistBatch(batch: CopyExecutionBatchInterface) {
+        this.persistenceQueue.enqueue(`batch:${String(batch._id)}`, async () => {
+            await CopyExecutionBatch.updateOne(
+                { _id: batch._id },
+                {
+                    $set: serializeBatch(batch),
+                },
+                {
+                    upsert: true,
+                }
+            );
+        });
+    }
+
+    private queuePersistActivityUpdate(
+        tradeIds: mongoose.Types.ObjectId[],
+        update: Record<string, unknown>
+    ) {
+        if (tradeIds.length === 0) {
+            return;
+        }
+
+        this.persistenceQueue.enqueue(`activity:${tradeIds.length}`, async () => {
+            await UserActivity.updateMany(
+                {
+                    _id: { $in: tradeIds },
+                },
+                {
+                    $set: update,
+                }
+            );
+        });
+    }
+
+    private queuePersistSingleTradeState(state: LiveTradeRuntimeState) {
+        this.queuePersistActivityUpdate([state.trade._id], {
+            bot:
+                state.status === 'CONFIRMED' ||
+                state.status === 'SKIPPED' ||
+                state.status === 'FAILED',
+            botStatus: state.status,
+            botExcutedTime: state.retryCount,
+            botClaimedAt: 0,
+            botExecutedAt: state.executedAt || 0,
+            botLastError: state.lastError,
+            botOrderIds: state.orderIds,
+            botTransactionHashes: state.transactionHashes,
+            botSubmittedAt: state.submittedAt || 0,
+            botConfirmedAt: state.confirmedAt || 0,
+            botMatchedAt: state.matchedAt || 0,
+            botMinedAt: state.minedAt || 0,
+            botBufferId: state.bufferId,
+            botExecutionBatchId: state.batchId,
+            botPolicyTrail: state.policyTrail,
+        });
+    }
+
+    private queuePersistTradesByBatch(batch: CopyExecutionBatchInterface, statusOverride?: string) {
+        this.queuePersistActivityUpdate(batch.sourceTradeIds, {
+            bot:
+                statusOverride === 'CONFIRMED' ||
+                statusOverride === 'SKIPPED' ||
+                statusOverride === 'FAILED',
+            botStatus: statusOverride || batch.status,
+            botClaimedAt: 0,
+            botExecutionBatchId: batch._id,
+            botBufferId: batch.bufferId,
+            botLastError: batch.reason,
+            botOrderIds: batch.orderIds,
+            botTransactionHashes: batch.transactionHashes,
+            botSubmittedAt: batch.submittedAt || 0,
+            botConfirmedAt: batch.confirmedAt || 0,
+            botMatchedAt: 0,
+            botMinedAt: 0,
+            botSubmissionStatus: batch.submissionStatus || 'SUBMITTED',
+            botPolicyTrail: batch.policyTrail || [],
+            ...(statusOverride === 'CONFIRMED' ||
+            statusOverride === 'SKIPPED' ||
+            statusOverride === 'FAILED'
+                ? {
+                      botExecutedAt: batch.completedAt || Date.now(),
+                  }
+                : {}),
+        });
+    }
+
+    private queuePersistBatchProgress(
+        batch: CopyExecutionBatchInterface,
+        update: UserChannelStatusUpdate
+    ) {
+        this.persistenceQueue.enqueue(`batch-progress:${String(batch._id)}`, async () => {
+            await CopyExecutionBatch.updateOne(
+                { _id: batch._id },
+                {
+                    $set: {
+                        reason: update.reason,
+                        ...(update.status && update.status !== 'SUBMITTED'
+                            ? { submissionStatus: update.status }
+                            : {}),
+                        ...(update.confirmedAt ? { confirmedAt: update.confirmedAt } : {}),
+                    },
+                }
+            );
+            await UserActivity.updateMany(
+                {
+                    _id: { $in: batch.sourceTradeIds },
+                },
+                {
+                    $set: {
+                        botLastError: update.reason,
+                        ...(update.status && update.status !== 'SUBMITTED'
+                            ? { botSubmissionStatus: update.status }
+                            : {}),
+                        ...(update.matchedAt ? { botMatchedAt: update.matchedAt } : {}),
+                        ...(update.minedAt ? { botMinedAt: update.minedAt } : {}),
+                        ...(update.confirmedAt ? { botConfirmedAt: update.confirmedAt } : {}),
+                    },
+                }
+            );
+        });
+    }
+
+    private async loadMarketResolution(trade: UserActivityInterface) {
+        const cacheKey = `${trade.conditionId}:${String(trade.eventSlug || trade.slug || '').trim()}`;
+        const cached = this.marketResolutionCache.get(cacheKey);
+        if (cached && Date.now() - cached.updatedAt < 30_000) {
+            return cached.resolution;
+        }
+
+        const resolution = await fetchPolymarketMarketResolution({
+            conditionId: trade.conditionId,
+            marketSlug: String(trade.eventSlug || trade.slug || '').trim(),
+            title: trade.title,
+        });
+        this.marketResolutionCache.set(cacheKey, {
+            updatedAt: Date.now(),
+            resolution,
+        });
+        return resolution;
+    }
+
+    private finalizeTradeState(
+        state: LiveTradeRuntimeState,
+        status: 'CONFIRMED' | 'SKIPPED' | 'FAILED',
+        reason: string,
+        policyTrail: ExecutionPolicyTrailEntry[] = state.policyTrail,
+        confirmedAt?: number
+    ) {
+        state.status = status;
+        state.lastError = reason;
+        state.policyTrail = policyTrail;
+        state.executedAt = Date.now();
+        state.confirmedAt = confirmedAt || state.confirmedAt;
+        this.queuePersistSingleTradeState(state);
+
+        const message = [
+            `${formatTradeRef(state.trade)} ${formatTerminalStatus(status)}`,
+            reason ? `reason=${reason}` : '',
+            confirmedAt ? `confirmedAt=${confirmedAt}` : '',
+        ]
+            .filter(Boolean)
+            .join(' ');
+        if (status === 'FAILED') {
+            logger.error(message);
+            return;
+        }
+
+        logger.debug(message);
+    }
+
+    private finalizeBatch(
+        batch: CopyExecutionBatchInterface,
+        status: 'CONFIRMED' | 'SKIPPED' | 'FAILED',
+        reason: string,
+        confirmedAt?: number
+    ) {
+        const finalizedBatch = this.stateStore.markBatchTerminal(
+            batch._id,
+            status,
+            reason,
+            confirmedAt
+        );
+        if (!finalizedBatch) {
+            return;
+        }
+
+        this.queuePersistBatch(finalizedBatch);
+        this.queuePersistTradesByBatch(finalizedBatch, status);
+        this.stateStore.markTradesByBatch(finalizedBatch, {
+            status,
+            lastError: reason,
+            confirmedAt,
+            executedAt: finalizedBatch.completedAt,
+            policyTrail: finalizedBatch.policyTrail || [],
+            batchId: finalizedBatch._id,
+        });
+
+        if (status === 'CONFIRMED') {
+            if (
+                finalizedBatch.condition === 'buy' &&
+                hasPolicyId(finalizedBatch.policyTrail, BOOTSTRAP_POLICY_IDS)
+            ) {
+                const trades = this.stateStore.getTradesByIds(finalizedBatch.sourceTradeIds);
+                const latestTrade = sortTradesAsc(trades).slice(-1)[0];
+                if (latestTrade) {
+                    this.stateStore.markBootstrapExposure(
+                        latestTrade,
+                        finalizedBatch.requestedUsdc
+                    );
+                }
+            }
+
+            if (finalizedBatch.condition !== 'buy') {
+                const trades = this.stateStore.getTradesByIds(finalizedBatch.sourceTradeIds);
+                const latestTrade = sortTradesAsc(trades).slice(-1)[0];
+                if (latestTrade) {
+                    this.stateStore.markBootstrapExposure(latestTrade, 0);
+                }
+            }
+        }
+
+        const message = [
+            `${formatBatchRef(finalizedBatch)} ${formatTerminalStatus(status)}`,
+            reason ? `reason=${reason}` : '',
+            confirmedAt ? `confirmedAt=${confirmedAt}` : '',
+        ]
+            .filter(Boolean)
+            .join(' ');
+        if (status === 'FAILED') {
+            logger.error(message);
+            return;
+        }
+
+        logger.debug(message);
+    }
+
+    private async cancelOpenBuyBuffersForAsset(
+        trade: Pick<UserActivityInterface, 'asset' | 'transactionHash'>
+    ) {
+        const buffers = this.stateStore.listOpenBuffersForAsset(trade.asset);
+        if (buffers.length === 0) {
+            return;
+        }
+
+        const reason = `检测到 asset=${trade.asset} 的非买入源交易，已放弃未执行的累计买单`;
+        const trail = [
+            buildPolicyTrailEntry(
+                SOURCE_TRADE_BUFFER_POLICY_ID,
+                'SKIP',
+                `检测到 tx=${trade.transactionHash} 的反向/非买入交易，已关闭累计缓冲`
+            ),
+        ];
+
+        for (const buffer of buffers) {
+            const mergedTrail = mergePolicyTrail(buffer.policyTrail, trail);
+            this.stateStore.closeBuffer(buffer._id, 'SKIPPED', reason);
+            buffer.policyTrail = mergedTrail;
+            buffer.reason = reason;
+            this.queuePersistBuffer(buffer);
+
+            const trades = this.stateStore.getTradesByIds(buffer.sourceTradeIds);
+            for (const sourceTrade of trades) {
+                const state = this.stateStore.getTradeState(sourceTrade);
+                if (!state) {
+                    continue;
+                }
+
+                this.finalizeTradeState(state, 'SKIPPED', reason, mergedTrail);
+            }
+        }
+    }
+
+    private async cancelReadyBuyBatchesForAsset(
+        trade: Pick<UserActivityInterface, 'asset' | 'transactionHash'>
+    ) {
+        const batches = this.stateStore
+            .listActiveBuyBatchesForAsset(trade.asset)
+            .filter((batch) => batch.status !== 'SUBMITTED');
+        if (batches.length === 0) {
+            return;
+        }
+
+        const reason = `检测到 asset=${trade.asset} 的非买入源交易，已取消未执行的买入批次`;
+        const trail = [
+            buildPolicyTrailEntry(
+                SOURCE_TRADE_BUFFER_POLICY_ID,
+                'SKIP',
+                `检测到 tx=${trade.transactionHash} 的反向/非买入交易，已取消待执行买入批次`
+            ),
+        ];
+
+        for (const batch of batches) {
+            batch.policyTrail = mergePolicyTrail(batch.policyTrail, trail);
+            batch.reason = reason;
+            this.finalizeBatch(batch, 'SKIPPED', reason);
+        }
+    }
+
+    private async createBatch(params: {
+        trades: UserActivityInterface[];
         condition?: string;
         requestedUsdc?: number;
         requestedSize?: number;
         sourcePrice?: number;
         reason?: string;
         policyTrail?: ExecutionPolicyTrailEntry[];
-    }
-) => {
-    const condition =
-        params?.condition ||
-        resolveTradeCondition(trade.side, undefined, {
-            size: trade.sourcePositionSizeAfterTrade,
-        });
-    const policyTrail = params?.policyTrail || [];
-    const batch = await CopyExecutionBatch.create({
-        sourceWallet: USER_ADDRESS,
-        status: 'READY',
-        condition,
-        asset: trade.asset,
-        conditionId: trade.conditionId,
-        title: trade.title,
-        outcome: trade.outcome,
-        side: trade.side,
-        sourceTradeIds: [trade._id],
-        sourceActivityKeys: getSourceActivityKeys(trade),
-        sourceTransactionHashes: getSourceTransactionHashes(trade),
-        sourceTradeCount: getSourceTradeCount(trade),
-        sourceStartedAt: getSourceStartedAt(trade),
-        sourceEndedAt: getSourceEndedAt(trade),
-        sourcePrice: Math.max(toSafeNumber(params?.sourcePrice), toSafeNumber(trade.price), 0),
-        requestedUsdc: Math.max(toSafeNumber(params?.requestedUsdc), 0),
-        requestedSize: Math.max(toSafeNumber(params?.requestedSize), 0),
-        orderIds: [],
-        transactionHashes: [],
-        policyTrail,
-        retryCount: 0,
-        claimedAt: 0,
-        submittedAt: 0,
-        confirmedAt: 0,
-        completedAt: 0,
-        reason: params?.reason || '',
-        submissionStatus: 'SUBMITTED',
-    });
-    await updateBatchedActivities(
-        [trade._id],
-        batch._id,
-        params?.reason || '已创建执行批次',
-        policyTrail
-    );
-};
-
-const processPendingTrades = async (clobClient: ClobClient, trades: UserActivityInterface[]) => {
-    let buyPlanningBalance: number | null | undefined;
-    let buyPlanningReason = '';
-
-    for (const trade of trades) {
-        const claimed = await claimTrade(trade);
-        if (!claimed) {
-            continue;
+        bufferId?: mongoose.Types.ObjectId;
+    }) {
+        const orderedTrades = sortTradesAsc(params.trades);
+        const latestTrade = orderedTrades.slice(-1)[0];
+        if (!latestTrade) {
+            return null;
         }
 
-        try {
-            const resolution = await fetchPolymarketMarketResolution({
-                conditionId: trade.conditionId,
-                marketSlug: String(trade.eventSlug || trade.slug || '').trim(),
-                title: trade.title,
+        const condition =
+            params.condition ||
+            resolveTradeCondition(latestTrade.side, undefined, {
+                size: latestTrade.sourcePositionSizeAfterTrade,
             });
-            if (resolution && !isTradablePolymarketMarket(resolution)) {
-                const reason = isResolvedPolymarketMarket(resolution)
-                    ? `市场已 resolved winner=${resolution?.winnerOutcome || 'unknown'}，已跳过真实执行并交由结算回收器处理`
-                    : '市场已停止接单，已跳过真实执行并等待结算回收';
-                await cancelOpenBuyBuffersForAsset(trade);
-                await cancelReadyBuyBatchesForAsset(trade);
-                await finalizeTerminalTradeWithLog(trade, 'SKIPPED', reason);
-                continue;
-            }
+        const batch: CopyExecutionBatchInterface = {
+            _id: new mongoose.Types.ObjectId(),
+            sourceWallet: USER_ADDRESS,
+            bufferId: params.bufferId,
+            status: 'READY',
+            condition,
+            asset: latestTrade.asset,
+            conditionId: latestTrade.conditionId,
+            title: latestTrade.title,
+            outcome: latestTrade.outcome,
+            side: latestTrade.side,
+            sourceTradeIds: orderedTrades.map((trade) => trade._id),
+            sourceActivityKeys: mergeStringArrays(
+                ...orderedTrades.map((trade) => getSourceActivityKeys(trade))
+            ),
+            sourceTransactionHashes: mergeStringArrays(
+                ...orderedTrades.map((trade) => getSourceTransactionHashes(trade))
+            ),
+            sourceTradeCount: orderedTrades.reduce(
+                (sum, trade) => sum + getSourceTradeCount(trade),
+                0
+            ),
+            sourceStartedAt: Math.min(...orderedTrades.map((trade) => getSourceStartedAt(trade))),
+            sourceEndedAt: Math.max(...orderedTrades.map((trade) => getSourceEndedAt(trade))),
+            sourcePrice: Math.max(
+                toSafeNumber(params.sourcePrice),
+                toSafeNumber(latestTrade.price),
+                0
+            ),
+            requestedUsdc: Math.max(toSafeNumber(params.requestedUsdc), 0),
+            requestedSize: Math.max(toSafeNumber(params.requestedSize), 0),
+            orderIds: [],
+            transactionHashes: [],
+            policyTrail: params.policyTrail || [],
+            retryCount: 0,
+            claimedAt: 0,
+            submittedAt: 0,
+            confirmedAt: 0,
+            completedAt: 0,
+            reason: params.reason || '',
+            submissionStatus: 'SUBMITTED',
+        };
+        this.stateStore.createBatch(batch);
+        this.queuePersistBatch(batch);
+        this.queuePersistTradesByBatch(batch, 'BATCHED');
+        logger.debug(
+            `${formatTradeRef(latestTrade)} 已创建实盘批次 requestedUsdc=${formatAmount(batch.requestedUsdc)}` +
+                (batch.reason ? ` reason=${batch.reason}` : '')
+        );
+        return batch;
+    }
 
-            const validation = validateTradeForExecution(trade);
-            if (validation.status === 'SKIP') {
-                await finalizeTerminalTradeWithLog(trade, 'SKIPPED', validation.reason);
-                continue;
-            }
+    private async flushBuyBuffer(
+        buffer: CopyIntentBufferInterface,
+        options: { skipReason?: string; extraPolicyTrail?: ExecutionPolicyTrailEntry[] } = {}
+    ) {
+        const trades = this.stateStore.getTradesByIds(buffer.sourceTradeIds);
+        const latestTrade = sortTradesAsc(trades).slice(-1)[0];
+        if (!latestTrade) {
+            buffer.state = 'SKIPPED';
+            buffer.reason = options.skipReason || '累计缓冲缺少关联源交易';
+            buffer.completedAt = Date.now();
+            this.stateStore.closeBuffer(buffer._id, 'SKIPPED', buffer.reason);
+            this.queuePersistBuffer(buffer);
+            return;
+        }
 
-            if (validation.status === 'RETRY') {
-                await finalizeRetryableTradeWithLog(trade, validation.reason);
-                continue;
-            }
+        const context = await this.refreshTradingContext(true);
+        const existingPosition = findPositionForTrade(context.positions, latestTrade);
+        const activeBuyBatch = this.stateStore.getActiveBuyBatch(latestTrade);
+        const bufferedRequestedUsdc = Math.max(toSafeNumber(buffer.requestedUsdc), 0);
+        const availableBalance = Math.max(
+            toSafeNumber(context.availableBalance) -
+                Math.max(this.stateStore.reservedBuyExposureUsdc() - bufferedRequestedUsdc, 0),
+            0
+        );
+        const bootstrapBudgetRemainingUsdc = buildBootstrapBudgetRemainingUsdc(
+            context,
+            this.stateStore
+        );
+        const canTopUpBufferedBuy =
+            bufferedRequestedUsdc >= BUY_MIN_TOP_UP_TRIGGER_USDC &&
+            bufferedRequestedUsdc < MIN_MARKET_BUY_USDC &&
+            Math.max(toSafeNumber(existingPosition?.size), 0) <= EPSILON &&
+            activeBuyBatch === null &&
+            availableBalance >= MIN_MARKET_BUY_USDC &&
+            bootstrapBudgetRemainingUsdc + EPSILON >= MIN_MARKET_BUY_USDC;
+        const finalRequestedUsdc = canTopUpBufferedBuy
+            ? MIN_MARKET_BUY_USDC
+            : bufferedRequestedUsdc;
+        const finalReason = canTopUpBufferedBuy
+            ? mergeReasons(
+                  buffer.reason,
+                  `累计买单 ${formatAmount(buffer.requestedUsdc)} USDC，已按最小买单门槛补齐到 1 USDC`
+              )
+            : buffer.reason || '';
+        const finalPolicyTrail = canTopUpBufferedBuy
+            ? mergePolicyTrail(buffer.policyTrail, options.extraPolicyTrail, [
+                  buildPolicyTrailEntry(
+                      BUFFER_MIN_TOP_UP_POLICY_ID,
+                      'ADJUST',
+                      `累计买单 ${formatAmount(buffer.requestedUsdc)} USDC，已补齐到 1 USDC`
+                  ),
+              ])
+            : mergePolicyTrail(buffer.policyTrail, options.extraPolicyTrail);
 
-            const normalizedSide = String(trade.side || '').toUpperCase();
-            if (normalizedSide === 'BUY') {
-                if (buyPlanningBalance === undefined) {
-                    const tradingGuardState = await getTradingGuardState(clobClient);
-                    if (tradingGuardState.skipReason) {
-                        buyPlanningReason = tradingGuardState.skipReason;
-                        buyPlanningBalance = null;
-                    } else if (tradingGuardState.availableBalance === null) {
-                        buyPlanningReason = '代理钱包可用余额接口不可用';
-                        buyPlanningBalance = null;
-                    } else {
-                        buyPlanningReason = '';
-                        buyPlanningBalance = Math.max(
-                            toSafeNumber(tradingGuardState.availableBalance),
-                            0
-                        );
-                    }
-                }
-
-                if (buyPlanningBalance === null) {
-                    await releaseClaimedTrade(trade, buyPlanningReason);
-                    logger.warn(`${formatTradeRef(trade)} 暂缓入批 reason=${buyPlanningReason}`);
-                    continue;
-                }
-
-                const evaluation = evaluateDirectBuyIntent({
-                    trade,
-                    availableBalance: buyPlanningBalance,
-                });
-                if (evaluation.status === 'SKIP') {
-                    await finalizeSingleTradeWithTrail(
-                        trade,
-                        'SKIPPED',
-                        evaluation.reason,
-                        evaluation.policyTrail
-                    );
-                    logger.debug(`${formatTradeRef(trade)} 已跳过 reason=${evaluation.reason}`);
-                    continue;
-                }
-
-                await createBatchFromSingleTrade(trade, {
-                    condition: 'buy',
-                    requestedUsdc: evaluation.requestedUsdc,
-                    sourcePrice: evaluation.sourcePrice,
-                    reason: evaluation.reason,
-                    policyTrail: evaluation.policyTrail,
-                });
-                buyPlanningBalance = Math.max(buyPlanningBalance - evaluation.requestedUsdc, 0);
-                logger.debug(
-                    `${formatTradeRef(trade)} 已创建直接买入批次 ` +
-                        `requestedUsdc=${formatAmount(evaluation.requestedUsdc)}` +
-                        (evaluation.reason ? ` reason=${evaluation.reason}` : '')
+        if (finalRequestedUsdc < MIN_MARKET_BUY_USDC) {
+            const reason =
+                options.skipReason ||
+                mergeReasons(
+                    finalReason,
+                    `累计买单 ${formatAmount(buffer.requestedUsdc)} USDC 未达到 ${MIN_MARKET_BUY_USDC} USDC`
                 );
-                continue;
+            this.stateStore.closeBuffer(buffer._id, 'SKIPPED', reason);
+            buffer.state = 'SKIPPED';
+            buffer.reason = reason;
+            buffer.policyTrail = finalPolicyTrail;
+            buffer.completedAt = Date.now();
+            this.queuePersistBuffer(buffer);
+            for (const trade of trades) {
+                const state = this.stateStore.getTradeState(trade);
+                if (state) {
+                    this.finalizeTradeState(state, 'SKIPPED', reason, finalPolicyTrail);
+                }
             }
+            logger.debug(`${buffer.bufferKey} 已放弃 live 累计缓冲 reason=${reason}`);
+            return;
+        }
 
-            await cancelOpenBuyBuffersForAsset(trade);
-            await cancelReadyBuyBatchesForAsset(trade);
-            await createBatchFromSingleTrade(trade);
-            logger.debug(`${formatTradeRef(trade)} 已创建直接执行批次`);
-        } catch (error) {
-            logger.error(`${formatTradeRef(trade)} 入批异常`, error);
-            await finalizeRetryableTradeWithLog(trade, '交易入批流程发生未预期异常');
+        await this.createBatch({
+            trades,
+            bufferId: buffer._id,
+            condition: 'buy',
+            requestedUsdc: finalRequestedUsdc,
+            sourcePrice: Math.max(
+                toSafeNumber(buffer.sourcePrice),
+                toSafeNumber(latestTrade.price),
+                0
+            ),
+            reason: finalReason,
+            policyTrail: finalPolicyTrail,
+        });
+        this.stateStore.closeBuffer(buffer._id, 'CLOSED', finalReason);
+        buffer.state = 'CLOSED';
+        buffer.reason = finalReason;
+        buffer.policyTrail = finalPolicyTrail;
+        buffer.completedAt = Date.now();
+        this.queuePersistBuffer(buffer);
+        logger.debug(
+            `${buffer.bufferKey} 已生成实盘买入批次 requestedUsdc=${formatAmount(finalRequestedUsdc)}`
+        );
+    }
+
+    private async flushDueBuyBuffers() {
+        const dueBuffers = this.stateStore.listDueBuffers();
+        for (const buffer of dueBuffers) {
+            await this.flushBuyBuffer(buffer);
         }
     }
-};
 
-const executeReadyBatches = async (
-    clobClient: ClobClient,
-    marketStream: ClobMarketStream,
-    userStream: ClobUserStream | null
-) => {
-    const readyBatches = await readReadyBatches();
-    for (const batch of readyBatches) {
-        const claimed = await claimReadyBatch(batch);
-        if (!claimed) {
-            continue;
+    private async bufferBuyIntent(params: {
+        trade: UserActivityInterface;
+        requestedUsdc: number;
+        sourcePrice: number;
+        reason: string;
+        policyTrail?: ExecutionPolicyTrailEntry[];
+        allowBootstrapFlush?: boolean;
+    }) {
+        const {
+            trade,
+            requestedUsdc,
+            sourcePrice,
+            reason,
+            policyTrail = [],
+            allowBootstrapFlush = false,
+        } = params;
+        const normalizedRequestedUsdc = Math.max(toSafeNumber(requestedUsdc), 0);
+        if (normalizedRequestedUsdc <= 0) {
+            return;
+        }
+
+        let openBuffer = this.stateStore.getOpenBuffer(buildLiveBuyBufferKey(trade));
+        if (openBuffer && shouldFlushBufferBeforeAppendingTrade(openBuffer, trade)) {
+            await this.flushBuyBuffer(openBuffer, {
+                extraPolicyTrail: [
+                    buildPolicyTrailEntry(
+                        LIVE_BUY_BUFFER_POLICY_ID,
+                        'DEFER',
+                        `检测到新的同资产买单，上一段累计窗口已超过 ${BUY_INTENT_BUFFER_MAX_MS}ms`
+                    ),
+                ],
+            });
+            openBuffer = null;
+        }
+
+        const nextRequestedUsdc =
+            Math.max(toSafeNumber(openBuffer?.requestedUsdc), 0) + normalizedRequestedUsdc;
+        const flushImmediately =
+            nextRequestedUsdc >= MIN_MARKET_BUY_USDC ||
+            (allowBootstrapFlush && nextRequestedUsdc >= BUY_MIN_TOP_UP_TRIGGER_USDC);
+        const nextFlushAt = flushImmediately ? Date.now() : Date.now() + BUY_INTENT_BUFFER_MAX_MS;
+        const nextReason = mergeReasons(openBuffer?.reason, reason);
+        const nextPolicyTrail = mergePolicyTrail(openBuffer?.policyTrail, policyTrail, [
+            buildPolicyTrailEntry(
+                LIVE_BUY_BUFFER_POLICY_ID,
+                'DEFER',
+                flushImmediately
+                    ? nextRequestedUsdc >= MIN_MARKET_BUY_USDC
+                        ? `累计买单已达到 ${nextRequestedUsdc.toFixed(4)} USDC，准备生成批次`
+                        : `累计买单已达到 ${nextRequestedUsdc.toFixed(4)} USDC，准备按最小门槛补齐后生成批次`
+                    : `累计买单 ${nextRequestedUsdc.toFixed(4)} USDC，继续等待凑满 ${MIN_MARKET_BUY_USDC} USDC`
+            ),
+        ]);
+
+        const nextBuffer = this.stateStore.mergeIntoOpenBuffer(openBuffer, {
+            trade,
+            bufferKey: buildLiveBuyBufferKey(trade),
+            requestedUsdc: normalizedRequestedUsdc,
+            sourcePrice: Math.max(toSafeNumber(sourcePrice), toSafeNumber(trade.price), 0),
+            flushAfter: nextFlushAt,
+            reason: nextReason,
+            policyTrail: nextPolicyTrail,
+        });
+        this.queuePersistBuffer(nextBuffer);
+        const tradeState = this.stateStore.getTradeState(trade);
+        if (tradeState) {
+            tradeState.status = 'BUFFERED';
+            tradeState.bufferId = nextBuffer._id;
+            tradeState.lastError = nextReason;
+            tradeState.policyTrail = nextPolicyTrail;
+            this.queuePersistSingleTradeState(tradeState);
+        }
+    }
+
+    private async processPendingTrades(pendingTrades: LiveTradeRuntimeState[]) {
+        for (const state of pendingTrades) {
+            const trade = state.trade;
+            try {
+                const resolution = await this.loadMarketResolution(trade);
+                if (resolution && !isTradablePolymarketMarket(resolution)) {
+                    const reason = isResolvedPolymarketMarket(resolution)
+                        ? `市场已 resolved winner=${resolution?.winnerOutcome || 'unknown'}，已跳过真实执行并交由结算回收器处理`
+                        : '市场已停止接单，已跳过真实执行并等待结算回收';
+                    await this.cancelOpenBuyBuffersForAsset(trade);
+                    await this.cancelReadyBuyBatchesForAsset(trade);
+                    this.finalizeTradeState(state, 'SKIPPED', reason);
+                    continue;
+                }
+
+                const validation = validateTradeForExecution(trade);
+                if (validation.status === 'SKIP') {
+                    this.finalizeTradeState(state, 'SKIPPED', validation.reason);
+                    continue;
+                }
+
+                if (validation.status === 'RETRY') {
+                    state.retryCount += 1;
+                    if (state.retryCount >= RETRY_LIMIT) {
+                        this.finalizeTradeState(state, 'FAILED', validation.reason);
+                    } else {
+                        state.lastError = validation.reason;
+                        this.stateStore.markTradePending(trade, validation.reason);
+                        this.queuePersistSingleTradeState(state);
+                        logger.warn(`${formatTradeRef(trade)} 待重试 reason=${validation.reason}`);
+                    }
+                    continue;
+                }
+
+                const normalizedSide = String(trade.side || '').toUpperCase();
+                if (normalizedSide === 'BUY') {
+                    const context = await this.refreshTradingContext();
+                    if (context.skipReason) {
+                        this.stateStore.markTradePending(trade, context.skipReason);
+                        state.lastError = context.skipReason;
+                        this.queuePersistSingleTradeState(state);
+                        logger.warn(
+                            `${formatTradeRef(trade)} 暂缓入批 reason=${context.skipReason}`
+                        );
+                        continue;
+                    }
+
+                    if (context.availableBalance === null) {
+                        const reason = '代理钱包可用余额接口不可用';
+                        this.stateStore.markTradePending(trade, reason);
+                        state.lastError = reason;
+                        this.queuePersistSingleTradeState(state);
+                        logger.warn(`${formatTradeRef(trade)} 暂缓入批 reason=${reason}`);
+                        continue;
+                    }
+
+                    const openBuffer = this.stateStore.getOpenBuffer(buildLiveBuyBufferKey(trade));
+                    if (openBuffer && shouldFlushBufferBeforeAppendingTrade(openBuffer, trade)) {
+                        await this.flushBuyBuffer(openBuffer, {
+                            extraPolicyTrail: [
+                                buildPolicyTrailEntry(
+                                    LIVE_BUY_BUFFER_POLICY_ID,
+                                    'DEFER',
+                                    `检测到新的同资产买单，上一段累计窗口已超过 ${BUY_INTENT_BUFFER_MAX_MS}ms`
+                                ),
+                            ],
+                        });
+                    }
+                    const latestBuffer = this.stateStore.getOpenBuffer(
+                        buildLiveBuyBufferKey(trade)
+                    );
+                    const activeBuyBatch = this.stateStore.getActiveBuyBatch(trade);
+                    const existingPosition = findPositionForTrade(context.positions, trade);
+                    const hasLocalExposure =
+                        Math.max(toSafeNumber(existingPosition?.size), 0) > EPSILON;
+                    const hasPendingBuyExposure = latestBuffer !== null || activeBuyBatch !== null;
+                    const reservedBuyExposureUsdc = this.stateStore.reservedBuyExposureUsdc();
+                    const availableBalance = Math.max(
+                        toSafeNumber(context.availableBalance) - reservedBuyExposureUsdc,
+                        0
+                    );
+                    const bootstrapBudgetRemainingUsdc = buildBootstrapBudgetRemainingUsdc(
+                        context,
+                        this.stateStore
+                    );
+                    const evaluation = evaluateDirectBuyIntent({
+                        trade,
+                        availableBalance,
+                        hasLocalExposure,
+                        hasPendingBuyExposure,
+                        sourcePositionBeforeTradeSize: trade.sourcePositionSizeBeforeTrade,
+                        allowLocalFirstEntryTicket: true,
+                        bootstrapBudgetRemainingUsdc,
+                    });
+                    const shouldBufferTrade =
+                        Math.max(toSafeNumber(evaluation.requestedUsdc), 0) > 0 &&
+                        (latestBuffer !== null ||
+                            (evaluation.status === 'SKIP' &&
+                                evaluation.requestedUsdc < MIN_MARKET_BUY_USDC));
+
+                    if (shouldBufferTrade) {
+                        await this.bufferBuyIntent({
+                            trade,
+                            requestedUsdc: evaluation.requestedUsdc,
+                            sourcePrice: evaluation.sourcePrice,
+                            reason: evaluation.reason,
+                            policyTrail: evaluation.policyTrail,
+                            allowBootstrapFlush:
+                                !hasLocalExposure &&
+                                activeBuyBatch === null &&
+                                bootstrapBudgetRemainingUsdc + EPSILON >= MIN_MARKET_BUY_USDC,
+                        });
+                        logger.debug(
+                            `${formatTradeRef(trade)} 已写入实盘买单缓冲 requestedUsdc=${formatAmount(
+                                evaluation.requestedUsdc
+                            )}` + (evaluation.reason ? ` reason=${evaluation.reason}` : '')
+                        );
+                        continue;
+                    }
+
+                    if (evaluation.status === 'SKIP') {
+                        this.finalizeTradeState(
+                            state,
+                            'SKIPPED',
+                            evaluation.reason,
+                            evaluation.policyTrail
+                        );
+                        continue;
+                    }
+
+                    state.status = 'BATCHED';
+                    state.lastError = evaluation.reason;
+                    state.policyTrail = evaluation.policyTrail;
+                    await this.createBatch({
+                        trades: [trade],
+                        condition: 'buy',
+                        requestedUsdc: evaluation.requestedUsdc,
+                        sourcePrice: evaluation.sourcePrice,
+                        reason: evaluation.reason,
+                        policyTrail: evaluation.policyTrail,
+                    });
+                    continue;
+                }
+
+                await this.cancelOpenBuyBuffersForAsset(trade);
+                await this.cancelReadyBuyBatchesForAsset(trade);
+                await this.createBatch({
+                    trades: [trade],
+                });
+            } catch (error) {
+                state.retryCount += 1;
+                const reason = '交易入批流程发生未预期异常';
+                if (state.retryCount >= RETRY_LIMIT) {
+                    this.finalizeTradeState(state, 'FAILED', reason);
+                } else {
+                    this.stateStore.markTradePending(trade, reason);
+                    state.lastError = reason;
+                    this.queuePersistSingleTradeState(state);
+                    logger.error(`${formatTradeRef(trade)} 入批异常`, error);
+                }
+            }
+        }
+    }
+
+    private executeReadyBatches() {
+        const readyBatches = this.stateStore.listReadyBatches();
+        for (const batch of readyBatches) {
+            const batchId = String(batch._id);
+            if (this.executingBatchIds.has(batchId)) {
+                continue;
+            }
+
+            this.executingBatchIds.add(batchId);
+            void this.executeBatch(batch).finally(() => {
+                this.executingBatchIds.delete(batchId);
+            });
+        }
+    }
+
+    private async executeBatch(batch: CopyExecutionBatchInterface) {
+        const claimedBatch = this.stateStore.markBatchProcessing(batch._id);
+        if (!claimedBatch) {
+            return;
         }
 
         try {
-            const trades = await loadTradesByIds(batch.sourceTradeIds);
-            const orderedTrades = sortTradesAsc(trades);
-            const latestTrade = orderedTrades.slice(-1)[0];
+            const trades = this.stateStore.getTradesByIds(claimedBatch.sourceTradeIds);
+            const latestTrade = sortTradesAsc(trades).slice(-1)[0];
             if (!latestTrade) {
-                await finalizeBatchAndActivities(batch, 'FAILED', '批次缺少关联源交易');
-                continue;
+                this.finalizeBatch(claimedBatch, 'FAILED', '批次缺少关联源交易');
+                return;
             }
 
-            const [myPositionsRaw, tradingGuardState] = await Promise.all([
-                fetchData<UserPositionInterface[]>(PROXY_POSITIONS_URL),
-                getTradingGuardState(clobClient),
-            ]);
-            if (!Array.isArray(myPositionsRaw)) {
-                await releaseReadyBatch(batch, '代理钱包持仓接口不可用');
-                continue;
+            const context = await this.refreshTradingContext(true);
+            if (context.skipReason) {
+                this.stateStore.markBatchReady(claimedBatch._id, context.skipReason);
+                claimedBatch.reason = context.skipReason;
+                this.queuePersistBatch(claimedBatch);
+                return;
             }
 
-            if (tradingGuardState.skipReason) {
-                await releaseReadyBatch(batch, tradingGuardState.skipReason);
-                continue;
+            if (context.availableBalance === null) {
+                const reason = '代理钱包可用余额接口不可用';
+                this.stateStore.markBatchReady(claimedBatch._id, reason);
+                claimedBatch.reason = reason;
+                this.queuePersistBatch(claimedBatch);
+                return;
             }
 
-            if (tradingGuardState.availableBalance === null) {
-                await releaseReadyBatch(batch, '代理钱包可用余额接口不可用');
-                continue;
-            }
-
-            const myPosition = findPositionForTrade(myPositionsRaw, latestTrade);
+            const myPosition = findPositionForTrade(context.positions, latestTrade);
             const sourcePositionAfterTrade = {
                 size: latestTrade.sourcePositionSizeAfterTrade,
             };
             const condition =
-                batch.condition ||
+                claimedBatch.condition ||
                 resolveTradeCondition(latestTrade.side, myPosition, sourcePositionAfterTrade);
-            logger.debug(
-                `${formatBatchRef(batch)} 执行=${condition} ` +
-                    `balance=${formatAmount(tradingGuardState.availableBalance)} ` +
-                    `proxySize=${formatAmount(myPosition?.size)} ` +
-                    `sourceSize=${formatAmount(sourcePositionAfterTrade.size)}`
-            );
-
             const result = await postOrder(
-                clobClient,
-                marketStream,
+                this.clobClient,
+                this.marketStream,
                 condition,
                 myPosition,
                 sourcePositionAfterTrade,
                 latestTrade,
-                tradingGuardState.availableBalance,
-                batch.requestedUsdc > 0 || batch.requestedSize > 0
+                context.availableBalance,
+                claimedBatch.requestedUsdc > 0 || claimedBatch.requestedSize > 0
                     ? {
-                          requestedUsdc: batch.requestedUsdc > 0 ? batch.requestedUsdc : undefined,
-                          requestedSize: batch.requestedSize > 0 ? batch.requestedSize : undefined,
-                          sourcePrice: batch.sourcePrice > 0 ? batch.sourcePrice : undefined,
-                          note: batch.reason,
+                          requestedUsdc:
+                              claimedBatch.requestedUsdc > 0
+                                  ? claimedBatch.requestedUsdc
+                                  : undefined,
+                          requestedSize:
+                              claimedBatch.requestedSize > 0
+                                  ? claimedBatch.requestedSize
+                                  : undefined,
+                          sourcePrice:
+                              claimedBatch.sourcePrice > 0 ? claimedBatch.sourcePrice : undefined,
+                          note: claimedBatch.reason,
                       }
                     : undefined
             );
 
             if (result.status === 'RETRYABLE_ERROR') {
-                await retryBatchExecution(batch, result.reason);
-                continue;
+                const noLiquidityRetry = isNoLiquidityReason(result.reason);
+                const nextRetryCount =
+                    toSafeNumber(claimedBatch.retryCount) + (noLiquidityRetry ? 1 : 0);
+                if (noLiquidityRetry && nextRetryCount >= RETRY_LIMIT) {
+                    const reason = `连续 ${RETRY_LIMIT} 次空盘口/流动性不足，已放弃本批次`;
+                    claimedBatch.policyTrail = mergePolicyTrail(claimedBatch.policyTrail, [
+                        buildPolicyTrailEntry('no-liquidity-timeout', 'SKIP', reason),
+                    ]);
+                    claimedBatch.reason = reason;
+                    this.finalizeBatch(claimedBatch, 'SKIPPED', reason);
+                    return;
+                }
+
+                this.stateStore.markBatchReady(claimedBatch._id, result.reason, noLiquidityRetry);
+                claimedBatch.reason = result.reason;
+                if (noLiquidityRetry) {
+                    claimedBatch.retryCount = nextRetryCount;
+                }
+                this.queuePersistBatch(claimedBatch);
+                logger.warn(`${formatBatchRef(claimedBatch)} 待重试 reason=${result.reason}`);
+                return;
             }
 
             if (result.orderIds.length > 0 || result.transactionHashes.length > 0) {
-                await markBatchSubmitted(batch, result);
+                claimedBatch.reason = result.reason;
+                claimedBatch.orderIds = result.orderIds;
+                claimedBatch.transactionHashes = result.transactionHashes;
+                claimedBatch.submissionStatus = result.submissionStatus || 'SUBMITTED';
+                claimedBatch.submittedAt = Date.now();
+                claimedBatch.claimedAt = Date.now();
+                this.stateStore.markBatchSubmitted(claimedBatch._id, claimedBatch);
+                this.queuePersistBatch(claimedBatch);
+                this.queuePersistTradesByBatch(claimedBatch, 'SUBMITTED');
+                this.stateStore.markTradesByBatch(claimedBatch, {
+                    status: 'SUBMITTED',
+                    lastError: result.reason,
+                    orderIds: result.orderIds,
+                    transactionHashes: result.transactionHashes,
+                    submittedAt: claimedBatch.submittedAt,
+                    batchId: claimedBatch._id,
+                    bufferId: claimedBatch.bufferId,
+                    policyTrail: claimedBatch.policyTrail || [],
+                });
                 logger.debug(
-                    `${formatBatchRef(batch)} 已提交 orderIds=${result.orderIds.length} ` +
-                        `txHashes=${result.transactionHashes.length}`
+                    `${formatBatchRef(claimedBatch)} 已提交 orderIds=${result.orderIds.length} txHashes=${result.transactionHashes.length}`
                 );
-                await confirmSubmittedBatch(
-                    {
-                        ...batch,
-                        status: 'SUBMITTED',
-                        orderIds: result.orderIds,
-                        transactionHashes: result.transactionHashes,
-                        reason: result.reason,
-                        submissionStatus: result.submissionStatus,
-                    },
-                    userStream
-                );
-                continue;
+                return;
             }
 
-            await finalizeBatchAndActivities(
-                batch,
+            this.finalizeBatch(
+                claimedBatch,
                 result.status === 'SKIPPED' ? 'SKIPPED' : 'FAILED',
                 result.reason
             );
         } catch (error) {
-            logger.error(`${formatBatchRef(batch)} 执行异常`, error);
-            await retryBatchExecution(batch, '批次执行链路发生未预期异常');
+            const reason = '批次执行链路发生未预期异常';
+            this.stateStore.markBatchReady(claimedBatch._id, reason);
+            claimedBatch.reason = reason;
+            this.queuePersistBatch(claimedBatch);
+            logger.error(`${formatBatchRef(claimedBatch)} 执行异常`, error);
         }
     }
-};
 
-const tradeExecutor = async (
+    private syncSubmittedBatches() {
+        const submittedBatches = this.stateStore.listSubmittedBatches();
+        for (const batch of submittedBatches) {
+            const batchId = String(batch._id);
+            if (this.confirmingBatchIds.has(batchId)) {
+                continue;
+            }
+
+            this.confirmingBatchIds.add(batchId);
+            void this.confirmBatch(batch).finally(() => {
+                this.confirmingBatchIds.delete(batchId);
+            });
+        }
+    }
+
+    private async confirmBatch(batch: CopyExecutionBatchInterface) {
+        try {
+            const trades = this.stateStore.getTradesByIds(batch.sourceTradeIds);
+            const latestTrade = sortTradesAsc(trades).slice(-1)[0];
+            if (!latestTrade) {
+                this.finalizeBatch(batch, 'FAILED', '批次缺少关联源交易');
+                return;
+            }
+
+            const orderIds = (batch.orderIds || []).filter(Boolean);
+            let normalizedConfirmation;
+            if (this.userStream && orderIds.length > 0) {
+                normalizedConfirmation = await this.userStream.waitForOrders({
+                    conditionId: latestTrade.conditionId,
+                    orderIds,
+                    onStatus: async (update: UserChannelStatusUpdate) => {
+                        batch.reason = update.reason;
+                        if (update.confirmedAt) {
+                            batch.confirmedAt = update.confirmedAt;
+                        }
+                        if (update.status && update.status !== 'SUBMITTED') {
+                            batch.submissionStatus = update.status;
+                        }
+                        this.queuePersistBatchProgress(batch, update);
+                    },
+                });
+            } else {
+                const chainConfirmation = await confirmTransactionHashes(
+                    batch.transactionHashes || []
+                );
+                const update: UserChannelStatusUpdate = {
+                    status:
+                        chainConfirmation.status === 'CONFIRMED'
+                            ? 'CONFIRMED'
+                            : chainConfirmation.status === 'FAILED'
+                              ? 'FAILED'
+                              : 'SUBMITTED',
+                    reason: chainConfirmation.reason,
+                    confirmedAt: chainConfirmation.confirmedAt,
+                };
+                this.queuePersistBatchProgress(batch, update);
+                normalizedConfirmation = {
+                    confirmationStatus: chainConfirmation.status,
+                    ...update,
+                };
+            }
+
+            if (normalizedConfirmation.confirmationStatus === 'PENDING') {
+                if (
+                    normalizedConfirmation.status &&
+                    normalizedConfirmation.status !== 'SUBMITTED'
+                ) {
+                    batch.submissionStatus = normalizedConfirmation.status;
+                }
+                batch.reason = mergeReasons(batch.reason, normalizedConfirmation.reason);
+                this.queuePersistBatch(batch);
+                logger.warn(
+                    `${formatBatchRef(batch)} 等待确认，稍后继续监听 reason=${batch.reason}`
+                );
+                return;
+            }
+
+            if (normalizedConfirmation.confirmationStatus === 'FAILED') {
+                this.finalizeBatch(
+                    batch,
+                    'FAILED',
+                    mergeReasons(batch.reason, normalizedConfirmation.reason)
+                );
+                return;
+            }
+
+            const finalStatus =
+                normalizedConfirmation.status === 'FAILED' || batch.submissionStatus === 'FAILED'
+                    ? 'FAILED'
+                    : 'CONFIRMED';
+            this.finalizeBatch(
+                batch,
+                finalStatus,
+                normalizedConfirmation.reason,
+                normalizedConfirmation.confirmedAt
+            );
+        } catch (error) {
+            logger.error(`${formatBatchRef(batch)} 确认异常`, error);
+        }
+    }
+}
+
+export interface LiveTradeExecutorHandle {
+    run: () => Promise<void>;
+    ingestSourceTrades: (trades: UserActivityInterface[]) => void;
+}
+
+const tradeExecutor = (
     clobClient: ClobClient,
     marketStream: ClobMarketStream,
     userStream: ClobUserStream | null
-) => {
-    logger.info('启动真实跟单');
-    const processingCount = await UserActivity.countDocuments({ botStatus: 'PROCESSING' });
-    const submittedCount = await UserActivity.countDocuments({ botStatus: 'SUBMITTED' });
-    const batchedCount = await UserActivity.countDocuments({ botStatus: 'BATCHED' });
-    if (processingCount > 0) {
-        logger.warn(`检测到 ${processingCount} 条 PROCESSING 交易，超出租约的记录会自动回收`);
-    }
-    if (submittedCount > 0) {
-        logger.warn(`检测到 ${submittedCount} 条 SUBMITTED 交易/批次，本次启动会优先补偿最终确认`);
-    }
-    if (batchedCount > 0) {
-        logger.warn(`检测到 ${batchedCount} 条 BATCHED 交易，本次启动会继续执行既有批次`);
-    }
-
-    while (true) {
-        await syncSubmittedTrades(userStream);
-        await syncSubmittedBatches(userStream);
-
-        const pendingTrades = await readPendingTrades();
-        if (pendingTrades.length > 0) {
-            spinner.stop();
-            logger.debug(`待入批交易 ${pendingTrades.length} 条`);
-            await processPendingTrades(clobClient, pendingTrades);
-        }
-
-        await executeReadyBatches(clobClient, marketStream, userStream);
-
-        if (pendingTrades.length === 0) {
-            await spinner.start('等待新交易');
-        }
-
-        await sleep(500);
-    }
+): LiveTradeExecutorHandle => {
+    const runtime = new LiveTradeExecutorRuntime(clobClient, marketStream, userStream);
+    return {
+        run: () => runtime.run(),
+        ingestSourceTrades: runtime.ingestSourceTrades,
+    };
 };
 
 export default tradeExecutor;

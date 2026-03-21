@@ -1,5 +1,6 @@
 import { ENV } from '../config/env';
 import { getRpcProvider } from './getMyBalance';
+import { sleep } from './runtime';
 
 const ORDER_CONFIRMATION_TIMEOUT_MS = ENV.ORDER_CONFIRMATION_TIMEOUT_MS;
 const ORDER_CONFIRMATION_POLL_MS = ENV.ORDER_CONFIRMATION_POLL_MS;
@@ -12,8 +13,6 @@ export interface TransactionConfirmationResult {
     reason: string;
     confirmedAt?: number;
 }
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const confirmTransactionHashes = async (
     transactionHashes: string[]

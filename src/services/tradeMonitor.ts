@@ -762,7 +762,11 @@ const syncStoredTrades = async (
     }
 };
 
-const fetchTradeData = async () => {
+interface TradeMonitorOptions {
+    onSourceTradesSynced?: (trades: UserActivityInterface[]) => void;
+}
+
+const fetchTradeData = async (options: TradeMonitorOptions = {}) => {
     try {
         const syncState = await readSyncState();
         const endTimestamp = Date.now();
@@ -812,6 +816,7 @@ const fetchTradeData = async () => {
             mergedFetchedTrades.snapshots,
             snapshotCapturedAt
         );
+        options.onSourceTradesSynced?.(mergedFetchedTrades.trades);
         await writeSyncState(
             fetchedTrades.length > 0 ? fetchedTrades[fetchedTrades.length - 1] : null,
             endTimestamp
@@ -832,11 +837,11 @@ const fetchTradeData = async () => {
     }
 };
 
-const tradeMonitor = async () => {
+const tradeMonitor = async (options: TradeMonitorOptions = {}) => {
     logger.info(`启动，轮询间隔=${FETCH_INTERVAL}s`);
 
     while (true) {
-        await fetchTradeData();
+        await fetchTradeData(options);
         await new Promise((resolve) => setTimeout(resolve, FETCH_INTERVAL * 1000));
     }
 };

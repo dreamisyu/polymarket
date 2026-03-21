@@ -173,9 +173,7 @@ const resolveInitialSyncLookbackMs = () => {
         return parseNonNegativeNumber(lookbackSECOND, 'INITIAL_SYNC_LOOKBACK_SECOND') * 1000;
     }
 
-    return (
-        parseNonNegativeInteger(readEnv('TOO_OLD_TIMESTAMP') || '24', 'TOO_OLD_TIMESTAMP') * 1000
-    );
+    return parseNonNegativeInteger('24', 'INITIAL_SYNC_LOOKBACK_SECOND') * 1000;
 };
 
 const EXECUTION_MODE: ExecutionMode = readEnv('EXECUTION_MODE') === 'trace' ? 'trace' : 'live';
@@ -313,7 +311,7 @@ export const ENV = {
         'ACTIVITY_SYNC_LIMIT'
     ),
     ACTIVITY_ADJACENT_MERGE_WINDOW_MS: parsePositiveInteger(
-        readEnv('ACTIVITY_ADJACENT_MERGE_WINDOW_MS', 'BUY_SOURCE_MERGE_WINDOW_MS') || '15000',
+        readEnv('ACTIVITY_ADJACENT_MERGE_WINDOW_MS') || '15000',
         'ACTIVITY_ADJACENT_MERGE_WINDOW_MS'
     ),
     ACTIVITY_SYNC_OVERLAP_MS: parsePositiveInteger(
@@ -364,6 +362,22 @@ export const ENV = {
         'MARKET_WS_SNAPSHOT_WAIT_MS'
     ),
     MARKET_WS_ENABLED: parseBoolean(readEnv('MARKET_WS_ENABLED'), true),
+    LIVE_STATE_REFRESH_MS: parsePositiveInteger(
+        readEnv('LIVE_STATE_REFRESH_MS') || '1000',
+        'LIVE_STATE_REFRESH_MS'
+    ),
+    LIVE_EXECUTOR_LOOP_INTERVAL_MS: parsePositiveInteger(
+        readEnv('LIVE_EXECUTOR_LOOP_INTERVAL_MS') || '100',
+        'LIVE_EXECUTOR_LOOP_INTERVAL_MS'
+    ),
+    LIVE_PERSIST_MAX_QUEUE_SIZE: parsePositiveInteger(
+        readEnv('LIVE_PERSIST_MAX_QUEUE_SIZE') || '2000',
+        'LIVE_PERSIST_MAX_QUEUE_SIZE'
+    ),
+    LIVE_PERSIST_RETRY_MS: parsePositiveInteger(
+        readEnv('LIVE_PERSIST_RETRY_MS') || '1000',
+        'LIVE_PERSIST_RETRY_MS'
+    ),
     RPC_URL: liveOnlyEnv.RPC_URL,
     USDC_CONTRACT_ADDRESS: liveOnlyEnv.USDC_CONTRACT_ADDRESS,
     POLYMARKET_RELAYER_URL: readEnv('POLYMARKET_RELAYER_URL') || DEFAULT_POLYMARKET_RELAYER_URL,
