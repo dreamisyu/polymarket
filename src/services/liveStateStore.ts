@@ -16,6 +16,11 @@ import { mergeObjectIds, mergeStringArrays, toSafeNumber } from '../utils/runtim
 
 const EPSILON = 1e-8;
 const BOOTSTRAP_POLICY_IDS = ['first-entry-ticket', 'buffer-min-top-up'];
+const SIGNAL_TICKET_POLICY_IDS = [
+    'signal-weak-ticket',
+    'signal-fixed-ticket',
+    'signal-strong-ticket',
+];
 const ACTIVE_BUY_BATCH_STATUSES = [
     'READY',
     'PROCESSING',
@@ -474,6 +479,17 @@ class LiveStateStore {
                 0
             )
         );
+    }
+
+    countSignalTickets(subject: Pick<UserActivityInterface, 'asset' | 'conditionId'>) {
+        return [...this.batchesById.values()].filter(
+            (batch) =>
+                batch.asset === subject.asset &&
+                batch.conditionId === subject.conditionId &&
+                batch.condition === 'buy' &&
+                !['SKIPPED', 'FAILED'].includes(batch.status) &&
+                hasPolicyId(batch.policyTrail, SIGNAL_TICKET_POLICY_IDS)
+        ).length;
     }
 
     markBootstrapExposure(

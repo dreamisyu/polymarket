@@ -371,21 +371,33 @@ export const ENV = {
         readEnv('SIGNAL_IGNORE_BUY_BELOW_USDC') || '0.25',
         'SIGNAL_IGNORE_BUY_BELOW_USDC'
     ),
+    SIGNAL_WEAK_SOURCE_BUY_USDC: parseNonNegativeNumber(
+        readEnv('SIGNAL_WEAK_SOURCE_BUY_USDC') || '18',
+        'SIGNAL_WEAK_SOURCE_BUY_USDC'
+    ),
+    SIGNAL_WEAK_SOURCE_BUY_COUNT: parsePositiveInteger(
+        readEnv('SIGNAL_WEAK_SOURCE_BUY_COUNT') || '12',
+        'SIGNAL_WEAK_SOURCE_BUY_COUNT'
+    ),
     SIGNAL_MIN_SOURCE_BUY_USDC: parseNonNegativeNumber(
-        readEnv('SIGNAL_MIN_SOURCE_BUY_USDC') || '30',
+        readEnv('SIGNAL_MIN_SOURCE_BUY_USDC') || '22',
         'SIGNAL_MIN_SOURCE_BUY_USDC'
     ),
     SIGNAL_MIN_SOURCE_BUY_COUNT: parsePositiveInteger(
-        readEnv('SIGNAL_MIN_SOURCE_BUY_COUNT') || '8',
+        readEnv('SIGNAL_MIN_SOURCE_BUY_COUNT') || '10',
         'SIGNAL_MIN_SOURCE_BUY_COUNT'
     ),
     SIGNAL_STRONG_SOURCE_BUY_USDC: parseNonNegativeNumber(
-        readEnv('SIGNAL_STRONG_SOURCE_BUY_USDC') || '40',
+        readEnv('SIGNAL_STRONG_SOURCE_BUY_USDC') || '34',
         'SIGNAL_STRONG_SOURCE_BUY_USDC'
     ),
     SIGNAL_STRONG_SOURCE_BUY_COUNT: parsePositiveInteger(
-        readEnv('SIGNAL_STRONG_SOURCE_BUY_COUNT') || '12',
+        readEnv('SIGNAL_STRONG_SOURCE_BUY_COUNT') || '14',
         'SIGNAL_STRONG_SOURCE_BUY_COUNT'
+    ),
+    FOLLOW_WEAK_TICKET_USDC: parseNonNegativeNumber(
+        readEnv('FOLLOW_WEAK_TICKET_USDC') || '1',
+        'FOLLOW_WEAK_TICKET_USDC'
     ),
     FOLLOW_FIXED_TICKET_USDC: parseNonNegativeNumber(
         readEnv('FOLLOW_FIXED_TICKET_USDC') || '1.5',
@@ -404,7 +416,10 @@ export const ENV = {
         'FOLLOW_MAX_ACTIVE_EXPOSURE_USDC'
     ),
     FOLLOW_MARKET_SCOPE: parseFollowMarketScope(readEnv('FOLLOW_MARKET_SCOPE'), 'all'),
-    FOLLOW_ONE_SHOT_PER_CONDITION: parseBoolean(readEnv('FOLLOW_ONE_SHOT_PER_CONDITION'), true),
+    FOLLOW_MAX_TICKETS_PER_CONDITION: parsePositiveInteger(
+        readEnv('FOLLOW_MAX_TICKETS_PER_CONDITION') || '2',
+        'FOLLOW_MAX_TICKETS_PER_CONDITION'
+    ),
     BUY_DUST_RESIDUAL_MODE: parseBuyDustResidualMode(readEnv('BUY_DUST_RESIDUAL_MODE'), 'trim'),
     MARKET_CACHE_TTL_MS: parsePositiveInteger(
         readEnv('MARKET_CACHE_TTL_MS') || '3000',

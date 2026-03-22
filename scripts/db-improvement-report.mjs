@@ -38,6 +38,15 @@ const BUY_MIN_TOP_UP_TRIGGER_USDC = Number.parseFloat(
     readEnv('BUY_MIN_TOP_UP_TRIGGER_USDC') || '0.7'
 );
 const BOOTSTRAP_POLICY_IDS = new Set(['first-entry-ticket', 'buffer-min-top-up']);
+const SIGNAL_WEAK_POLICY_IDS = new Set(['signal-weak-ticket']);
+const SIGNAL_NORMAL_POLICY_IDS = new Set(['signal-fixed-ticket']);
+const SIGNAL_STRONG_POLICY_IDS = new Set(['signal-strong-ticket']);
+const SIGNAL_TICKET_POLICY_IDS = new Set([
+    ...SIGNAL_WEAK_POLICY_IDS,
+    ...SIGNAL_NORMAL_POLICY_IDS,
+    ...SIGNAL_STRONG_POLICY_IDS,
+]);
+const SIGNAL_SECOND_TICKET_POLICY_IDS = new Set(['signal-second-ticket']);
 
 const parseArgs = (argv) => {
     const parsed = {
@@ -136,6 +145,8 @@ const getSourceTradeCount = (item) => Math.max(toSafeNumber(item?.sourceTradeCou
 const hasPolicyId = (policyTrail, policyIds) =>
     Array.isArray(policyTrail) &&
     policyTrail.some((entry) => policyIds.has(String(entry?.policyId || '').trim()));
+const buildSignalConditionOutcomeKey = (item) =>
+    `${String(item?.conditionId || '').trim()}|${String(item?.asset || '').trim()}`;
 
 const buildReasonSummary = (items, getter, top) => {
     const counts = new Map();
@@ -249,6 +260,18 @@ const summarizeBatches = (batches, top) => {
     const buyBatches = batches.filter(
         (item) => String(item.condition || '').toLowerCase() === 'buy'
     );
+    const signalBuyBatches = buyBatches.filter((item) =>
+        hasPolicyId(item.policyTrail, SIGNAL_TICKET_POLICY_IDS)
+    );
+    const signalTicketCountsByCondition = new Map();
+    for (const batch of signalBuyBatches) {
+        if (['SKIPPED', 'FAILED'].includes(String(batch.status || '').toUpperCase())) {
+            continue;
+        }
+
+        const key = buildSignalConditionOutcomeKey(batch);
+        signalTicketCountsByCondition.set(key, (signalTicketCountsByCondition.get(key) || 0) + 1);
+    }
     const buyConfirmedCount = buyBatches.filter(
         (item) => String(item.status || '').toUpperCase() === 'CONFIRMED'
     ).length;
@@ -272,6 +295,22 @@ const summarizeBatches = (batches, top) => {
         bootstrapBatchCount: buyBatches.filter((item) =>
             hasPolicyId(item.policyTrail, BOOTSTRAP_POLICY_IDS)
         ).length,
+        weakBatchCount: signalBuyBatches.filter((item) =>
+            hasPolicyId(item.policyTrail, SIGNAL_WEAK_POLICY_IDS)
+        ).length,
+        normalBatchCount: signalBuyBatches.filter((item) =>
+            hasPolicyId(item.policyTrail, SIGNAL_NORMAL_POLICY_IDS)
+        ).length,
+        strongBatchCount: signalBuyBatches.filter((item) =>
+            hasPolicyId(item.policyTrail, SIGNAL_STRONG_POLICY_IDS)
+        ).length,
+        secondTicketBatchCount: signalBuyBatches.filter((item) =>
+            hasPolicyId(item.policyTrail, SIGNAL_SECOND_TICKET_POLICY_IDS)
+        ).length,
+        maxTicketsPerConditionObserved:
+            signalTicketCountsByCondition.size > 0
+                ? Math.max(...signalTicketCountsByCondition.values())
+                : 0,
         buySlippageSkipCount: buyBatches.filter(
             (item) =>
                 String(item.status || '').toUpperCase() === 'SKIPPED' &&
@@ -554,6 +593,16 @@ const renderTextSummary = (summary) => {
     lines.push(`- 重试批次数: ${formatCount(summary.batches.retryingCount)}`);
     lines.push(`- Buy 批次参与率: ${formatPct(summary.batches.buyParticipationPct)}`);
     lines.push(`- Bootstrap 批次数: ${formatCount(summary.batches.bootstrapBatchCount)}`);
+    lines.push(
+        `- 信号批次 弱/普通/强/第二枪: ` +
+            `${formatCount(summary.batches.weakBatchCount)}/` +
+            `${formatCount(summary.batches.normalBatchCount)}/` +
+            `${formatCount(summary.batches.strongBatchCount)}/` +
+            `${formatCount(summary.batches.secondTicketBatchCount)}`
+    );
+    lines.push(
+        `- 同 condition 最大跟单次数观测值: ${formatCount(summary.batches.maxTicketsPerConditionObserved)}`
+    );
     lines.push(`- Buy 滑点跳过批次: ${formatCount(summary.batches.buySlippageSkipCount)}`);
     lines.push(
         ...renderTopItems(

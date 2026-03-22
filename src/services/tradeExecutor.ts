@@ -23,6 +23,7 @@ import {
     evaluateBufferedSignalBuy,
     evaluateDirectBuyIntent,
     evaluateSignalBuyTrade,
+    getSignalTierLabel,
     getTradeSourceUsdc,
     sortTradesAsc,
 } from '../utils/copyIntentPlanning';
@@ -69,7 +70,7 @@ const BUY_MIN_TOP_UP_TRIGGER_USDC = ENV.BUY_MIN_TOP_UP_TRIGGER_USDC;
 const BUY_BOOTSTRAP_MAX_ACTIVE_RATIO = ENV.BUY_BOOTSTRAP_MAX_ACTIVE_RATIO;
 const FOLLOW_MAX_OPEN_POSITIONS = ENV.FOLLOW_MAX_OPEN_POSITIONS;
 const FOLLOW_MAX_ACTIVE_EXPOSURE_USDC = ENV.FOLLOW_MAX_ACTIVE_EXPOSURE_USDC;
-const FOLLOW_ONE_SHOT_PER_CONDITION = ENV.FOLLOW_ONE_SHOT_PER_CONDITION;
+const FOLLOW_MAX_TICKETS_PER_CONDITION = ENV.FOLLOW_MAX_TICKETS_PER_CONDITION;
 const LOOP_INTERVAL_MS = ENV.LIVE_EXECUTOR_LOOP_INTERVAL_MS;
 const CONTEXT_TTL_MS = ENV.LIVE_STATE_REFRESH_MS;
 const LIVE_MAX_STALE_SNAPSHOT_MS = ENV.LIVE_MAX_STALE_SNAPSHOT_MS;
@@ -86,6 +87,8 @@ const SOURCE_TRADE_BUFFER_POLICY_ID = 'source-trade-merge';
 const LIVE_BUY_BUFFER_POLICY_ID = 'live-buy-intent-buffer';
 const BUFFER_MIN_TOP_UP_POLICY_ID = 'buffer-min-top-up';
 const SIGNAL_BUY_BUFFER_POLICY_ID = 'signal-buy-intent-buffer';
+const SIGNAL_SECOND_TICKET_POLICY_ID = 'signal-second-ticket';
+const SIGNAL_MAX_TICKETS_POLICY_ID = 'signal-max-tickets';
 const MERGE_EXECUTION_POLICY_ID = 'live-condition-merge';
 const PROXY_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${PROXY_WALLET}&sizeThreshold=0`;
 const logger = createLogger('live');
@@ -140,6 +143,9 @@ const formatTerminalStatus = (status: 'CONFIRMED' | 'SKIPPED' | 'FAILED') =>
 
 const buildLiveBuyBufferKey = (trade: Pick<UserActivityInterface, 'asset' | 'conditionId'>) =>
     `buy:${trade.conditionId}:${trade.asset}`;
+
+const buildSignalMaxTicketsReason = () =>
+    `已达到同 condition/outcome 最大跟单次数 ${FOLLOW_MAX_TICKETS_PER_CONDITION}`;
 
 const shouldFlushBufferBeforeAppendingTrade = (
     buffer: Pick<CopyIntentBufferInterface, 'sourceEndedAt' | 'bufferWindowMs'>,
@@ -1167,6 +1173,30 @@ class LiveTradeExecutorRuntime {
         );
     }
 
+    private getSignalTicketCountForTrade(
+        trade: Pick<UserActivityInterface, 'asset' | 'conditionId'>,
+        localPositionSize = 0
+    ) {
+        return Math.max(
+            this.stateStore.countSignalTickets(trade),
+            localPositionSize > EPSILON ? 1 : 0
+        );
+    }
+
+    private buildSecondSignalTicketTrail(nextTicketIndex: number, tierLabel: string) {
+        if (nextTicketIndex !== 2) {
+            return [];
+        }
+
+        return [
+            buildPolicyTrailEntry(
+                SIGNAL_SECOND_TICKET_POLICY_ID,
+                'ADJUST',
+                `同 condition/outcome 已进入第 ${nextTicketIndex} 枪，仅放行${tierLabel}`
+            ),
+        ];
+    }
+
     private async flushSignalBuyBuffer(
         buffer: CopyIntentBufferInterface,
         options: { skipReason?: string; extraPolicyTrail?: ExecutionPolicyTrailEntry[] } = {}
@@ -1183,16 +1213,7 @@ class LiveTradeExecutorRuntime {
             return;
         }
 
-        const signalEvaluation = evaluateBufferedSignalBuy({
-            sourceUsdcTotal: buffer.sourceUsdcTotal,
-            sourceTradeCount: buffer.sourceTradeCount,
-        });
-        const finalPolicyTrail = mergePolicyTrail(
-            buffer.policyTrail,
-            options.extraPolicyTrail,
-            signalEvaluation.policyTrail
-        );
-
+        let finalPolicyTrail = mergePolicyTrail(buffer.policyTrail, options.extraPolicyTrail);
         const finalizeSignalSkip = (reason: string) => {
             this.stateStore.closeBuffer(buffer._id, 'SKIPPED', reason);
             buffer.state = 'SKIPPED';
@@ -1209,13 +1230,6 @@ class LiveTradeExecutorRuntime {
             logger.debug(`${buffer.bufferKey} 已放弃 live 信号缓冲 reason=${reason}`);
         };
 
-        if (signalEvaluation.status === 'SKIP') {
-            finalizeSignalSkip(
-                options.skipReason || mergeReasons(buffer.reason, signalEvaluation.reason)
-            );
-            return;
-        }
-
         const context = await this.refreshTradingContext(true);
         if (context.availableBalance === null) {
             finalizeSignalSkip(options.skipReason || '代理钱包可用余额接口不可用');
@@ -1224,14 +1238,28 @@ class LiveTradeExecutorRuntime {
 
         const existingPosition = findPositionForTrade(context.positions, latestTrade);
         const localPositionSize = Math.max(toSafeNumber(existingPosition?.size), 0);
-        const activeBuyBatch = this.stateStore.getActiveBuyBatch(latestTrade);
-        if (
-            FOLLOW_ONE_SHOT_PER_CONDITION &&
-            (localPositionSize > EPSILON || activeBuyBatch !== null)
-        ) {
+        const signalTicketCount = this.getSignalTicketCountForTrade(latestTrade, localPositionSize);
+        const signalEvaluation = evaluateBufferedSignalBuy({
+            sourceUsdcTotal: buffer.sourceUsdcTotal,
+            sourceTradeCount: buffer.sourceTradeCount,
+            existingTicketCount: signalTicketCount,
+            maxTicketsPerCondition: FOLLOW_MAX_TICKETS_PER_CONDITION,
+        });
+        finalPolicyTrail = mergePolicyTrail(
+            buffer.policyTrail,
+            options.extraPolicyTrail,
+            signalEvaluation.policyTrail,
+            signalEvaluation.status === 'EXECUTE'
+                ? this.buildSecondSignalTicketTrail(
+                      signalEvaluation.nextTicketIndex,
+                      getSignalTierLabel(signalEvaluation.tier)
+                  )
+                : []
+        );
+
+        if (signalEvaluation.status === 'SKIP') {
             finalizeSignalSkip(
-                options.skipReason ||
-                    `同 condition/outcome 已存在本地仓位或待执行批次，固定票据策略仅跟首笔`
+                options.skipReason || mergeReasons(buffer.reason, signalEvaluation.reason)
             );
             return;
         }
@@ -1386,8 +1414,15 @@ class LiveTradeExecutorRuntime {
         sourceUsdc: number;
         reason?: string;
         policyTrail?: ExecutionPolicyTrailEntry[];
+        existingTicketCount?: number;
     }) {
-        const { trade, sourceUsdc, reason = '', policyTrail = [] } = params;
+        const {
+            trade,
+            sourceUsdc,
+            reason = '',
+            policyTrail = [],
+            existingTicketCount = 0,
+        } = params;
         const normalizedSourceUsdc = Math.max(toSafeNumber(sourceUsdc), 0);
         if (normalizedSourceUsdc <= 0) {
             return;
@@ -1414,6 +1449,8 @@ class LiveTradeExecutorRuntime {
         const signalEvaluation = evaluateBufferedSignalBuy({
             sourceUsdcTotal: nextSourceUsdc,
             sourceTradeCount: nextSourceTradeCount,
+            existingTicketCount,
+            maxTicketsPerCondition: FOLLOW_MAX_TICKETS_PER_CONDITION,
         });
         const flushImmediately = signalEvaluation.status === 'EXECUTE';
         const nextFlushAt = flushImmediately ? Date.now() : Date.now() + SIGNAL_BUFFER_MS;
@@ -1554,23 +1591,18 @@ class LiveTradeExecutorRuntime {
                             continue;
                         }
 
+                        const signalTicketCount = this.getSignalTicketCountForTrade(
+                            trade,
+                            Math.max(toSafeNumber(existingPosition?.size), 0)
+                        );
                         if (
-                            FOLLOW_ONE_SHOT_PER_CONDITION &&
                             latestBuffer === null &&
-                            (hasLocalExposure || activeBuyBatch !== null)
+                            signalTicketCount >= FOLLOW_MAX_TICKETS_PER_CONDITION
                         ) {
-                            this.finalizeTradeState(
-                                state,
-                                'SKIPPED',
-                                '同 condition/outcome 已存在本地仓位或待执行批次，固定票据策略仅跟首笔',
-                                [
-                                    buildPolicyTrailEntry(
-                                        'signal-one-shot',
-                                        'SKIP',
-                                        '同 condition/outcome 已存在本地仓位或待执行批次，固定票据策略仅跟首笔'
-                                    ),
-                                ]
-                            );
+                            const reason = buildSignalMaxTicketsReason();
+                            this.finalizeTradeState(state, 'SKIPPED', reason, [
+                                buildPolicyTrailEntry(SIGNAL_MAX_TICKETS_POLICY_ID, 'SKIP', reason),
+                            ]);
                             continue;
                         }
 
@@ -1579,6 +1611,7 @@ class LiveTradeExecutorRuntime {
                             sourceUsdc: signalTradeEvaluation.sourceUsdc,
                             reason: signalTradeEvaluation.reason,
                             policyTrail: signalTradeEvaluation.policyTrail,
+                            existingTicketCount: signalTicketCount,
                         });
                         logger.debug(
                             `${formatTradeRef(trade)} 已写入实盘信号缓冲 sourceUsdc=${formatAmount(signalTradeEvaluation.sourceUsdc)}`

@@ -25,6 +25,7 @@ import {
     evaluateBufferedSignalBuy,
     evaluateDirectBuyIntent,
     evaluateSignalBuyTrade,
+    getSignalTierLabel,
     getTradeSourceUsdc,
     sortTradesAsc,
 } from '../utils/copyIntentPlanning';
@@ -88,10 +89,17 @@ const BUY_MIN_TOP_UP_TRIGGER_USDC = ENV.BUY_MIN_TOP_UP_TRIGGER_USDC;
 const BUY_BOOTSTRAP_MAX_ACTIVE_RATIO = ENV.BUY_BOOTSTRAP_MAX_ACTIVE_RATIO;
 const FOLLOW_MAX_OPEN_POSITIONS = ENV.FOLLOW_MAX_OPEN_POSITIONS;
 const FOLLOW_MAX_ACTIVE_EXPOSURE_USDC = ENV.FOLLOW_MAX_ACTIVE_EXPOSURE_USDC;
-const FOLLOW_ONE_SHOT_PER_CONDITION = ENV.FOLLOW_ONE_SHOT_PER_CONDITION;
+const FOLLOW_MAX_TICKETS_PER_CONDITION = ENV.FOLLOW_MAX_TICKETS_PER_CONDITION;
 const MIN_MARKET_BUY_USDC = 1;
 const TRACE_BUY_BUFFER_POLICY_ID = 'trace-buy-intent-buffer';
 const TRACE_SIGNAL_BUFFER_POLICY_ID = 'trace-signal-buy-intent-buffer';
+const SIGNAL_SECOND_TICKET_POLICY_ID = 'signal-second-ticket';
+const SIGNAL_MAX_TICKETS_POLICY_ID = 'signal-max-tickets';
+const SIGNAL_TICKET_POLICY_IDS = [
+    'signal-weak-ticket',
+    'signal-fixed-ticket',
+    'signal-strong-ticket',
+];
 const FIRST_ENTRY_TICKET_POLICY_ID = 'first-entry-ticket';
 const BUFFER_MIN_TOP_UP_POLICY_ID = 'buffer-min-top-up';
 const BOOTSTRAP_POLICY_IDS = [FIRST_ENTRY_TICKET_POLICY_ID, BUFFER_MIN_TOP_UP_POLICY_ID];
@@ -1909,6 +1917,9 @@ const readReadyBatches = async () =>
 const buildTraceBuyBufferKey = (trade: Pick<UserActivityInterface, 'asset' | 'conditionId'>) =>
     `buy:${trade.conditionId}:${trade.asset}`;
 
+const buildSignalMaxTicketsReason = () =>
+    `已达到同 condition/outcome 最大跟单次数 ${FOLLOW_MAX_TICKETS_PER_CONDITION}`;
+
 const loadReservedTraceBuyExposure = async () => {
     const [openBuffers, openBatches] = await Promise.all([
         TraceIntentBuffer.find(
@@ -2026,6 +2037,17 @@ const loadActiveBuyBatchForTrade = async (
     })
         .sort({ sourceEndedAt: -1, createdAt: -1 })
         .exec()) as CopyExecutionBatchInterface | null;
+
+const loadSignalTicketCountForTrade = async (
+    trade: Pick<UserActivityInterface, 'asset' | 'conditionId'>
+) =>
+    TraceExecutionBatch.countDocuments({
+        asset: trade.asset,
+        conditionId: trade.conditionId,
+        condition: 'buy',
+        status: { $nin: ['SKIPPED', 'FAILED'] },
+        'policyTrail.policyId': { $in: SIGNAL_TICKET_POLICY_IDS },
+    }).exec();
 
 const shouldFlushBufferBeforeAppendingTrade = (
     buffer: Pick<CopyIntentBufferInterface, 'sourceEndedAt' | 'bufferWindowMs'>,
@@ -2565,15 +2587,7 @@ const flushTraceSignalBuyBuffer = async (
 ) => {
     const trades = await loadTradesByIds(buffer.sourceTradeIds);
     const latestTrade = sortTradesAsc(trades).slice(-1)[0];
-    const signalEvaluation = evaluateBufferedSignalBuy({
-        sourceUsdcTotal: buffer.sourceUsdcTotal,
-        sourceTradeCount: buffer.sourceTradeCount,
-    });
-    const policyTrail = mergePolicyTrail(
-        buffer.policyTrail,
-        options.extraPolicyTrail,
-        signalEvaluation.policyTrail
-    );
+    let policyTrail = mergePolicyTrail(buffer.policyTrail, options.extraPolicyTrail);
 
     if (trades.length === 0 || !latestTrade) {
         await finalizeSkippedBuffer(
@@ -2584,6 +2598,38 @@ const flushTraceSignalBuyBuffer = async (
         );
         return;
     }
+
+    const portfolio = await ensurePortfolio();
+    const [existingPosition, reservedBuyExposure, openPositionsCount] = await Promise.all([
+        loadExistingPosition(latestTrade),
+        loadReservedTraceBuyExposure(),
+        countOpenTracePositions(),
+    ]);
+    const localPositionSize = Math.max(toSafeNumber(existingPosition.size), 0);
+    const signalTicketCount = Math.max(
+        await loadSignalTicketCountForTrade(latestTrade),
+        localPositionSize > EPSILON ? 1 : 0
+    );
+    const signalEvaluation = evaluateBufferedSignalBuy({
+        sourceUsdcTotal: buffer.sourceUsdcTotal,
+        sourceTradeCount: buffer.sourceTradeCount,
+        existingTicketCount: signalTicketCount,
+        maxTicketsPerCondition: FOLLOW_MAX_TICKETS_PER_CONDITION,
+    });
+    policyTrail = mergePolicyTrail(
+        buffer.policyTrail,
+        options.extraPolicyTrail,
+        signalEvaluation.policyTrail,
+        signalEvaluation.status === 'EXECUTE' && signalEvaluation.nextTicketIndex === 2
+            ? [
+                  buildPolicyTrailEntry(
+                      SIGNAL_SECOND_TICKET_POLICY_ID,
+                      'ADJUST',
+                      `同 condition/outcome 已进入第 ${signalEvaluation.nextTicketIndex} 枪，仅放行${getSignalTierLabel(signalEvaluation.tier)}`
+                  ),
+              ]
+            : []
+    );
 
     if (signalEvaluation.status === 'SKIP') {
         await finalizeSkippedBuffer(
@@ -2598,33 +2644,7 @@ const flushTraceSignalBuyBuffer = async (
         return;
     }
 
-    const portfolio = await ensurePortfolio();
-    const [existingPosition, activeBuyBatch, reservedBuyExposure, openPositionsCount] =
-        await Promise.all([
-            loadExistingPosition(latestTrade),
-            loadActiveBuyBatchForTrade(latestTrade),
-            loadReservedTraceBuyExposure(),
-            countOpenTracePositions(),
-        ]);
-
-    if (
-        FOLLOW_ONE_SHOT_PER_CONDITION &&
-        (Math.max(toSafeNumber(existingPosition.size), 0) > EPSILON || activeBuyBatch !== null)
-    ) {
-        await finalizeSkippedBuffer(
-            buffer,
-            trades,
-            options.skipReason ||
-                '同 condition/outcome 已存在本地仓位或待执行批次，固定票据策略仅跟首笔',
-            policyTrail
-        );
-        return;
-    }
-
-    if (
-        Math.max(toSafeNumber(existingPosition.size), 0) <= EPSILON &&
-        openPositionsCount >= FOLLOW_MAX_OPEN_POSITIONS
-    ) {
+    if (localPositionSize <= EPSILON && openPositionsCount >= FOLLOW_MAX_OPEN_POSITIONS) {
         await finalizeSkippedBuffer(
             buffer,
             trades,
@@ -2836,8 +2856,9 @@ const bufferTraceSignalBuyIntent = async (params: {
     sourceUsdc: number;
     reason?: string;
     policyTrail?: ExecutionPolicyTrailEntry[];
+    existingTicketCount?: number;
 }) => {
-    const { trade, sourceUsdc, reason = '', policyTrail = [] } = params;
+    const { trade, sourceUsdc, reason = '', policyTrail = [], existingTicketCount = 0 } = params;
     const normalizedSourceUsdc = Math.max(toSafeNumber(sourceUsdc), 0);
     if (normalizedSourceUsdc <= 0) {
         return;
@@ -2864,6 +2885,8 @@ const bufferTraceSignalBuyIntent = async (params: {
     const signalEvaluation = evaluateBufferedSignalBuy({
         sourceUsdcTotal: nextSourceUsdc,
         sourceTradeCount: nextSourceTradeCount,
+        existingTicketCount,
+        maxTicketsPerCondition: FOLLOW_MAX_TICKETS_PER_CONDITION,
     });
     const flushImmediately = signalEvaluation.status === 'EXECUTE';
     const nextFlushAt = flushImmediately ? Date.now() : Date.now() + SIGNAL_BUFFER_MS;
@@ -3350,19 +3373,20 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
                     continue;
                 }
 
-                if (
-                    FOLLOW_ONE_SHOT_PER_CONDITION &&
-                    openBuffer === null &&
-                    (hasLocalExposure || activeBuyBatch !== null)
-                ) {
-                    const reason =
-                        '同 condition/outcome 已存在本地仓位或待执行批次，固定票据策略仅跟首笔';
+                const signalTicketCount = Math.max(
+                    await loadSignalTicketCountForTrade(trade),
+                    hasLocalExposure ? 1 : 0
+                );
+                if (openBuffer === null && signalTicketCount >= FOLLOW_MAX_TICKETS_PER_CONDITION) {
+                    const reason = buildSignalMaxTicketsReason();
                     await recordSkippedDirectTrade({
                         trade,
                         reason,
                         requestedUsdc: signalTradeEvaluation.sourceUsdc,
                         sourcePrice: Math.max(toSafeNumber(trade.price), 0),
-                        policyTrail: [buildPolicyTrailEntry('signal-one-shot', 'SKIP', reason)],
+                        policyTrail: [
+                            buildPolicyTrailEntry(SIGNAL_MAX_TICKETS_POLICY_ID, 'SKIP', reason),
+                        ],
                         condition: 'buy',
                     });
                     logger.debug(`${formatTradeRef(trade)} 已跳过模拟信号买单 reason=${reason}`);
@@ -3374,6 +3398,7 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
                     sourceUsdc: signalTradeEvaluation.sourceUsdc,
                     reason: signalTradeEvaluation.reason,
                     policyTrail: signalTradeEvaluation.policyTrail,
+                    existingTicketCount: signalTicketCount,
                 });
                 logger.debug(
                     `${formatTradeRef(trade)} 已写入模拟信号缓冲 sourceUsdc=${formatAmount(signalTradeEvaluation.sourceUsdc)}`

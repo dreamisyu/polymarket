@@ -15,14 +15,38 @@ const BUY_FIRST_ENTRY_SIGNAL_MIN_USDC = ENV.BUY_FIRST_ENTRY_SIGNAL_MIN_USDC;
 const BUY_FIRST_ENTRY_TICKET_ALLOWED_BY_ORDER_CAP =
     ENV.MAX_ORDER_USDC <= 0 || ENV.MAX_ORDER_USDC >= BUY_FIRST_ENTRY_TICKET_USDC;
 const SIGNAL_IGNORE_BUY_BELOW_USDC = ENV.SIGNAL_IGNORE_BUY_BELOW_USDC;
+const SIGNAL_WEAK_SOURCE_BUY_USDC = ENV.SIGNAL_WEAK_SOURCE_BUY_USDC;
+const SIGNAL_WEAK_SOURCE_BUY_COUNT = ENV.SIGNAL_WEAK_SOURCE_BUY_COUNT;
 const SIGNAL_MIN_SOURCE_BUY_USDC = ENV.SIGNAL_MIN_SOURCE_BUY_USDC;
 const SIGNAL_MIN_SOURCE_BUY_COUNT = ENV.SIGNAL_MIN_SOURCE_BUY_COUNT;
 const SIGNAL_STRONG_SOURCE_BUY_USDC = ENV.SIGNAL_STRONG_SOURCE_BUY_USDC;
 const SIGNAL_STRONG_SOURCE_BUY_COUNT = ENV.SIGNAL_STRONG_SOURCE_BUY_COUNT;
+const FOLLOW_WEAK_TICKET_USDC = ENV.FOLLOW_WEAK_TICKET_USDC;
 const FOLLOW_FIXED_TICKET_USDC = ENV.FOLLOW_FIXED_TICKET_USDC;
 const FOLLOW_STRONG_TICKET_USDC = ENV.FOLLOW_STRONG_TICKET_USDC;
+const FOLLOW_MAX_TICKETS_PER_CONDITION = ENV.FOLLOW_MAX_TICKETS_PER_CONDITION;
 const FOLLOW_MARKET_SCOPE = ENV.FOLLOW_MARKET_SCOPE;
 const EPSILON = 1e-8;
+
+export type SignalBuyTier = '' | 'weak' | 'normal' | 'strong';
+
+const SIGNAL_TIER_POLICY_ID_BY_TIER: Record<Exclude<SignalBuyTier, ''>, string> = {
+    weak: 'signal-weak-ticket',
+    normal: 'signal-fixed-ticket',
+    strong: 'signal-strong-ticket',
+};
+
+const SIGNAL_TIER_LABEL_BY_TIER: Record<Exclude<SignalBuyTier, ''>, string> = {
+    weak: '弱信号',
+    normal: '普通信号',
+    strong: '强信号',
+};
+
+const SIGNAL_TICKET_USDC_BY_TIER: Record<Exclude<SignalBuyTier, ''>, number> = {
+    weak: FOLLOW_WEAK_TICKET_USDC,
+    normal: FOLLOW_FIXED_TICKET_USDC,
+    strong: FOLLOW_STRONG_TICKET_USDC,
+};
 
 export interface DirectBuyIntentEvaluation {
     status: 'EXECUTE' | 'SKIP';
@@ -44,7 +68,8 @@ export interface SignalBufferedBuyEvaluation {
     requestedUsdc: number;
     sourceUsdcTotal: number;
     sourceTradeCount: number;
-    tier: '' | 'normal' | 'strong';
+    tier: SignalBuyTier;
+    nextTicketIndex: number;
     reason: string;
     policyTrail: ExecutionPolicyTrailEntry[];
 }
@@ -94,6 +119,76 @@ const isFiveMinuteUpdownTitle = (normalizedTitle: string) => {
             ? endMinutes - startMinutes
             : endMinutes + 24 * 60 - startMinutes;
     return diff === 5;
+};
+
+export const isTradeWithinSignalMarketScope = (
+    trade: Pick<UserActivityInterface, 'title' | 'slug' | 'eventSlug'>
+) => {
+    if (FOLLOW_MARKET_SCOPE !== 'crypto_updown_5m') {
+        return true;
+    }
+
+    const normalizedSlug = String(trade.slug || trade.eventSlug || '')
+        .trim()
+        .toLowerCase();
+    const normalizedTitle = String(trade.title || '')
+        .trim()
+        .toLowerCase();
+    const titleFallbackMatched =
+        !normalizedSlug &&
+        (normalizedTitle.includes('bitcoin up or down') ||
+            normalizedTitle.includes('ethereum up or down')) &&
+        isFiveMinuteUpdownTitle(normalizedTitle);
+
+    return (
+        normalizedSlug.includes('btc-updown-5m') ||
+        normalizedSlug.includes('eth-updown-5m') ||
+        titleFallbackMatched
+    );
+};
+
+export const getSignalMarketScopeSkipReason = () =>
+    '当前固定票据策略仅跟 BTC/ETH 5min up/down 市场';
+
+export const getSignalTierPolicyId = (tier: Exclude<SignalBuyTier, ''>) =>
+    SIGNAL_TIER_POLICY_ID_BY_TIER[tier];
+
+export const getSignalTierLabel = (tier: SignalBuyTier) =>
+    tier ? SIGNAL_TIER_LABEL_BY_TIER[tier] : '';
+
+export const getSignalTicketUsdc = (tier: Exclude<SignalBuyTier, ''>) =>
+    SIGNAL_TICKET_USDC_BY_TIER[tier];
+
+const getTriggeredSignalTier = (
+    sourceUsdcTotal: number,
+    sourceTradeCount: number,
+    ticketCountBefore: number
+): SignalBuyTier => {
+    const allowWeakTier = ticketCountBefore <= 0;
+    const triggeredStrongSignal =
+        sourceUsdcTotal >= SIGNAL_STRONG_SOURCE_BUY_USDC &&
+        sourceTradeCount >= SIGNAL_STRONG_SOURCE_BUY_COUNT;
+    const triggeredBaseSignal =
+        sourceUsdcTotal >= SIGNAL_MIN_SOURCE_BUY_USDC &&
+        sourceTradeCount >= SIGNAL_MIN_SOURCE_BUY_COUNT;
+    const triggeredWeakSignal =
+        allowWeakTier &&
+        sourceUsdcTotal >= SIGNAL_WEAK_SOURCE_BUY_USDC &&
+        sourceTradeCount >= SIGNAL_WEAK_SOURCE_BUY_COUNT;
+
+    if (triggeredStrongSignal) {
+        return 'strong';
+    }
+
+    if (triggeredBaseSignal) {
+        return 'normal';
+    }
+
+    if (triggeredWeakSignal) {
+        return 'weak';
+    }
+
+    return '';
 };
 
 const clampSignalTicketToOrderCap = (
@@ -200,37 +295,14 @@ export const evaluateSignalBuyTrade = (
         'usdcSize' | 'size' | 'price' | 'title' | 'slug' | 'eventSlug'
     >
 ): SignalBuyTradeEvaluation => {
-    const normalizedSlug = String(trade.slug || trade.eventSlug || '')
-        .trim()
-        .toLowerCase();
-    const normalizedTitle = String(trade.title || '')
-        .trim()
-        .toLowerCase();
-
-    if (FOLLOW_MARKET_SCOPE === 'crypto_updown_5m') {
-        const titleFallbackMatched =
-            !normalizedSlug &&
-            (normalizedTitle.includes('bitcoin up or down') ||
-                normalizedTitle.includes('ethereum up or down')) &&
-            isFiveMinuteUpdownTitle(normalizedTitle);
-        const isCrypto5mUpdown =
-            normalizedSlug.includes('btc-updown-5m') ||
-            normalizedSlug.includes('eth-updown-5m') ||
-            titleFallbackMatched;
-        if (!isCrypto5mUpdown) {
-            return {
-                status: 'SKIP',
-                sourceUsdc: getTradeSourceUsdc(trade),
-                reason: '当前固定票据策略仅跟 BTC/ETH 5min up/down 市场',
-                policyTrail: [
-                    buildTrailEntry(
-                        'signal-market-scope',
-                        'SKIP',
-                        '当前固定票据策略仅跟 BTC/ETH 5min up/down 市场'
-                    ),
-                ],
-            };
-        }
+    if (!isTradeWithinSignalMarketScope(trade)) {
+        const reason = getSignalMarketScopeSkipReason();
+        return {
+            status: 'SKIP',
+            sourceUsdc: getTradeSourceUsdc(trade),
+            reason,
+            policyTrail: [buildTrailEntry('signal-market-scope', 'SKIP', reason)],
+        };
     }
 
     const sourceUsdc = getTradeSourceUsdc(trade);
@@ -260,29 +332,59 @@ export const evaluateSignalBuyTrade = (
 export const evaluateBufferedSignalBuy = (params: {
     sourceUsdcTotal: number;
     sourceTradeCount: number;
+    existingTicketCount?: number;
+    maxTicketsPerCondition?: number;
 }): SignalBufferedBuyEvaluation => {
     const sourceUsdcTotal = Math.max(toSafeNumber(params.sourceUsdcTotal), 0);
     const sourceTradeCount = Math.max(Math.trunc(toSafeNumber(params.sourceTradeCount)), 0);
-    const triggeredStrongSignal =
-        sourceUsdcTotal >= SIGNAL_STRONG_SOURCE_BUY_USDC &&
-        sourceTradeCount >= SIGNAL_STRONG_SOURCE_BUY_COUNT;
-    const triggeredBaseSignal =
-        sourceUsdcTotal >= SIGNAL_MIN_SOURCE_BUY_USDC &&
-        sourceTradeCount >= SIGNAL_MIN_SOURCE_BUY_COUNT;
+    const existingTicketCount = Math.max(Math.trunc(toSafeNumber(params.existingTicketCount)), 0);
+    const maxTicketsPerCondition = Math.max(
+        Math.trunc(toSafeNumber(params.maxTicketsPerCondition, FOLLOW_MAX_TICKETS_PER_CONDITION)),
+        1
+    );
 
-    if (!triggeredStrongSignal && !triggeredBaseSignal) {
+    if (existingTicketCount >= maxTicketsPerCondition) {
         return {
             status: 'SKIP',
             requestedUsdc: 0,
             sourceUsdcTotal,
             sourceTradeCount,
             tier: '',
-            reason:
-                `累计源买单 ${sourceUsdcTotal.toFixed(4)} USDC / ${sourceTradeCount} 笔，` +
-                `未达到 ${SIGNAL_MIN_SOURCE_BUY_USDC.toFixed(4)} USDC / ${SIGNAL_MIN_SOURCE_BUY_COUNT} 笔触发阈值`,
+            nextTicketIndex: existingTicketCount + 1,
+            reason: `已达到同 condition/outcome 最大跟单次数 ${maxTicketsPerCondition}`,
             policyTrail: [
                 buildTrailEntry(
-                    'signal-fixed-ticket',
+                    'signal-max-tickets',
+                    'SKIP',
+                    `已达到同 condition/outcome 最大跟单次数 ${maxTicketsPerCondition}`
+                ),
+            ],
+        };
+    }
+
+    const tier = getTriggeredSignalTier(sourceUsdcTotal, sourceTradeCount, existingTicketCount);
+    const nextTicketIndex = existingTicketCount + 1;
+    if (!tier) {
+        const weakThresholdText =
+            existingTicketCount <= 0
+                ? `、${SIGNAL_WEAK_SOURCE_BUY_USDC.toFixed(4)} USDC / ${SIGNAL_WEAK_SOURCE_BUY_COUNT} 笔`
+                : '';
+        return {
+            status: 'SKIP',
+            requestedUsdc: 0,
+            sourceUsdcTotal,
+            sourceTradeCount,
+            tier: '',
+            nextTicketIndex,
+            reason:
+                `累计源买单 ${sourceUsdcTotal.toFixed(4)} USDC / ${sourceTradeCount} 笔，` +
+                `未达到触发阈值（第 ${nextTicketIndex} 枪需满足` +
+                `${SIGNAL_MIN_SOURCE_BUY_USDC.toFixed(4)} USDC / ${SIGNAL_MIN_SOURCE_BUY_COUNT} 笔` +
+                `或 ${SIGNAL_STRONG_SOURCE_BUY_USDC.toFixed(4)} USDC / ${SIGNAL_STRONG_SOURCE_BUY_COUNT} 笔` +
+                `${weakThresholdText}）`,
+            policyTrail: [
+                buildTrailEntry(
+                    'signal-tier-threshold',
                     'SKIP',
                     `累计源买单 ${sourceUsdcTotal.toFixed(4)} USDC / ${sourceTradeCount} 笔，未达到触发阈值`
                 ),
@@ -290,13 +392,11 @@ export const evaluateBufferedSignalBuy = (params: {
         };
     }
 
-    const tier = triggeredStrongSignal ? 'strong' : 'normal';
-    const desiredTicketUsdc = triggeredStrongSignal
-        ? FOLLOW_STRONG_TICKET_USDC
-        : FOLLOW_FIXED_TICKET_USDC;
-    const triggerReason = triggeredStrongSignal
-        ? `累计源买单 ${sourceUsdcTotal.toFixed(4)} USDC / ${sourceTradeCount} 笔，已触发强信号固定票据 ${desiredTicketUsdc.toFixed(4)} USDC`
-        : `累计源买单 ${sourceUsdcTotal.toFixed(4)} USDC / ${sourceTradeCount} 笔，已触发固定票据 ${desiredTicketUsdc.toFixed(4)} USDC`;
+    const desiredTicketUsdc = getSignalTicketUsdc(tier);
+    const tierLabel = getSignalTierLabel(tier);
+    const triggerReason =
+        `累计源买单 ${sourceUsdcTotal.toFixed(4)} USDC / ${sourceTradeCount} 笔，` +
+        `已触发第 ${nextTicketIndex} 枪${tierLabel}固定票据 ${desiredTicketUsdc.toFixed(4)} USDC`;
     const capped = clampSignalTicketToOrderCap(desiredTicketUsdc);
 
     if (capped.status === 'SKIP') {
@@ -306,13 +406,10 @@ export const evaluateBufferedSignalBuy = (params: {
             sourceUsdcTotal,
             sourceTradeCount,
             tier,
+            nextTicketIndex,
             reason: dedupeReasons(triggerReason, capped.reason),
             policyTrail: [
-                buildTrailEntry(
-                    triggeredStrongSignal ? 'signal-strong-ticket' : 'signal-fixed-ticket',
-                    'SKIP',
-                    triggerReason
-                ),
+                buildTrailEntry(getSignalTierPolicyId(tier), 'SKIP', triggerReason),
                 ...capped.policyTrail,
             ],
         };
@@ -324,13 +421,10 @@ export const evaluateBufferedSignalBuy = (params: {
         sourceUsdcTotal,
         sourceTradeCount,
         tier,
+        nextTicketIndex,
         reason: dedupeReasons(triggerReason, capped.reason),
         policyTrail: [
-            buildTrailEntry(
-                triggeredStrongSignal ? 'signal-strong-ticket' : 'signal-fixed-ticket',
-                'ADJUST',
-                triggerReason
-            ),
+            buildTrailEntry(getSignalTierPolicyId(tier), 'ADJUST', triggerReason),
             ...capped.policyTrail,
         ],
     };

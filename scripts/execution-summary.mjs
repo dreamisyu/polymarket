@@ -22,6 +22,15 @@ const BUY_MIN_TOP_UP_TRIGGER_USDC = Number.parseFloat(
     process.env.BUY_MIN_TOP_UP_TRIGGER_USDC || '0.7'
 );
 const BOOTSTRAP_POLICY_IDS = new Set(['first-entry-ticket', 'buffer-min-top-up']);
+const SIGNAL_WEAK_POLICY_IDS = new Set(['signal-weak-ticket']);
+const SIGNAL_NORMAL_POLICY_IDS = new Set(['signal-fixed-ticket']);
+const SIGNAL_STRONG_POLICY_IDS = new Set(['signal-strong-ticket']);
+const SIGNAL_TICKET_POLICY_IDS = new Set([
+    ...SIGNAL_WEAK_POLICY_IDS,
+    ...SIGNAL_NORMAL_POLICY_IDS,
+    ...SIGNAL_STRONG_POLICY_IDS,
+]);
+const SIGNAL_SECOND_TICKET_POLICY_IDS = new Set(['signal-second-ticket']);
 const DEFAULT_MODE = process.env.EXECUTION_MODE === 'trace' ? 'trace' : 'live';
 
 const parseArgs = (argv) => {
@@ -124,6 +133,8 @@ const getSourceTradeCount = (item, fieldName = 'sourceTradeIds') => {
 
     return Array.isArray(item?.[fieldName]) ? item[fieldName].length : 0;
 };
+const buildSignalConditionOutcomeKey = (item) =>
+    `${String(item?.conditionId || '').trim()}|${String(item?.asset || '').trim()}`;
 const getBatchTimestamp = (batch) =>
     toSafeNumber(
         batch?.completedAt ||
@@ -343,6 +354,18 @@ const summarizeExecutionBatches = (batches) => {
         (batch) => normalizeStatus(batch.status) === 'CONFIRMED'
     );
     const buyBatches = batches.filter((batch) => normalizeCondition(batch.condition) === 'buy');
+    const signalBuyBatches = buyBatches.filter((batch) =>
+        hasPolicyId(batch.policyTrail, SIGNAL_TICKET_POLICY_IDS)
+    );
+    const signalTicketCountsByCondition = new Map();
+    for (const batch of signalBuyBatches) {
+        if (['SKIPPED', 'FAILED'].includes(normalizeStatus(batch.status))) {
+            continue;
+        }
+
+        const key = buildSignalConditionOutcomeKey(batch);
+        signalTicketCountsByCondition.set(key, (signalTicketCountsByCondition.get(key) || 0) + 1);
+    }
     const buyConfirmedCount = countItems(
         buyBatches,
         (batch) => normalizeStatus(batch.status) === 'CONFIRMED'
@@ -390,6 +413,22 @@ const summarizeExecutionBatches = (batches) => {
         bootstrapBatchCount: countItems(batches, (batch) =>
             hasPolicyId(batch.policyTrail, BOOTSTRAP_POLICY_IDS)
         ),
+        weakBatchCount: countItems(signalBuyBatches, (batch) =>
+            hasPolicyId(batch.policyTrail, SIGNAL_WEAK_POLICY_IDS)
+        ),
+        normalBatchCount: countItems(signalBuyBatches, (batch) =>
+            hasPolicyId(batch.policyTrail, SIGNAL_NORMAL_POLICY_IDS)
+        ),
+        strongBatchCount: countItems(signalBuyBatches, (batch) =>
+            hasPolicyId(batch.policyTrail, SIGNAL_STRONG_POLICY_IDS)
+        ),
+        secondTicketBatchCount: countItems(signalBuyBatches, (batch) =>
+            hasPolicyId(batch.policyTrail, SIGNAL_SECOND_TICKET_POLICY_IDS)
+        ),
+        maxTicketsPerConditionObserved:
+            signalTicketCountsByCondition.size > 0
+                ? Math.max(...signalTicketCountsByCondition.values())
+                : 0,
         buySlippageSkipCount: countItems(
             buyBatches,
             (batch) =>
@@ -765,6 +804,16 @@ const printHumanReadable = (summary) => {
         lines.push(`- 批次覆盖源交易数: ${toSafeNumber(summary.batchSummary.sourceTradeCount)}`);
         lines.push(`- Buy 批次参与率: ${formatPct(summary.batchSummary.buyParticipationPct)}`);
         lines.push(`- Bootstrap 批次数: ${toSafeNumber(summary.batchSummary.bootstrapBatchCount)}`);
+        lines.push(
+            `- 信号批次 弱/普通/强/第二枪: ` +
+                `${toSafeNumber(summary.batchSummary.weakBatchCount)}/` +
+                `${toSafeNumber(summary.batchSummary.normalBatchCount)}/` +
+                `${toSafeNumber(summary.batchSummary.strongBatchCount)}/` +
+                `${toSafeNumber(summary.batchSummary.secondTicketBatchCount)}`
+        );
+        lines.push(
+            `- 同 condition 最大跟单次数观测值: ${toSafeNumber(summary.batchSummary.maxTicketsPerConditionObserved)}`
+        );
         lines.push(
             `- Buy 滑点跳过批次: ${toSafeNumber(summary.batchSummary.buySlippageSkipCount)}`
         );

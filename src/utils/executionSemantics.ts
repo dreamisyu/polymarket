@@ -1,6 +1,7 @@
 import { ENV } from '../config/env';
 import { ExecutionIntent } from '../interfaces/User';
 import { UserActivityInterface } from '../interfaces/User';
+import { isTradeWithinSignalMarketScope } from './copyIntentPlanning';
 import { toSafeNumber } from './runtime';
 
 export type SnapshotValidationMode = 'trace' | 'live';
@@ -14,7 +15,7 @@ export const resolveTradeAction = (trade: Pick<UserActivityInterface, 'side' | '
         .toUpperCase();
 
 export const resolveExecutionIntent = (
-    trade: Pick<UserActivityInterface, 'type'>,
+    trade: Pick<UserActivityInterface, 'type' | 'side' | 'title' | 'slug' | 'eventSlug'>,
     mode: SnapshotValidationMode = ENV.EXECUTION_MODE
 ): ExecutionIntent => {
     const type = String(trade.type || '')
@@ -22,7 +23,21 @@ export const resolveExecutionIntent = (
         .toUpperCase();
     const executableTypes =
         mode === 'trace' ? TRACE_EXECUTION_ACTIVITY_TYPES : LIVE_EXECUTION_ACTIVITY_TYPES;
-    return executableTypes.has(type) ? 'EXECUTE' : 'SYNC_ONLY';
+    if (!executableTypes.has(type)) {
+        return 'SYNC_ONLY';
+    }
+
+    if (
+        type === 'TRADE' &&
+        resolveTradeAction(trade) === 'BUY' &&
+        ENV.BUY_SIZING_MODE === 'signal_fixed_ticket' &&
+        ENV.FOLLOW_MARKET_SCOPE === 'crypto_updown_5m' &&
+        !isTradeWithinSignalMarketScope(trade)
+    ) {
+        return 'SYNC_ONLY';
+    }
+
+    return 'EXECUTE';
 };
 
 export const validateExecutableSnapshot = (
