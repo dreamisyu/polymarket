@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import {
+    BuySizingMode,
     CopyExecutionBatchInterface,
     CopyExecutionBatchStatus,
     CopyIntentBufferInterface,
@@ -535,14 +536,27 @@ class LiveStateStore {
             trade: UserActivityInterface;
             bufferKey: string;
             requestedUsdc: number;
+            sourceUsdcTotal?: number;
             sourcePrice: number;
             flushAfter: number;
             reason: string;
             policyTrail: ExecutionPolicyTrailEntry[];
+            bufferWindowMs?: number;
+            sizingMode?: BuySizingMode;
         }
     ) {
-        const { trade, bufferKey, requestedUsdc, sourcePrice, flushAfter, reason, policyTrail } =
-            params;
+        const {
+            trade,
+            bufferKey,
+            requestedUsdc,
+            sourceUsdcTotal = 0,
+            sourcePrice,
+            flushAfter,
+            reason,
+            policyTrail,
+            bufferWindowMs = 0,
+            sizingMode = 'ratio',
+        } = params;
 
         if (!existing) {
             const buffer: CopyIntentBufferInterface = {
@@ -563,9 +577,12 @@ class LiveStateStore {
                 sourceStartedAt: trade.timestamp,
                 sourceEndedAt: trade.timestamp,
                 requestedUsdc,
+                sourceUsdcTotal,
                 sourcePrice,
                 flushAfter,
                 expireAt: flushAfter,
+                bufferWindowMs,
+                sizingMode,
                 claimedAt: 0,
                 reason,
                 policyTrail,
@@ -593,9 +610,14 @@ class LiveStateStore {
         );
         existing.sourceEndedAt = Math.max(toSafeNumber(existing.sourceEndedAt), trade.timestamp);
         existing.requestedUsdc = Math.max(toSafeNumber(existing.requestedUsdc), 0) + requestedUsdc;
+        existing.sourceUsdcTotal =
+            Math.max(toSafeNumber(existing.sourceUsdcTotal), 0) +
+            Math.max(toSafeNumber(sourceUsdcTotal), 0);
         existing.sourcePrice = sourcePrice;
         existing.flushAfter = flushAfter;
         existing.expireAt = flushAfter;
+        existing.bufferWindowMs = bufferWindowMs;
+        existing.sizingMode = sizingMode;
         existing.reason = reason;
         existing.policyTrail = policyTrail;
         existing.completedAt = 0;

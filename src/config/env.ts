@@ -20,7 +20,8 @@ type ExecutionMode = 'live' | 'trace';
 type RelayerTransactionMode = 'SAFE' | 'PROXY';
 type WsChannel = 'market' | 'user';
 type BuyDustResidualMode = 'off' | 'defer' | 'trim';
-type BuySizingMode = 'ratio' | 'first_entry_ticket';
+type BuySizingMode = 'ratio' | 'first_entry_ticket' | 'signal_fixed_ticket';
+type FollowMarketScope = 'all' | 'crypto_updown_5m';
 type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
 
 const DEFAULT_CLOB_HTTP_URL = 'https://clob.polymarket.com';
@@ -153,11 +154,29 @@ const parseBuySizingMode = (
     const normalized = String(rawValue || fallback)
         .trim()
         .toLowerCase();
-    if (normalized === 'ratio' || normalized === 'first_entry_ticket') {
+    if (
+        normalized === 'ratio' ||
+        normalized === 'first_entry_ticket' ||
+        normalized === 'signal_fixed_ticket'
+    ) {
         return normalized;
     }
 
-    throw new Error('BUY_SIZING_MODE must be ratio or first_entry_ticket');
+    throw new Error('BUY_SIZING_MODE must be ratio, first_entry_ticket or signal_fixed_ticket');
+};
+
+const parseFollowMarketScope = (
+    rawValue: string | undefined,
+    fallback: FollowMarketScope
+): FollowMarketScope => {
+    const normalized = String(rawValue || fallback)
+        .trim()
+        .toLowerCase();
+    if (normalized === 'all' || normalized === 'crypto_updown_5m') {
+        return normalized;
+    }
+
+    throw new Error('FOLLOW_MARKET_SCOPE must be all or crypto_updown_5m');
 };
 
 const buildWsChannelUrl = (baseUrl: string, channel: WsChannel) =>
@@ -344,6 +363,48 @@ export const ENV = {
         readEnv('BUY_FIRST_ENTRY_SIGNAL_MIN_USDC') || '0.05',
         'BUY_FIRST_ENTRY_SIGNAL_MIN_USDC'
     ),
+    SIGNAL_BUFFER_MS: parsePositiveInteger(
+        readEnv('SIGNAL_BUFFER_MS') || '15000',
+        'SIGNAL_BUFFER_MS'
+    ),
+    SIGNAL_IGNORE_BUY_BELOW_USDC: parseNonNegativeNumber(
+        readEnv('SIGNAL_IGNORE_BUY_BELOW_USDC') || '0.25',
+        'SIGNAL_IGNORE_BUY_BELOW_USDC'
+    ),
+    SIGNAL_MIN_SOURCE_BUY_USDC: parseNonNegativeNumber(
+        readEnv('SIGNAL_MIN_SOURCE_BUY_USDC') || '30',
+        'SIGNAL_MIN_SOURCE_BUY_USDC'
+    ),
+    SIGNAL_MIN_SOURCE_BUY_COUNT: parsePositiveInteger(
+        readEnv('SIGNAL_MIN_SOURCE_BUY_COUNT') || '8',
+        'SIGNAL_MIN_SOURCE_BUY_COUNT'
+    ),
+    SIGNAL_STRONG_SOURCE_BUY_USDC: parseNonNegativeNumber(
+        readEnv('SIGNAL_STRONG_SOURCE_BUY_USDC') || '40',
+        'SIGNAL_STRONG_SOURCE_BUY_USDC'
+    ),
+    SIGNAL_STRONG_SOURCE_BUY_COUNT: parsePositiveInteger(
+        readEnv('SIGNAL_STRONG_SOURCE_BUY_COUNT') || '12',
+        'SIGNAL_STRONG_SOURCE_BUY_COUNT'
+    ),
+    FOLLOW_FIXED_TICKET_USDC: parseNonNegativeNumber(
+        readEnv('FOLLOW_FIXED_TICKET_USDC') || '1.5',
+        'FOLLOW_FIXED_TICKET_USDC'
+    ),
+    FOLLOW_STRONG_TICKET_USDC: parseNonNegativeNumber(
+        readEnv('FOLLOW_STRONG_TICKET_USDC') || '2.5',
+        'FOLLOW_STRONG_TICKET_USDC'
+    ),
+    FOLLOW_MAX_OPEN_POSITIONS: parsePositiveInteger(
+        readEnv('FOLLOW_MAX_OPEN_POSITIONS') || '8',
+        'FOLLOW_MAX_OPEN_POSITIONS'
+    ),
+    FOLLOW_MAX_ACTIVE_EXPOSURE_USDC: parseNonNegativeNumber(
+        readEnv('FOLLOW_MAX_ACTIVE_EXPOSURE_USDC') || '18',
+        'FOLLOW_MAX_ACTIVE_EXPOSURE_USDC'
+    ),
+    FOLLOW_MARKET_SCOPE: parseFollowMarketScope(readEnv('FOLLOW_MARKET_SCOPE'), 'all'),
+    FOLLOW_ONE_SHOT_PER_CONDITION: parseBoolean(readEnv('FOLLOW_ONE_SHOT_PER_CONDITION'), true),
     BUY_DUST_RESIDUAL_MODE: parseBuyDustResidualMode(readEnv('BUY_DUST_RESIDUAL_MODE'), 'trim'),
     MARKET_CACHE_TTL_MS: parsePositiveInteger(
         readEnv('MARKET_CACHE_TTL_MS') || '3000',

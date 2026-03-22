@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 export type ExecutionPolicyAction = 'PASS' | 'ADJUST' | 'DEFER' | 'SKIP' | 'RETRY';
 export type CopyIntentBufferState = 'OPEN' | 'FLUSHING' | 'CLOSED' | 'SKIPPED';
 export type ExecutionKind = 'TRADE' | 'MERGE' | 'REDEEM';
+export type BuySizingMode = 'ratio' | 'first_entry_ticket' | 'signal_fixed_ticket';
 export type CopyExecutionBatchStatus =
     | 'READY'
     | 'PROCESSING'
@@ -38,9 +39,12 @@ export interface CopyIntentBufferInterface {
     sourceStartedAt: number;
     sourceEndedAt: number;
     requestedUsdc: number;
+    sourceUsdcTotal?: number;
     sourcePrice: number;
     flushAfter: number;
     expireAt: number;
+    bufferWindowMs?: number;
+    sizingMode?: BuySizingMode;
     claimedAt?: number;
     reason?: string;
     policyTrail?: ExecutionPolicyTrailEntry[];

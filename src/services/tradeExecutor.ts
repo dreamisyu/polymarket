@@ -19,7 +19,13 @@ import {
     buildConditionOutcomeKey,
     computeConditionMergeableSize,
 } from '../utils/conditionPositionMath';
-import { evaluateDirectBuyIntent, sortTradesAsc } from '../utils/copyIntentPlanning';
+import {
+    evaluateBufferedSignalBuy,
+    evaluateDirectBuyIntent,
+    evaluateSignalBuyTrade,
+    getTradeSourceUsdc,
+    sortTradesAsc,
+} from '../utils/copyIntentPlanning';
 import { buildPolicyTrailEntry, hasPolicyId, mergePolicyTrail } from '../utils/executionPolicy';
 import {
     resolveExecutionIntent,
@@ -58,8 +64,12 @@ const PROXY_WALLET = ENV.PROXY_WALLET;
 const RETRY_LIMIT = ENV.RETRY_LIMIT;
 const MIN_MARKET_BUY_USDC = 1;
 const BUY_INTENT_BUFFER_MAX_MS = ENV.BUY_INTENT_BUFFER_MAX_MS;
+const SIGNAL_BUFFER_MS = ENV.SIGNAL_BUFFER_MS;
 const BUY_MIN_TOP_UP_TRIGGER_USDC = ENV.BUY_MIN_TOP_UP_TRIGGER_USDC;
 const BUY_BOOTSTRAP_MAX_ACTIVE_RATIO = ENV.BUY_BOOTSTRAP_MAX_ACTIVE_RATIO;
+const FOLLOW_MAX_OPEN_POSITIONS = ENV.FOLLOW_MAX_OPEN_POSITIONS;
+const FOLLOW_MAX_ACTIVE_EXPOSURE_USDC = ENV.FOLLOW_MAX_ACTIVE_EXPOSURE_USDC;
+const FOLLOW_ONE_SHOT_PER_CONDITION = ENV.FOLLOW_ONE_SHOT_PER_CONDITION;
 const LOOP_INTERVAL_MS = ENV.LIVE_EXECUTOR_LOOP_INTERVAL_MS;
 const CONTEXT_TTL_MS = ENV.LIVE_STATE_REFRESH_MS;
 const LIVE_MAX_STALE_SNAPSHOT_MS = ENV.LIVE_MAX_STALE_SNAPSHOT_MS;
@@ -75,6 +85,7 @@ const NO_LIQUIDITY_REASONS = [
 const SOURCE_TRADE_BUFFER_POLICY_ID = 'source-trade-merge';
 const LIVE_BUY_BUFFER_POLICY_ID = 'live-buy-intent-buffer';
 const BUFFER_MIN_TOP_UP_POLICY_ID = 'buffer-min-top-up';
+const SIGNAL_BUY_BUFFER_POLICY_ID = 'signal-buy-intent-buffer';
 const MERGE_EXECUTION_POLICY_ID = 'live-condition-merge';
 const PROXY_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${PROXY_WALLET}&sizeThreshold=0`;
 const logger = createLogger('live');
@@ -131,12 +142,13 @@ const buildLiveBuyBufferKey = (trade: Pick<UserActivityInterface, 'asset' | 'con
     `buy:${trade.conditionId}:${trade.asset}`;
 
 const shouldFlushBufferBeforeAppendingTrade = (
-    buffer: Pick<CopyIntentBufferInterface, 'sourceEndedAt'>,
+    buffer: Pick<CopyIntentBufferInterface, 'sourceEndedAt' | 'bufferWindowMs'>,
     trade: Pick<UserActivityInterface, 'timestamp'>
 ) =>
     toSafeNumber(buffer.sourceEndedAt) > 0 &&
     trade.timestamp > toSafeNumber(buffer.sourceEndedAt) &&
-    trade.timestamp - toSafeNumber(buffer.sourceEndedAt) > BUY_INTENT_BUFFER_MAX_MS;
+    trade.timestamp - toSafeNumber(buffer.sourceEndedAt) >
+        Math.max(toSafeNumber(buffer.bufferWindowMs), BUY_INTENT_BUFFER_MAX_MS);
 
 const isNoLiquidityReason = (reason: string) =>
     NO_LIQUIDITY_REASONS.some((token) => reason.includes(token));
@@ -158,6 +170,13 @@ const buildBootstrapBudgetRemainingUsdc = (context: TradingContext, stateStore: 
         0
     );
 };
+
+const countOpenLivePositions = (positions: UserPositionInterface[]) =>
+    positions.filter((position) => Math.max(toSafeNumber(position.size), 0) > EPSILON).length;
+
+const buildLiveActiveExposureUsdc = (context: TradingContext, reservedBuyExposureUsdc: number) =>
+    Math.max(context.totalEquity - Math.max(toSafeNumber(context.availableBalance), 0), 0) +
+    Math.max(toSafeNumber(reservedBuyExposureUsdc), 0);
 
 const validateTradeForExecution = (trade: UserActivityInterface) => {
     const snapshotValidation = validateExecutableSnapshot(trade, {
@@ -1044,6 +1063,11 @@ class LiveTradeExecutorRuntime {
         buffer: CopyIntentBufferInterface,
         options: { skipReason?: string; extraPolicyTrail?: ExecutionPolicyTrailEntry[] } = {}
     ) {
+        if (buffer.sizingMode === 'signal_fixed_ticket') {
+            await this.flushSignalBuyBuffer(buffer, options);
+            return;
+        }
+
         const trades = this.stateStore.getTradesByIds(buffer.sourceTradeIds);
         const latestTrade = sortTradesAsc(trades).slice(-1)[0];
         if (!latestTrade) {
@@ -1143,6 +1167,136 @@ class LiveTradeExecutorRuntime {
         );
     }
 
+    private async flushSignalBuyBuffer(
+        buffer: CopyIntentBufferInterface,
+        options: { skipReason?: string; extraPolicyTrail?: ExecutionPolicyTrailEntry[] } = {}
+    ) {
+        const trades = this.stateStore.getTradesByIds(buffer.sourceTradeIds);
+        const latestTrade = sortTradesAsc(trades).slice(-1)[0];
+        if (!latestTrade) {
+            const reason = options.skipReason || '信号缓冲缺少关联源交易';
+            buffer.state = 'SKIPPED';
+            buffer.reason = reason;
+            buffer.completedAt = Date.now();
+            this.stateStore.closeBuffer(buffer._id, 'SKIPPED', reason);
+            this.queuePersistBuffer(buffer);
+            return;
+        }
+
+        const signalEvaluation = evaluateBufferedSignalBuy({
+            sourceUsdcTotal: buffer.sourceUsdcTotal,
+            sourceTradeCount: buffer.sourceTradeCount,
+        });
+        const finalPolicyTrail = mergePolicyTrail(
+            buffer.policyTrail,
+            options.extraPolicyTrail,
+            signalEvaluation.policyTrail
+        );
+
+        const finalizeSignalSkip = (reason: string) => {
+            this.stateStore.closeBuffer(buffer._id, 'SKIPPED', reason);
+            buffer.state = 'SKIPPED';
+            buffer.reason = reason;
+            buffer.policyTrail = finalPolicyTrail;
+            buffer.completedAt = Date.now();
+            this.queuePersistBuffer(buffer);
+            for (const trade of trades) {
+                const state = this.stateStore.getTradeState(trade);
+                if (state) {
+                    this.finalizeTradeState(state, 'SKIPPED', reason, finalPolicyTrail);
+                }
+            }
+            logger.debug(`${buffer.bufferKey} 已放弃 live 信号缓冲 reason=${reason}`);
+        };
+
+        if (signalEvaluation.status === 'SKIP') {
+            finalizeSignalSkip(
+                options.skipReason || mergeReasons(buffer.reason, signalEvaluation.reason)
+            );
+            return;
+        }
+
+        const context = await this.refreshTradingContext(true);
+        if (context.availableBalance === null) {
+            finalizeSignalSkip(options.skipReason || '代理钱包可用余额接口不可用');
+            return;
+        }
+
+        const existingPosition = findPositionForTrade(context.positions, latestTrade);
+        const localPositionSize = Math.max(toSafeNumber(existingPosition?.size), 0);
+        const activeBuyBatch = this.stateStore.getActiveBuyBatch(latestTrade);
+        if (
+            FOLLOW_ONE_SHOT_PER_CONDITION &&
+            (localPositionSize > EPSILON || activeBuyBatch !== null)
+        ) {
+            finalizeSignalSkip(
+                options.skipReason ||
+                    `同 condition/outcome 已存在本地仓位或待执行批次，固定票据策略仅跟首笔`
+            );
+            return;
+        }
+
+        const openPositionsCount = countOpenLivePositions(context.positions);
+        if (localPositionSize <= EPSILON && openPositionsCount >= FOLLOW_MAX_OPEN_POSITIONS) {
+            finalizeSignalSkip(
+                options.skipReason ||
+                    `当前 open positions=${openPositionsCount}，已达到固定票据上限 ${FOLLOW_MAX_OPEN_POSITIONS}`
+            );
+            return;
+        }
+
+        const reservedBuyExposureUsdc = this.stateStore.reservedBuyExposureUsdc();
+        const availableBalance = Math.max(
+            toSafeNumber(context.availableBalance) - reservedBuyExposureUsdc,
+            0
+        );
+        if (availableBalance + EPSILON < signalEvaluation.requestedUsdc) {
+            finalizeSignalSkip(
+                options.skipReason ||
+                    `本地可用余额 ${formatAmount(availableBalance)} USDC 低于固定票据 ${formatAmount(signalEvaluation.requestedUsdc)} USDC`
+            );
+            return;
+        }
+
+        const activeExposureUsdc = buildLiveActiveExposureUsdc(context, reservedBuyExposureUsdc);
+        if (
+            activeExposureUsdc + signalEvaluation.requestedUsdc >
+            FOLLOW_MAX_ACTIVE_EXPOSURE_USDC + EPSILON
+        ) {
+            finalizeSignalSkip(
+                options.skipReason ||
+                    `活跃暴露 ${formatAmount(activeExposureUsdc)} USDC 已接近上限 ${formatAmount(FOLLOW_MAX_ACTIVE_EXPOSURE_USDC)} USDC`
+            );
+            return;
+        }
+
+        const finalReason = mergeReasons(buffer.reason, signalEvaluation.reason);
+        await this.createBatch({
+            trades,
+            bufferId: buffer._id,
+            condition: 'buy',
+            executionKind: 'TRADE',
+            requestedUsdc: signalEvaluation.requestedUsdc,
+            sourcePrice: Math.max(
+                toSafeNumber(buffer.sourcePrice),
+                toSafeNumber(latestTrade.price),
+                0
+            ),
+            localPositionSizeBefore: localPositionSize,
+            reason: finalReason,
+            policyTrail: finalPolicyTrail,
+        });
+        this.stateStore.closeBuffer(buffer._id, 'CLOSED', finalReason);
+        buffer.state = 'CLOSED';
+        buffer.reason = finalReason;
+        buffer.policyTrail = finalPolicyTrail;
+        buffer.completedAt = Date.now();
+        this.queuePersistBuffer(buffer);
+        logger.debug(
+            `${buffer.bufferKey} 已生成实盘信号批次 sourceUsdc=${formatAmount(buffer.sourceUsdcTotal)} requestedUsdc=${formatAmount(signalEvaluation.requestedUsdc)}`
+        );
+    }
+
     private async flushDueBuyBuffers() {
         const dueBuffers = this.stateStore.listDueBuffers();
         for (const buffer of dueBuffers) {
@@ -1208,10 +1362,83 @@ class LiveTradeExecutorRuntime {
             trade,
             bufferKey: buildLiveBuyBufferKey(trade),
             requestedUsdc: normalizedRequestedUsdc,
+            sourceUsdcTotal: getTradeSourceUsdc(trade),
             sourcePrice: Math.max(toSafeNumber(sourcePrice), toSafeNumber(trade.price), 0),
             flushAfter: nextFlushAt,
             reason: nextReason,
             policyTrail: nextPolicyTrail,
+            bufferWindowMs: BUY_INTENT_BUFFER_MAX_MS,
+            sizingMode: BUY_SIZING_MODE,
+        });
+        this.queuePersistBuffer(nextBuffer);
+        const tradeState = this.stateStore.getTradeState(trade);
+        if (tradeState) {
+            tradeState.status = 'BUFFERED';
+            tradeState.bufferId = nextBuffer._id;
+            tradeState.lastError = nextReason;
+            tradeState.policyTrail = nextPolicyTrail;
+            this.queuePersistSingleTradeState(tradeState);
+        }
+    }
+
+    private async bufferSignalBuyIntent(params: {
+        trade: UserActivityInterface;
+        sourceUsdc: number;
+        reason?: string;
+        policyTrail?: ExecutionPolicyTrailEntry[];
+    }) {
+        const { trade, sourceUsdc, reason = '', policyTrail = [] } = params;
+        const normalizedSourceUsdc = Math.max(toSafeNumber(sourceUsdc), 0);
+        if (normalizedSourceUsdc <= 0) {
+            return;
+        }
+
+        let openBuffer = this.stateStore.getOpenBuffer(buildLiveBuyBufferKey(trade));
+        if (openBuffer && shouldFlushBufferBeforeAppendingTrade(openBuffer, trade)) {
+            await this.flushBuyBuffer(openBuffer, {
+                extraPolicyTrail: [
+                    buildPolicyTrailEntry(
+                        SIGNAL_BUY_BUFFER_POLICY_ID,
+                        'DEFER',
+                        `检测到新的同资产信号，上一段累计窗口已超过 ${SIGNAL_BUFFER_MS}ms`
+                    ),
+                ],
+            });
+            openBuffer = null;
+        }
+
+        const nextSourceUsdc =
+            Math.max(toSafeNumber(openBuffer?.sourceUsdcTotal), 0) + normalizedSourceUsdc;
+        const nextSourceTradeCount =
+            Math.max(toSafeNumber(openBuffer?.sourceTradeCount), 0) + getSourceTradeCount(trade);
+        const signalEvaluation = evaluateBufferedSignalBuy({
+            sourceUsdcTotal: nextSourceUsdc,
+            sourceTradeCount: nextSourceTradeCount,
+        });
+        const flushImmediately = signalEvaluation.status === 'EXECUTE';
+        const nextFlushAt = flushImmediately ? Date.now() : Date.now() + SIGNAL_BUFFER_MS;
+        const nextReason = mergeReasons(openBuffer?.reason, reason);
+        const nextPolicyTrail = mergePolicyTrail(openBuffer?.policyTrail, policyTrail, [
+            buildPolicyTrailEntry(
+                SIGNAL_BUY_BUFFER_POLICY_ID,
+                'DEFER',
+                flushImmediately
+                    ? `累计源买单 ${nextSourceUsdc.toFixed(4)} USDC / ${nextSourceTradeCount} 笔，已达到固定票据触发阈值`
+                    : `累计源买单 ${nextSourceUsdc.toFixed(4)} USDC / ${nextSourceTradeCount} 笔，继续等待 ${SIGNAL_BUFFER_MS}ms 窗口收敛`
+            ),
+        ]);
+
+        const nextBuffer = this.stateStore.mergeIntoOpenBuffer(openBuffer, {
+            trade,
+            bufferKey: buildLiveBuyBufferKey(trade),
+            requestedUsdc: 0,
+            sourceUsdcTotal: normalizedSourceUsdc,
+            sourcePrice: Math.max(toSafeNumber(trade.price), 0),
+            flushAfter: nextFlushAt,
+            reason: nextReason,
+            policyTrail: nextPolicyTrail,
+            bufferWindowMs: SIGNAL_BUFFER_MS,
+            sizingMode: 'signal_fixed_ticket',
         });
         this.queuePersistBuffer(nextBuffer);
         const tradeState = this.stateStore.getTradeState(trade);
@@ -1295,9 +1522,13 @@ class LiveTradeExecutorRuntime {
                         await this.flushBuyBuffer(openBuffer, {
                             extraPolicyTrail: [
                                 buildPolicyTrailEntry(
-                                    LIVE_BUY_BUFFER_POLICY_ID,
+                                    openBuffer.sizingMode === 'signal_fixed_ticket'
+                                        ? SIGNAL_BUY_BUFFER_POLICY_ID
+                                        : LIVE_BUY_BUFFER_POLICY_ID,
                                     'DEFER',
-                                    `检测到新的同资产买单，上一段累计窗口已超过 ${BUY_INTENT_BUFFER_MAX_MS}ms`
+                                    openBuffer.sizingMode === 'signal_fixed_ticket'
+                                        ? `检测到新的同资产信号，上一段累计窗口已超过 ${SIGNAL_BUFFER_MS}ms`
+                                        : `检测到新的同资产买单，上一段累计窗口已超过 ${BUY_INTENT_BUFFER_MAX_MS}ms`
                                 ),
                             ],
                         });
@@ -1310,6 +1541,51 @@ class LiveTradeExecutorRuntime {
                     const hasLocalExposure =
                         Math.max(toSafeNumber(existingPosition?.size), 0) > EPSILON;
                     const hasPendingBuyExposure = latestBuffer !== null || activeBuyBatch !== null;
+
+                    if (BUY_SIZING_MODE === 'signal_fixed_ticket') {
+                        const signalTradeEvaluation = evaluateSignalBuyTrade(trade);
+                        if (signalTradeEvaluation.status === 'SKIP') {
+                            this.finalizeTradeState(
+                                state,
+                                'SKIPPED',
+                                signalTradeEvaluation.reason,
+                                signalTradeEvaluation.policyTrail
+                            );
+                            continue;
+                        }
+
+                        if (
+                            FOLLOW_ONE_SHOT_PER_CONDITION &&
+                            latestBuffer === null &&
+                            (hasLocalExposure || activeBuyBatch !== null)
+                        ) {
+                            this.finalizeTradeState(
+                                state,
+                                'SKIPPED',
+                                '同 condition/outcome 已存在本地仓位或待执行批次，固定票据策略仅跟首笔',
+                                [
+                                    buildPolicyTrailEntry(
+                                        'signal-one-shot',
+                                        'SKIP',
+                                        '同 condition/outcome 已存在本地仓位或待执行批次，固定票据策略仅跟首笔'
+                                    ),
+                                ]
+                            );
+                            continue;
+                        }
+
+                        await this.bufferSignalBuyIntent({
+                            trade,
+                            sourceUsdc: signalTradeEvaluation.sourceUsdc,
+                            reason: signalTradeEvaluation.reason,
+                            policyTrail: signalTradeEvaluation.policyTrail,
+                        });
+                        logger.debug(
+                            `${formatTradeRef(trade)} 已写入实盘信号缓冲 sourceUsdc=${formatAmount(signalTradeEvaluation.sourceUsdc)}`
+                        );
+                        continue;
+                    }
+
                     const reservedBuyExposureUsdc = this.stateStore.reservedBuyExposureUsdc();
                     const availableBalance = Math.max(
                         toSafeNumber(context.availableBalance) - reservedBuyExposureUsdc,
