@@ -20,7 +20,11 @@ type ExecutionMode = 'live' | 'trace';
 type RelayerTransactionMode = 'SAFE' | 'PROXY';
 type WsChannel = 'market' | 'user';
 type BuyDustResidualMode = 'off' | 'defer' | 'trim';
-type BuySizingMode = 'ratio' | 'first_entry_ticket' | 'signal_fixed_ticket';
+type BuySizingMode =
+    | 'ratio'
+    | 'first_entry_ticket'
+    | 'signal_fixed_ticket'
+    | 'condition_pair_overlay';
 type FollowMarketScope = 'all' | 'crypto_updown_5m';
 type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
 
@@ -157,12 +161,15 @@ const parseBuySizingMode = (
     if (
         normalized === 'ratio' ||
         normalized === 'first_entry_ticket' ||
-        normalized === 'signal_fixed_ticket'
+        normalized === 'signal_fixed_ticket' ||
+        normalized === 'condition_pair_overlay'
     ) {
         return normalized;
     }
 
-    throw new Error('BUY_SIZING_MODE must be ratio, first_entry_ticket or signal_fixed_ticket');
+    throw new Error(
+        'BUY_SIZING_MODE must be ratio, first_entry_ticket, signal_fixed_ticket or condition_pair_overlay'
+    );
 };
 
 const parseFollowMarketScope = (
@@ -398,6 +405,62 @@ export const ENV = {
     SIGNAL_STRONG_SOURCE_BUY_COUNT: parsePositiveInteger(
         readEnv('SIGNAL_STRONG_SOURCE_BUY_COUNT') || '5',
         'SIGNAL_STRONG_SOURCE_BUY_COUNT'
+    ),
+    PAIR_OVERLAY_MIN_BUY_USDC: parsePositiveNumber(
+        readEnv('PAIR_OVERLAY_MIN_BUY_USDC') || '1.2',
+        'PAIR_OVERLAY_MIN_BUY_USDC'
+    ),
+    PAIR_LEADER_MIN_SOURCE_USDC: parsePositiveNumber(
+        readEnv('PAIR_LEADER_MIN_SOURCE_USDC') || '10',
+        'PAIR_LEADER_MIN_SOURCE_USDC'
+    ),
+    PAIR_LEADER_MIN_SOURCE_COUNT: parsePositiveInteger(
+        readEnv('PAIR_LEADER_MIN_SOURCE_COUNT') || '3',
+        'PAIR_LEADER_MIN_SOURCE_COUNT'
+    ),
+    PAIR_LEADER_MIN_SHARE: parsePositiveNumber(
+        readEnv('PAIR_LEADER_MIN_SHARE') || '0.65',
+        'PAIR_LEADER_MIN_SHARE'
+    ),
+    PAIR_LEADER_MIN_EDGE_USDC: parsePositiveNumber(
+        readEnv('PAIR_LEADER_MIN_EDGE_USDC') || '4',
+        'PAIR_LEADER_MIN_EDGE_USDC'
+    ),
+    PAIR_STRONG_SOURCE_USDC: parsePositiveNumber(
+        readEnv('PAIR_STRONG_SOURCE_USDC') || '18',
+        'PAIR_STRONG_SOURCE_USDC'
+    ),
+    PAIR_STRONG_SOURCE_COUNT: parsePositiveInteger(
+        readEnv('PAIR_STRONG_SOURCE_COUNT') || '5',
+        'PAIR_STRONG_SOURCE_COUNT'
+    ),
+    PAIR_STRONG_MIN_SHARE: parsePositiveNumber(
+        readEnv('PAIR_STRONG_MIN_SHARE') || '0.7',
+        'PAIR_STRONG_MIN_SHARE'
+    ),
+    PAIR_STRONG_MIN_EDGE_USDC: parsePositiveNumber(
+        readEnv('PAIR_STRONG_MIN_EDGE_USDC') || '8',
+        'PAIR_STRONG_MIN_EDGE_USDC'
+    ),
+    PAIR_LEADER_TICKET_USDC: parsePositiveNumber(
+        readEnv('PAIR_LEADER_TICKET_USDC') || '1.2',
+        'PAIR_LEADER_TICKET_USDC'
+    ),
+    PAIR_STRONG_TICKET_USDC: parsePositiveNumber(
+        readEnv('PAIR_STRONG_TICKET_USDC') || '1.8',
+        'PAIR_STRONG_TICKET_USDC'
+    ),
+    PAIR_HEDGE_TICKET_USDC: parsePositiveNumber(
+        readEnv('PAIR_HEDGE_TICKET_USDC') || '1.2',
+        'PAIR_HEDGE_TICKET_USDC'
+    ),
+    PAIR_HEDGE_PRICE_SUM_MAX: parsePositiveNumber(
+        readEnv('PAIR_HEDGE_PRICE_SUM_MAX') || '0.96',
+        'PAIR_HEDGE_PRICE_SUM_MAX'
+    ),
+    PAIR_MAX_ACTIONS_PER_CONDITION: parsePositiveInteger(
+        readEnv('PAIR_MAX_ACTIONS_PER_CONDITION') || '2',
+        'PAIR_MAX_ACTIONS_PER_CONDITION'
     ),
     FOLLOW_WEAK_TICKET_USDC: parseNonNegativeNumber(
         readEnv('FOLLOW_WEAK_TICKET_USDC') || '1',

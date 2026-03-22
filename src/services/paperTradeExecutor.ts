@@ -22,6 +22,7 @@ import {
 import { getUserActivityModel } from '../models/userHistory';
 import ClobMarketStream from './clobMarketStream';
 import {
+    evaluateBufferedConditionPairBuy,
     evaluateBufferedSignalBuy,
     evaluateDirectBuyIntent,
     evaluateSignalBuyTrade,
@@ -91,12 +92,17 @@ const BUY_BOOTSTRAP_MAX_ACTIVE_RATIO = ENV.BUY_BOOTSTRAP_MAX_ACTIVE_RATIO;
 const FOLLOW_MAX_OPEN_POSITIONS = ENV.FOLLOW_MAX_OPEN_POSITIONS;
 const FOLLOW_MAX_ACTIVE_EXPOSURE_USDC = ENV.FOLLOW_MAX_ACTIVE_EXPOSURE_USDC;
 const FOLLOW_MAX_TICKETS_PER_CONDITION = ENV.FOLLOW_MAX_TICKETS_PER_CONDITION;
+const PAIR_OVERLAY_MIN_BUY_USDC = ENV.PAIR_OVERLAY_MIN_BUY_USDC;
+const PAIR_HEDGE_PRICE_SUM_MAX = ENV.PAIR_HEDGE_PRICE_SUM_MAX;
+const PAIR_MAX_ACTIONS_PER_CONDITION = ENV.PAIR_MAX_ACTIONS_PER_CONDITION;
 const FOLLOW_POSITION_DUST_USDC = ENV.FOLLOW_POSITION_DUST_USDC;
 const MIN_MARKET_BUY_USDC = 1;
 const TRACE_BUY_BUFFER_POLICY_ID = 'trace-buy-intent-buffer';
 const TRACE_SIGNAL_BUFFER_POLICY_ID = 'trace-signal-buy-intent-buffer';
 const SIGNAL_SECOND_TICKET_POLICY_ID = 'signal-second-ticket';
 const SIGNAL_MAX_TICKETS_POLICY_ID = 'signal-max-tickets';
+const CONDITION_PAIR_BUFFER_POLICY_ID = 'trace-condition-pair-buffer';
+const CONDITION_PAIR_MAX_ACTIONS_POLICY_ID = 'condition-pair-max-actions';
 const SIGNAL_TICKET_POLICY_IDS = [
     'signal-weak-ticket',
     'signal-fixed-ticket',
@@ -1917,10 +1923,15 @@ const readReadyBatches = async () =>
         .exec()) as CopyExecutionBatchInterface[];
 
 const buildTraceBuyBufferKey = (trade: Pick<UserActivityInterface, 'asset' | 'conditionId'>) =>
-    `buy:${trade.conditionId}:${trade.asset}`;
+    ENV.BUY_SIZING_MODE === 'condition_pair_overlay'
+        ? `buy:${trade.conditionId}:condition`
+        : `buy:${trade.conditionId}:${trade.asset}`;
 
 const buildSignalMaxTicketsReason = () =>
     `已达到同 condition/outcome 最大跟单次数 ${FOLLOW_MAX_TICKETS_PER_CONDITION}`;
+
+const buildConditionPairMaxActionsReason = () =>
+    `已达到同 condition 最大动作次数 ${PAIR_MAX_ACTIONS_PER_CONDITION}`;
 
 const loadReservedTraceBuyExposure = async () => {
     const [openBuffers, openBatches] = await Promise.all([
@@ -2043,6 +2054,66 @@ const countOpenTracePositions = async () => {
         .lean()
         .exec();
     return positions.filter((position) => isTracePositionActiveForSignal(position)).length;
+};
+
+const loadTraceConditionPairActionOutcomes = async (conditionId: string) => {
+    const [positions, batches] = await Promise.all([
+        TracePosition.find({
+            conditionId,
+            size: { $gt: EPSILON },
+            closedAt: { $lte: 0 },
+        })
+            .select({ outcome: 1, marketValue: 1, title: 1, marketSlug: 1, size: 1, closedAt: 1 })
+            .lean()
+            .exec(),
+        TraceExecutionBatch.find({
+            conditionId,
+            condition: 'buy',
+            status: { $nin: ['SKIPPED', 'FAILED'] },
+            'policyTrail.policyId': {
+                $in: [
+                    'condition-leader-entry',
+                    'condition-strong-leader-entry',
+                    'condition-hedge-overlay',
+                ],
+            },
+        })
+            .select({ outcome: 1 })
+            .lean()
+            .exec(),
+    ]);
+
+    const outcomes = new Set<string>();
+    for (const position of positions) {
+        if (isTracePositionActiveForSignal(position)) {
+            outcomes.add(String(position.outcome || '').trim());
+        }
+    }
+    for (const batch of batches) {
+        if (batch.outcome) {
+            outcomes.add(String(batch.outcome).trim());
+        }
+    }
+
+    return [...outcomes].filter(Boolean);
+};
+
+const buildTraceConditionPairBestAskSum = async (
+    marketStream: ClobMarketStream,
+    leaderTrade: Pick<UserActivityInterface, 'asset'>,
+    hedgeTrade: Pick<UserActivityInterface, 'asset'>
+) => {
+    const [leaderSnapshot, hedgeSnapshot] = await Promise.all([
+        marketStream.getSnapshot(leaderTrade.asset),
+        marketStream.getSnapshot(hedgeTrade.asset),
+    ]);
+    const leaderAsk = Math.max(toSafeNumber(leaderSnapshot?.asks?.[0]?.price), 0);
+    const hedgeAsk = Math.max(toSafeNumber(hedgeSnapshot?.asks?.[0]?.price), 0);
+    if (leaderAsk <= 0 || hedgeAsk <= 0) {
+        return null;
+    }
+
+    return leaderAsk + hedgeAsk;
 };
 
 const buildTraceActiveExposureUsdc = (
@@ -2513,6 +2584,11 @@ const flushTraceBuyBuffer = async (
         extraPolicyTrail?: ExecutionPolicyTrailEntry[];
     } = {}
 ) => {
+    if (buffer.sizingMode === 'condition_pair_overlay') {
+        await flushTraceConditionPairBuyBuffer(buffer, options);
+        return;
+    }
+
     if (buffer.sizingMode === 'signal_fixed_ticket') {
         await flushTraceSignalBuyBuffer(buffer, options);
         return;
@@ -2611,6 +2687,150 @@ const flushTraceBuyBuffer = async (
     );
     logger.debug(
         `${formatBufferRef(buffer)} 已生成模拟买入批次 requestedUsdc=${formatAmount(finalRequestedUsdc)}`
+    );
+};
+
+const flushTraceConditionPairBuyBuffer = async (
+    buffer: CopyIntentBufferInterface,
+    options: {
+        skipReason?: string;
+        extraPolicyTrail?: ExecutionPolicyTrailEntry[];
+    } = {}
+) => {
+    const trades = await loadTradesByIds(buffer.sourceTradeIds);
+    const latestTrade = sortTradesAsc(trades).slice(-1)[0];
+    let policyTrail = mergePolicyTrail(buffer.policyTrail, options.extraPolicyTrail);
+
+    if (trades.length === 0 || !latestTrade) {
+        await finalizeSkippedBuffer(
+            buffer,
+            trades,
+            options.skipReason || 'condition 配对缓冲缺少关联源交易',
+            policyTrail
+        );
+        return;
+    }
+
+    const portfolio = await ensurePortfolio();
+    const existingOutcomes = await loadTraceConditionPairActionOutcomes(latestTrade.conditionId);
+    const existingOutcome = existingOutcomes.length === 1 ? existingOutcomes[0] : '';
+    let hedgePriceSum: number | null = null;
+    if (existingOutcomes.length === 1) {
+        const preliminary = evaluateBufferedConditionPairBuy({
+            trades,
+            existingOutcome,
+            existingActionCount: existingOutcomes.length,
+        });
+        if (preliminary.selectedTrade) {
+            const leaderTrade =
+                trades.find(
+                    (trade) =>
+                        trade.conditionId === latestTrade.conditionId &&
+                        normalizeOutcomeLabel(trade.outcome) ===
+                            normalizeOutcomeLabel(existingOutcome)
+                ) || preliminary.selectedTrade;
+            hedgePriceSum = await buildTraceConditionPairBestAskSum(
+                marketStream,
+                leaderTrade,
+                preliminary.selectedTrade
+            );
+        }
+    }
+
+    const evaluation = evaluateBufferedConditionPairBuy({
+        trades,
+        existingOutcome,
+        existingActionCount: existingOutcomes.length,
+        hedgePriceSum,
+    });
+    policyTrail = mergePolicyTrail(
+        buffer.policyTrail,
+        options.extraPolicyTrail,
+        evaluation.policyTrail
+    );
+
+    if (evaluation.status === 'SKIP' || !evaluation.selectedTrade) {
+        await finalizeSkippedBuffer(
+            buffer,
+            trades,
+            options.skipReason || mergeReasons(buffer.reason || '', evaluation.reason),
+            policyTrail
+        );
+        logger.debug(
+            `${formatBufferRef(buffer)} 已放弃模拟 condition 配对缓冲 reason=${options.skipReason || evaluation.reason}`
+        );
+        return;
+    }
+
+    const selectedTrade = evaluation.selectedTrade;
+    const existingPosition = await loadExistingPosition(selectedTrade);
+    const localPositionSize = Math.max(toSafeNumber(existingPosition.size), 0);
+    const openPositionsCount = await countOpenTracePositions();
+    if (localPositionSize <= EPSILON && openPositionsCount >= FOLLOW_MAX_OPEN_POSITIONS) {
+        await finalizeSkippedBuffer(
+            buffer,
+            trades,
+            options.skipReason ||
+                `当前 open positions=${openPositionsCount}，已达到 condition 配对上限 ${FOLLOW_MAX_OPEN_POSITIONS}`,
+            policyTrail
+        );
+        return;
+    }
+
+    const reservedBuyExposure = await loadReservedTraceBuyExposure();
+    const availableBalance = Math.max(toSafeNumber(portfolio.cashBalance) - reservedBuyExposure, 0);
+    if (availableBalance + EPSILON < evaluation.requestedUsdc) {
+        await finalizeSkippedBuffer(
+            buffer,
+            trades,
+            options.skipReason ||
+                `本地可用余额 ${formatAmount(availableBalance)} USDC 低于 condition 配对票据 ${formatAmount(evaluation.requestedUsdc)} USDC`,
+            policyTrail
+        );
+        return;
+    }
+
+    const activeExposureUsdc = buildTraceActiveExposureUsdc(portfolio, reservedBuyExposure);
+    if (activeExposureUsdc + evaluation.requestedUsdc > FOLLOW_MAX_ACTIVE_EXPOSURE_USDC + EPSILON) {
+        await finalizeSkippedBuffer(
+            buffer,
+            trades,
+            options.skipReason ||
+                `活跃暴露 ${formatAmount(activeExposureUsdc)} USDC 已接近上限 ${formatAmount(FOLLOW_MAX_ACTIVE_EXPOSURE_USDC)} USDC`,
+            policyTrail
+        );
+        return;
+    }
+
+    const finalReason = mergeReasons(buffer.reason || '', evaluation.reason);
+    await createDirectBatch(selectedTrade, {
+        executionTrade: selectedTrade,
+        bufferId: buffer._id,
+        trades,
+        condition: 'buy',
+        requestedUsdc: evaluation.requestedUsdc,
+        sourcePrice: Math.max(
+            toSafeNumber(buffer.sourcePrice),
+            toSafeNumber(selectedTrade.price),
+            0
+        ),
+        reason: finalReason,
+        policyTrail,
+    });
+    await TraceIntentBuffer.updateOne(
+        { _id: buffer._id },
+        {
+            $set: {
+                state: 'CLOSED',
+                claimedAt: 0,
+                reason: finalReason,
+                policyTrail,
+                completedAt: Date.now(),
+            },
+        }
+    );
+    logger.debug(
+        `${formatBufferRef(buffer)} 已生成模拟 condition 配对批次 action=${evaluation.action} requestedUsdc=${formatAmount(evaluation.requestedUsdc)}`
     );
 };
 
@@ -2888,6 +3108,131 @@ const bufferTraceBuyIntent = async (params: {
     );
 };
 
+const bufferTraceConditionPairBuyIntent = async (params: {
+    trade: UserActivityInterface;
+    sourceUsdc: number;
+    reason?: string;
+    policyTrail?: ExecutionPolicyTrailEntry[];
+    existingOutcomes?: string[];
+}) => {
+    const { trade, sourceUsdc, reason = '', policyTrail = [], existingOutcomes = [] } = params;
+    const normalizedSourceUsdc = Math.max(toSafeNumber(sourceUsdc), 0);
+    if (normalizedSourceUsdc <= 0) {
+        return;
+    }
+
+    let openBuffer = await loadOpenBuyBufferForTrade(trade);
+    if (openBuffer && shouldFlushBufferBeforeAppendingTrade(openBuffer, trade)) {
+        await flushTraceBuyBuffer(openBuffer, {
+            extraPolicyTrail: [
+                buildPolicyTrailEntry(
+                    CONDITION_PAIR_BUFFER_POLICY_ID,
+                    'DEFER',
+                    `累计窗口已超过 ${SIGNAL_BUFFER_MS}ms，先处理上一段 condition 配对缓冲`
+                ),
+            ],
+        });
+        openBuffer = null;
+    }
+
+    const nextSourceUsdc =
+        Math.max(toSafeNumber(openBuffer?.sourceUsdcTotal), 0) + normalizedSourceUsdc;
+    const nextSourceTradeCount =
+        Math.max(toSafeNumber(openBuffer?.sourceTradeCount), 0) + getSourceTradeCount(trade);
+    const previewTrades = openBuffer
+        ? sortTradesAsc([...(await loadTradesByIds(openBuffer.sourceTradeIds)), trade])
+        : [trade];
+    const previewEvaluation = evaluateBufferedConditionPairBuy({
+        trades: previewTrades,
+        existingOutcome: existingOutcomes.length === 1 ? existingOutcomes[0] : '',
+        existingActionCount: existingOutcomes.length,
+    });
+    const flushImmediately =
+        existingOutcomes.length === 0 && previewEvaluation.status === 'EXECUTE';
+    const nextFlushAt = flushImmediately ? Date.now() : Date.now() + SIGNAL_BUFFER_MS;
+    const nextReason = mergeReasons(openBuffer?.reason || '', reason);
+    const nextPolicyTrail = mergePolicyTrail(openBuffer?.policyTrail, policyTrail, [
+        buildPolicyTrailEntry(
+            CONDITION_PAIR_BUFFER_POLICY_ID,
+            'DEFER',
+            flushImmediately
+                ? `condition 累计源买单 ${nextSourceUsdc.toFixed(4)} USDC / ${nextSourceTradeCount} 笔，已达到 leader 触发阈值`
+                : `condition 累计源买单 ${nextSourceUsdc.toFixed(4)} USDC / ${nextSourceTradeCount} 笔，继续等待 ${SIGNAL_BUFFER_MS}ms 窗口收敛`
+        ),
+    ]);
+
+    if (!openBuffer) {
+        await TraceIntentBuffer.create({
+            sourceWallet: USER_ADDRESS,
+            bufferKey: buildTraceBuyBufferKey(trade),
+            state: 'OPEN',
+            condition: 'buy',
+            asset: trade.asset,
+            conditionId: trade.conditionId,
+            title: trade.title,
+            outcome: trade.outcome,
+            side: trade.side,
+            sourceTradeIds: [trade._id],
+            sourceActivityKeys: getSourceActivityKeys(trade),
+            sourceTransactionHashes: getSourceTransactionHashes(trade),
+            sourceTradeCount: getSourceTradeCount(trade),
+            sourceStartedAt: getSourceStartedAt(trade),
+            sourceEndedAt: getSourceEndedAt(trade),
+            requestedUsdc: 0,
+            sourceUsdcTotal: normalizedSourceUsdc,
+            sourcePrice: Math.max(toSafeNumber(trade.price), 0),
+            flushAfter: nextFlushAt,
+            expireAt: nextFlushAt,
+            bufferWindowMs: SIGNAL_BUFFER_MS,
+            sizingMode: 'condition_pair_overlay',
+            claimedAt: 0,
+            reason: nextReason,
+            policyTrail: nextPolicyTrail,
+            completedAt: 0,
+        });
+        return;
+    }
+
+    await TraceIntentBuffer.updateOne(
+        { _id: openBuffer._id },
+        {
+            $set: {
+                title: trade.title,
+                outcome: trade.outcome,
+                side: trade.side,
+                sourceTradeIds: mergeActivityIds(openBuffer.sourceTradeIds, [trade._id]),
+                sourceActivityKeys: mergeStringArrays(
+                    openBuffer.sourceActivityKeys,
+                    getSourceActivityKeys(trade)
+                ),
+                sourceTransactionHashes: mergeStringArrays(
+                    openBuffer.sourceTransactionHashes,
+                    getSourceTransactionHashes(trade)
+                ),
+                sourceTradeCount: openBuffer.sourceTradeCount + getSourceTradeCount(trade),
+                sourceStartedAt: Math.min(
+                    toSafeNumber(openBuffer.sourceStartedAt, Number.MAX_SAFE_INTEGER),
+                    getSourceStartedAt(trade)
+                ),
+                sourceEndedAt: Math.max(
+                    toSafeNumber(openBuffer.sourceEndedAt),
+                    getSourceEndedAt(trade)
+                ),
+                requestedUsdc: 0,
+                sourceUsdcTotal: nextSourceUsdc,
+                sourcePrice: Math.max(toSafeNumber(trade.price), 0),
+                flushAfter: nextFlushAt,
+                expireAt: nextFlushAt,
+                bufferWindowMs: SIGNAL_BUFFER_MS,
+                sizingMode: 'condition_pair_overlay',
+                reason: nextReason,
+                policyTrail: nextPolicyTrail,
+                completedAt: 0,
+            },
+        }
+    );
+};
+
 const bufferTraceSignalBuyIntent = async (params: {
     trade: UserActivityInterface;
     sourceUsdc: number;
@@ -3138,6 +3483,7 @@ const createDirectBatch = async (
     params?: {
         bufferId?: CopyIntentBufferInterface['_id'];
         trades?: UserActivityInterface[];
+        executionTrade?: UserActivityInterface;
         condition?: string;
         requestedUsdc?: number;
         requestedSize?: number;
@@ -3149,17 +3495,18 @@ const createDirectBatch = async (
     const trades = sortTradesAsc(params?.trades?.length ? params.trades : [trade]);
     const firstTrade = trades[0] || trade;
     const latestTrade = trades[trades.length - 1] || trade;
+    const executionTrade = params?.executionTrade || latestTrade;
 
     await TraceExecutionBatch.create({
         sourceWallet: USER_ADDRESS,
         bufferId: params?.bufferId,
         status: 'READY',
-        condition: params?.condition || String(latestTrade.side || '').toLowerCase(),
-        asset: latestTrade.asset,
-        conditionId: latestTrade.conditionId,
-        title: latestTrade.title,
-        outcome: latestTrade.outcome,
-        side: latestTrade.side,
+        condition: params?.condition || String(executionTrade.side || '').toLowerCase(),
+        asset: executionTrade.asset,
+        conditionId: executionTrade.conditionId,
+        title: executionTrade.title,
+        outcome: executionTrade.outcome,
+        side: executionTrade.side,
         sourceTradeIds: trades.map((item) => item._id),
         sourceActivityKeys: mergeStringArrays(...trades.map((item) => getSourceActivityKeys(item))),
         sourceTransactionHashes: mergeStringArrays(
@@ -3170,7 +3517,7 @@ const createDirectBatch = async (
         sourceEndedAt: Math.max(...trades.map((item) => getSourceEndedAt(item))),
         sourcePrice: Math.max(
             toSafeNumber(params?.sourcePrice),
-            toSafeNumber(latestTrade.price),
+            toSafeNumber(executionTrade.price),
             0
         ),
         requestedUsdc: Math.max(toSafeNumber(params?.requestedUsdc), 0),
@@ -3380,11 +3727,15 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
                         buildPolicyTrailEntry(
                             openBuffer.sizingMode === 'signal_fixed_ticket'
                                 ? TRACE_SIGNAL_BUFFER_POLICY_ID
-                                : TRACE_BUY_BUFFER_POLICY_ID,
+                                : openBuffer.sizingMode === 'condition_pair_overlay'
+                                  ? CONDITION_PAIR_BUFFER_POLICY_ID
+                                  : TRACE_BUY_BUFFER_POLICY_ID,
                             'DEFER',
                             openBuffer.sizingMode === 'signal_fixed_ticket'
                                 ? `检测到新的同资产信号，上一段累计窗口已超过 ${SIGNAL_BUFFER_MS}ms`
-                                : `检测到新的同资产买单，上一段累计窗口已超过 ${BUY_INTENT_BUFFER_MAX_MS}ms`
+                                : openBuffer.sizingMode === 'condition_pair_overlay'
+                                  ? `检测到新的 condition 信号，上一段累计窗口已超过 ${SIGNAL_BUFFER_MS}ms`
+                                  : `检测到新的同资产买单，上一段累计窗口已超过 ${BUY_INTENT_BUFFER_MAX_MS}ms`
                         ),
                     ],
                 });
@@ -3393,6 +3744,64 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
             const activeBuyBatch = await loadActiveBuyBatchForTrade(trade);
             const hasLocalExposure = Math.max(toSafeNumber(existingPosition.size), 0) > EPSILON;
             const hasPendingBuyExposure = openBuffer !== null || activeBuyBatch !== null;
+
+            if (ENV.BUY_SIZING_MODE === 'condition_pair_overlay') {
+                const signalTradeEvaluation = evaluateSignalBuyTrade(trade);
+                if (signalTradeEvaluation.status === 'SKIP') {
+                    await recordSkippedDirectTrade({
+                        trade,
+                        reason: signalTradeEvaluation.reason,
+                        requestedUsdc: signalTradeEvaluation.sourceUsdc,
+                        sourcePrice: Math.max(toSafeNumber(trade.price), 0),
+                        policyTrail: signalTradeEvaluation.policyTrail,
+                        condition: 'buy',
+                    });
+                    logger.debug(
+                        `${formatTradeRef(trade)} 已跳过模拟 condition 配对买单 reason=${signalTradeEvaluation.reason}`
+                    );
+                    continue;
+                }
+
+                const existingOutcomes = await loadTraceConditionPairActionOutcomes(
+                    trade.conditionId
+                );
+                if (
+                    openBuffer === null &&
+                    existingOutcomes.length >= PAIR_MAX_ACTIONS_PER_CONDITION
+                ) {
+                    const reason = buildConditionPairMaxActionsReason();
+                    await recordSkippedDirectTrade({
+                        trade,
+                        reason,
+                        requestedUsdc: signalTradeEvaluation.sourceUsdc,
+                        sourcePrice: Math.max(toSafeNumber(trade.price), 0),
+                        policyTrail: [
+                            buildPolicyTrailEntry(
+                                CONDITION_PAIR_MAX_ACTIONS_POLICY_ID,
+                                'SKIP',
+                                reason
+                            ),
+                        ],
+                        condition: 'buy',
+                    });
+                    logger.debug(
+                        `${formatTradeRef(trade)} 已跳过模拟 condition 配对买单 reason=${reason}`
+                    );
+                    continue;
+                }
+
+                await bufferTraceConditionPairBuyIntent({
+                    trade,
+                    sourceUsdc: signalTradeEvaluation.sourceUsdc,
+                    reason: signalTradeEvaluation.reason,
+                    policyTrail: signalTradeEvaluation.policyTrail,
+                    existingOutcomes,
+                });
+                logger.debug(
+                    `${formatTradeRef(trade)} 已写入模拟 condition 配对缓冲 sourceUsdc=${formatAmount(signalTradeEvaluation.sourceUsdc)}`
+                );
+                continue;
+            }
 
             if (ENV.BUY_SIZING_MODE === 'signal_fixed_ticket') {
                 const signalTradeEvaluation = evaluateSignalBuyTrade(trade);

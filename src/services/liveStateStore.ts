@@ -21,6 +21,11 @@ const SIGNAL_TICKET_POLICY_IDS = [
     'signal-fixed-ticket',
     'signal-strong-ticket',
 ];
+const CONDITION_PAIR_POLICY_IDS = [
+    'condition-leader-entry',
+    'condition-strong-leader-entry',
+    'condition-hedge-overlay',
+];
 const ACTIVE_BUY_BATCH_STATUSES = [
     'READY',
     'PROCESSING',
@@ -490,6 +495,26 @@ class LiveStateStore {
                 !['SKIPPED', 'FAILED'].includes(batch.status) &&
                 hasPolicyId(batch.policyTrail, SIGNAL_TICKET_POLICY_IDS)
         ).length;
+    }
+
+    getConditionPairActionOutcomes(conditionId: string) {
+        const outcomes = new Set<string>();
+        for (const batch of this.batchesById.values()) {
+            if (
+                batch.conditionId === conditionId &&
+                batch.condition === 'buy' &&
+                !['SKIPPED', 'FAILED'].includes(batch.status) &&
+                hasPolicyId(batch.policyTrail, CONDITION_PAIR_POLICY_IDS)
+            ) {
+                outcomes.add(String(batch.outcome || '').trim());
+            }
+        }
+
+        return [...outcomes].filter(Boolean);
+    }
+
+    countConditionPairActions(conditionId: string) {
+        return this.getConditionPairActionOutcomes(conditionId).length;
     }
 
     markBootstrapExposure(

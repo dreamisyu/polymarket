@@ -30,7 +30,8 @@ export const resolveExecutionIntent = (
     if (
         type === 'TRADE' &&
         resolveTradeAction(trade) === 'BUY' &&
-        ENV.BUY_SIZING_MODE === 'signal_fixed_ticket' &&
+        (ENV.BUY_SIZING_MODE === 'signal_fixed_ticket' ||
+            ENV.BUY_SIZING_MODE === 'condition_pair_overlay') &&
         ENV.FOLLOW_MARKET_SCOPE === 'crypto_updown_5m' &&
         !isTradeWithinSignalMarketScope(trade)
     ) {

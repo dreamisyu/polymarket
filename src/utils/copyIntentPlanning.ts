@@ -26,6 +26,20 @@ const FOLLOW_WEAK_TICKET_USDC = ENV.FOLLOW_WEAK_TICKET_USDC;
 const FOLLOW_FIXED_TICKET_USDC = ENV.FOLLOW_FIXED_TICKET_USDC;
 const FOLLOW_STRONG_TICKET_USDC = ENV.FOLLOW_STRONG_TICKET_USDC;
 const FOLLOW_MAX_TICKETS_PER_CONDITION = ENV.FOLLOW_MAX_TICKETS_PER_CONDITION;
+const PAIR_OVERLAY_MIN_BUY_USDC = ENV.PAIR_OVERLAY_MIN_BUY_USDC;
+const PAIR_LEADER_MIN_SOURCE_USDC = ENV.PAIR_LEADER_MIN_SOURCE_USDC;
+const PAIR_LEADER_MIN_SOURCE_COUNT = ENV.PAIR_LEADER_MIN_SOURCE_COUNT;
+const PAIR_LEADER_MIN_SHARE = ENV.PAIR_LEADER_MIN_SHARE;
+const PAIR_LEADER_MIN_EDGE_USDC = ENV.PAIR_LEADER_MIN_EDGE_USDC;
+const PAIR_STRONG_SOURCE_USDC = ENV.PAIR_STRONG_SOURCE_USDC;
+const PAIR_STRONG_SOURCE_COUNT = ENV.PAIR_STRONG_SOURCE_COUNT;
+const PAIR_STRONG_MIN_SHARE = ENV.PAIR_STRONG_MIN_SHARE;
+const PAIR_STRONG_MIN_EDGE_USDC = ENV.PAIR_STRONG_MIN_EDGE_USDC;
+const PAIR_LEADER_TICKET_USDC = ENV.PAIR_LEADER_TICKET_USDC;
+const PAIR_STRONG_TICKET_USDC = ENV.PAIR_STRONG_TICKET_USDC;
+const PAIR_HEDGE_TICKET_USDC = ENV.PAIR_HEDGE_TICKET_USDC;
+const PAIR_HEDGE_PRICE_SUM_MAX = ENV.PAIR_HEDGE_PRICE_SUM_MAX;
+const PAIR_MAX_ACTIONS_PER_CONDITION = ENV.PAIR_MAX_ACTIONS_PER_CONDITION;
 const FOLLOW_MARKET_SCOPE = ENV.FOLLOW_MARKET_SCOPE;
 const EPSILON = 1e-8;
 
@@ -75,6 +89,34 @@ export interface SignalBufferedBuyEvaluation {
     policyTrail: ExecutionPolicyTrailEntry[];
 }
 
+export interface ConditionPairOutcomeSignalSummary {
+    outcome: string;
+    sourceUsdc: number;
+    sourceTradeCount: number;
+    maxSingleSourceUsdc: number;
+    latestTrade: UserActivityInterface;
+}
+
+export interface ConditionPairSignalSummary {
+    totalSourceUsdc: number;
+    totalSourceTradeCount: number;
+    leader: ConditionPairOutcomeSignalSummary | null;
+    follower: ConditionPairOutcomeSignalSummary | null;
+    leaderShare: number;
+    leaderEdgeUsdc: number;
+}
+
+export interface ConditionPairBufferedBuyEvaluation {
+    status: 'EXECUTE' | 'SKIP';
+    action: 'leader' | 'hedge' | '';
+    requestedUsdc: number;
+    selectedOutcome: string;
+    selectedTrade: UserActivityInterface | null;
+    summary: ConditionPairSignalSummary;
+    reason: string;
+    policyTrail: ExecutionPolicyTrailEntry[];
+}
+
 const dedupeReasons = (...reasons: string[]) =>
     [...new Set(reasons.map((reason) => String(reason || '').trim()))].filter(Boolean).join('；');
 
@@ -82,6 +124,11 @@ const toSafeNumber = (value: unknown, fallback = 0) => {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
 };
+
+const normalizeOutcomeKey = (value: unknown) =>
+    String(value || '')
+        .trim()
+        .toLowerCase();
 
 const parseClockMinutes = (hourText: string, minuteText: string, meridiemText: string) => {
     const hour = Number.parseInt(hourText, 10);
@@ -290,6 +337,397 @@ export const getTradeSourceUsdc = (
     }
 
     return 0;
+};
+
+const buildConditionPairPolicyId = (action: 'leader' | 'strong_leader' | 'hedge' | 'skip') => {
+    if (action === 'leader') {
+        return 'condition-leader-entry';
+    }
+
+    if (action === 'strong_leader') {
+        return 'condition-strong-leader-entry';
+    }
+
+    if (action === 'hedge') {
+        return 'condition-hedge-overlay';
+    }
+
+    return 'condition-overlay-skip';
+};
+
+export const summarizeConditionPairSignals = (
+    trades: UserActivityInterface[]
+): ConditionPairSignalSummary => {
+    const normalizedTrades = sortTradesAsc(trades).filter(
+        (trade) => resolveTradeActionLike(trade.side || trade.type) === 'BUY'
+    );
+    const grouped = new Map<string, ConditionPairOutcomeSignalSummary>();
+
+    for (const trade of normalizedTrades) {
+        const outcome = String(trade.outcome || '').trim() || 'UNKNOWN';
+        const sourceUsdc = getTradeSourceUsdc(trade);
+        const current = grouped.get(outcome);
+        if (!current) {
+            grouped.set(outcome, {
+                outcome,
+                sourceUsdc,
+                sourceTradeCount: getSourceTradeCountLike(trade),
+                maxSingleSourceUsdc: sourceUsdc,
+                latestTrade: trade,
+            });
+            continue;
+        }
+
+        current.sourceUsdc += sourceUsdc;
+        current.sourceTradeCount += getSourceTradeCountLike(trade);
+        current.maxSingleSourceUsdc = Math.max(current.maxSingleSourceUsdc, sourceUsdc);
+        current.latestTrade = trade;
+    }
+
+    const outcomes = [...grouped.values()].sort((left, right) => {
+        if (right.sourceUsdc !== left.sourceUsdc) {
+            return right.sourceUsdc - left.sourceUsdc;
+        }
+
+        if (right.sourceTradeCount !== left.sourceTradeCount) {
+            return right.sourceTradeCount - left.sourceTradeCount;
+        }
+
+        return right.latestTrade.timestamp - left.latestTrade.timestamp;
+    });
+    const leader = outcomes[0] || null;
+    const follower = outcomes[1] || null;
+    const totalSourceUsdc = outcomes.reduce((sum, item) => sum + item.sourceUsdc, 0);
+    const totalSourceTradeCount = outcomes.reduce((sum, item) => sum + item.sourceTradeCount, 0);
+    const leaderShare = leader && totalSourceUsdc > 0 ? leader.sourceUsdc / totalSourceUsdc : 0;
+    const leaderEdgeUsdc = leader ? leader.sourceUsdc - (follower?.sourceUsdc || 0) : 0;
+
+    return {
+        totalSourceUsdc,
+        totalSourceTradeCount,
+        leader,
+        follower,
+        leaderShare,
+        leaderEdgeUsdc,
+    };
+};
+
+const clampConditionPairTicket = (
+    requestedUsdc: number
+): {
+    status: 'EXECUTE' | 'SKIP';
+    requestedUsdc: number;
+    reason: string;
+    policyTrail: ExecutionPolicyTrailEntry[];
+} => {
+    const normalizedRequestedUsdc = Math.max(toSafeNumber(requestedUsdc), 0);
+    if (normalizedRequestedUsdc < PAIR_OVERLAY_MIN_BUY_USDC) {
+        return {
+            status: 'SKIP',
+            requestedUsdc: normalizedRequestedUsdc,
+            reason: `固定票据 ${normalizedRequestedUsdc.toFixed(4)} USDC 低于条件配对最小买入金额 ${PAIR_OVERLAY_MIN_BUY_USDC.toFixed(4)} USDC`,
+            policyTrail: [
+                buildTrailEntry(
+                    'condition-overlay-under-min',
+                    'SKIP',
+                    `固定票据 ${normalizedRequestedUsdc.toFixed(4)} USDC 低于条件配对最小买入金额 ${PAIR_OVERLAY_MIN_BUY_USDC.toFixed(4)} USDC`
+                ),
+            ],
+        };
+    }
+
+    if (MAX_ORDER_USDC > 0 && normalizedRequestedUsdc > MAX_ORDER_USDC) {
+        const cappedUsdc = Math.max(toSafeNumber(MAX_ORDER_USDC), 0);
+        if (cappedUsdc < PAIR_OVERLAY_MIN_BUY_USDC) {
+            return {
+                status: 'SKIP',
+                requestedUsdc: cappedUsdc,
+                reason: `单笔上限 ${cappedUsdc.toFixed(4)} USDC 低于条件配对最小买入金额 ${PAIR_OVERLAY_MIN_BUY_USDC.toFixed(4)} USDC`,
+                policyTrail: [
+                    buildTrailEntry(
+                        'condition-overlay-order-cap',
+                        'SKIP',
+                        `单笔上限 ${cappedUsdc.toFixed(4)} USDC 低于条件配对最小买入金额 ${PAIR_OVERLAY_MIN_BUY_USDC.toFixed(4)} USDC`
+                    ),
+                ],
+            };
+        }
+
+        return {
+            status: 'EXECUTE',
+            requestedUsdc: cappedUsdc,
+            reason: `条件配对票据已按单笔风控上限裁剪至 ${cappedUsdc.toFixed(4)} USDC`,
+            policyTrail: [
+                buildTrailEntry(
+                    'condition-overlay-order-cap',
+                    'ADJUST',
+                    `条件配对票据已按单笔风控上限裁剪至 ${cappedUsdc.toFixed(4)} USDC`
+                ),
+            ],
+        };
+    }
+
+    return {
+        status: 'EXECUTE',
+        requestedUsdc: normalizedRequestedUsdc,
+        reason: '',
+        policyTrail: [],
+    };
+};
+
+const getSourceTradeCountLike = (
+    trade: Pick<UserActivityInterface, 'sourceTradeCount'> & Partial<UserActivityInterface>
+) => Math.max(toSafeNumber((trade as UserActivityInterface).sourceTradeCount, 1), 1);
+
+const resolveTradeActionLike = (value: unknown) =>
+    String(value || '')
+        .trim()
+        .toUpperCase();
+
+export const evaluateBufferedConditionPairBuy = (params: {
+    trades: UserActivityInterface[];
+    existingOutcome?: string;
+    existingActionCount?: number;
+    hedgePriceSum?: number | null;
+}): ConditionPairBufferedBuyEvaluation => {
+    const summary = summarizeConditionPairSignals(params.trades);
+    const existingActionCount = Math.max(toSafeNumber(params.existingActionCount), 0);
+    const existingOutcome = String(params.existingOutcome || '').trim();
+    const hedgePriceSum =
+        params.hedgePriceSum === null || params.hedgePriceSum === undefined
+            ? null
+            : Math.max(toSafeNumber(params.hedgePriceSum), 0);
+
+    if (!summary.leader) {
+        return {
+            status: 'SKIP',
+            action: '',
+            requestedUsdc: 0,
+            selectedOutcome: '',
+            selectedTrade: null,
+            summary,
+            reason: 'condition 级信号缓冲中缺少可用的买入样本',
+            policyTrail: [
+                buildTrailEntry(
+                    'condition-overlay-empty',
+                    'SKIP',
+                    'condition 级信号缓冲中缺少可用的买入样本'
+                ),
+            ],
+        };
+    }
+
+    if (existingActionCount >= PAIR_MAX_ACTIONS_PER_CONDITION) {
+        return {
+            status: 'SKIP',
+            action: '',
+            requestedUsdc: 0,
+            selectedOutcome: '',
+            selectedTrade: null,
+            summary,
+            reason: `已达到同 condition 最大动作次数 ${PAIR_MAX_ACTIONS_PER_CONDITION}`,
+            policyTrail: [
+                buildTrailEntry(
+                    'condition-overlay-max-actions',
+                    'SKIP',
+                    `已达到同 condition 最大动作次数 ${PAIR_MAX_ACTIONS_PER_CONDITION}`
+                ),
+            ],
+        };
+    }
+
+    if (existingActionCount <= 0) {
+        const isStrongLeader =
+            summary.leader.sourceUsdc >= PAIR_STRONG_SOURCE_USDC &&
+            summary.leader.sourceTradeCount >= PAIR_STRONG_SOURCE_COUNT &&
+            summary.leaderShare >= PAIR_STRONG_MIN_SHARE &&
+            summary.leaderEdgeUsdc >= PAIR_STRONG_MIN_EDGE_USDC;
+        const isBaseLeader =
+            summary.leader.sourceUsdc >= PAIR_LEADER_MIN_SOURCE_USDC &&
+            summary.leader.sourceTradeCount >= PAIR_LEADER_MIN_SOURCE_COUNT &&
+            summary.leaderShare >= PAIR_LEADER_MIN_SHARE &&
+            summary.leaderEdgeUsdc >= PAIR_LEADER_MIN_EDGE_USDC;
+
+        if (!isStrongLeader && !isBaseLeader) {
+            return {
+                status: 'SKIP',
+                action: '',
+                requestedUsdc: 0,
+                selectedOutcome: '',
+                selectedTrade: null,
+                summary,
+                reason:
+                    `condition 累计源买单 ${summary.totalSourceUsdc.toFixed(4)} USDC / ${summary.totalSourceTradeCount} 笔，` +
+                    `主方向 ${summary.leader.outcome} 占比 ${(summary.leaderShare * 100).toFixed(2)}%，净优势 ${summary.leaderEdgeUsdc.toFixed(4)} USDC，未达到 leader 触发阈值`,
+                policyTrail: [
+                    buildTrailEntry(
+                        'condition-overlay-leader-threshold',
+                        'SKIP',
+                        `主方向 ${summary.leader.outcome} 未达到 leader 触发阈值`
+                    ),
+                ],
+            };
+        }
+
+        const desiredTicketUsdc = isStrongLeader
+            ? PAIR_STRONG_TICKET_USDC
+            : PAIR_LEADER_TICKET_USDC;
+        const triggerReason =
+            `condition 累计源买单 ${summary.totalSourceUsdc.toFixed(4)} USDC / ${summary.totalSourceTradeCount} 笔，` +
+            `主方向 ${summary.leader.outcome} 占比 ${(summary.leaderShare * 100).toFixed(2)}%，净优势 ${summary.leaderEdgeUsdc.toFixed(4)} USDC，` +
+            `已触发${isStrongLeader ? '强' : '基础'} leader 固定票据 ${desiredTicketUsdc.toFixed(4)} USDC`;
+        const capped = clampConditionPairTicket(desiredTicketUsdc);
+        if (capped.status === 'SKIP') {
+            return {
+                status: 'SKIP',
+                action: '',
+                requestedUsdc: capped.requestedUsdc,
+                selectedOutcome: '',
+                selectedTrade: null,
+                summary,
+                reason: dedupeReasons(triggerReason, capped.reason),
+                policyTrail: [
+                    buildTrailEntry(
+                        buildConditionPairPolicyId(isStrongLeader ? 'strong_leader' : 'leader'),
+                        'SKIP',
+                        triggerReason
+                    ),
+                    ...capped.policyTrail,
+                ],
+            };
+        }
+
+        return {
+            status: 'EXECUTE',
+            action: 'leader',
+            requestedUsdc: capped.requestedUsdc,
+            selectedOutcome: summary.leader.outcome,
+            selectedTrade: summary.leader.latestTrade,
+            summary,
+            reason: dedupeReasons(triggerReason, capped.reason),
+            policyTrail: [
+                buildTrailEntry(
+                    buildConditionPairPolicyId(isStrongLeader ? 'strong_leader' : 'leader'),
+                    'ADJUST',
+                    triggerReason
+                ),
+                ...capped.policyTrail,
+            ],
+        };
+    }
+
+    if (!existingOutcome) {
+        return {
+            status: 'SKIP',
+            action: '',
+            requestedUsdc: 0,
+            selectedOutcome: '',
+            selectedTrade: null,
+            summary,
+            reason: '已有 condition 动作但缺少主方向记录，已跳过本次配对补边',
+            policyTrail: [
+                buildTrailEntry(
+                    'condition-overlay-missing-leader',
+                    'SKIP',
+                    '已有 condition 动作但缺少主方向记录'
+                ),
+            ],
+        };
+    }
+
+    const hedgeCandidate = [summary.leader, summary.follower]
+        .filter((item): item is ConditionPairOutcomeSignalSummary => Boolean(item))
+        .find((item) => normalizeOutcomeKey(item.outcome) !== normalizeOutcomeKey(existingOutcome));
+    if (!hedgeCandidate) {
+        return {
+            status: 'SKIP',
+            action: '',
+            requestedUsdc: 0,
+            selectedOutcome: '',
+            selectedTrade: null,
+            summary,
+            reason: `condition ${existingOutcome} 已有主方向仓位，但当前窗口没有反向 overlay 信号`,
+            policyTrail: [
+                buildTrailEntry(
+                    'condition-overlay-no-follower',
+                    'SKIP',
+                    '当前窗口没有可用的反向 overlay 信号'
+                ),
+            ],
+        };
+    }
+
+    if (hedgePriceSum === null || hedgePriceSum <= 0) {
+        return {
+            status: 'SKIP',
+            action: '',
+            requestedUsdc: 0,
+            selectedOutcome: '',
+            selectedTrade: null,
+            summary,
+            reason: '当前缺少可用盘口，暂不执行保守型 overlay 配对',
+            policyTrail: [
+                buildTrailEntry(
+                    'condition-overlay-no-book',
+                    'SKIP',
+                    '当前缺少可用盘口，暂不执行保守型 overlay 配对'
+                ),
+            ],
+        };
+    }
+
+    if (hedgePriceSum > PAIR_HEDGE_PRICE_SUM_MAX) {
+        return {
+            status: 'SKIP',
+            action: '',
+            requestedUsdc: 0,
+            selectedOutcome: '',
+            selectedTrade: null,
+            summary,
+            reason: `当前双边买价和 ${hedgePriceSum.toFixed(4)} 高于配对阈值 ${PAIR_HEDGE_PRICE_SUM_MAX.toFixed(4)}，已放弃 overlay`,
+            policyTrail: [
+                buildTrailEntry(
+                    'condition-overlay-no-pair-edge',
+                    'SKIP',
+                    `当前双边买价和 ${hedgePriceSum.toFixed(4)} 高于配对阈值 ${PAIR_HEDGE_PRICE_SUM_MAX.toFixed(4)}`
+                ),
+            ],
+        };
+    }
+
+    const triggerReason =
+        `condition 已建立 ${existingOutcome} 主方向仓位，` +
+        `当前双边买价和 ${hedgePriceSum.toFixed(4)}，已触发保守型 overlay 配对 ${PAIR_HEDGE_TICKET_USDC.toFixed(4)} USDC`;
+    const capped = clampConditionPairTicket(PAIR_HEDGE_TICKET_USDC);
+    if (capped.status === 'SKIP') {
+        return {
+            status: 'SKIP',
+            action: '',
+            requestedUsdc: capped.requestedUsdc,
+            selectedOutcome: '',
+            selectedTrade: null,
+            summary,
+            reason: dedupeReasons(triggerReason, capped.reason),
+            policyTrail: [
+                buildTrailEntry(buildConditionPairPolicyId('hedge'), 'SKIP', triggerReason),
+                ...capped.policyTrail,
+            ],
+        };
+    }
+
+    return {
+        status: 'EXECUTE',
+        action: 'hedge',
+        requestedUsdc: capped.requestedUsdc,
+        selectedOutcome: hedgeCandidate.outcome,
+        selectedTrade: hedgeCandidate.latestTrade,
+        summary,
+        reason: dedupeReasons(triggerReason, capped.reason),
+        policyTrail: [
+            buildTrailEntry(buildConditionPairPolicyId('hedge'), 'ADJUST', triggerReason),
+            ...capped.policyTrail,
+        ],
+    };
 };
 
 export const evaluateSignalBuyTrade = (

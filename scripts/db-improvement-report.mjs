@@ -47,6 +47,16 @@ const SIGNAL_TICKET_POLICY_IDS = new Set([
     ...SIGNAL_STRONG_POLICY_IDS,
 ]);
 const SIGNAL_SECOND_TICKET_POLICY_IDS = new Set(['signal-second-ticket']);
+const CONDITION_PAIR_LEADER_POLICY_IDS = new Set([
+    'condition-leader-entry',
+    'condition-strong-leader-entry',
+]);
+const CONDITION_PAIR_STRONG_LEADER_POLICY_IDS = new Set(['condition-strong-leader-entry']);
+const CONDITION_PAIR_HEDGE_POLICY_IDS = new Set(['condition-hedge-overlay']);
+const CONDITION_PAIR_POLICY_IDS = new Set([
+    ...CONDITION_PAIR_LEADER_POLICY_IDS,
+    ...CONDITION_PAIR_HEDGE_POLICY_IDS,
+]);
 
 const parseArgs = (argv) => {
     const parsed = {
@@ -272,6 +282,34 @@ const summarizeBatches = (batches, top) => {
         const key = buildSignalConditionOutcomeKey(batch);
         signalTicketCountsByCondition.set(key, (signalTicketCountsByCondition.get(key) || 0) + 1);
     }
+    const conditionPairBuyBatches = buyBatches.filter((item) =>
+        hasPolicyId(item.policyTrail, CONDITION_PAIR_POLICY_IDS)
+    );
+    const conditionPairActionCountsByCondition = new Map();
+    for (const batch of conditionPairBuyBatches) {
+        if (['SKIPPED', 'FAILED'].includes(String(batch.status || '').toUpperCase())) {
+            continue;
+        }
+
+        const conditionId = String(batch.conditionId || '').trim();
+        if (!conditionId) {
+            continue;
+        }
+
+        conditionPairActionCountsByCondition.set(
+            conditionId,
+            (conditionPairActionCountsByCondition.get(conditionId) || 0) + 1
+        );
+    }
+    const pairedConditionIds = new Set();
+    const leaderOnlyConditionIds = new Set();
+    for (const [conditionId, count] of conditionPairActionCountsByCondition.entries()) {
+        if (count >= 2) {
+            pairedConditionIds.add(conditionId);
+            continue;
+        }
+        leaderOnlyConditionIds.add(conditionId);
+    }
     const buyConfirmedCount = buyBatches.filter(
         (item) => String(item.status || '').toUpperCase() === 'CONFIRMED'
     ).length;
@@ -310,6 +348,21 @@ const summarizeBatches = (batches, top) => {
         maxTicketsPerConditionObserved:
             signalTicketCountsByCondition.size > 0
                 ? Math.max(...signalTicketCountsByCondition.values())
+                : 0,
+        leaderEntryCount: conditionPairBuyBatches.filter((item) =>
+            hasPolicyId(item.policyTrail, CONDITION_PAIR_LEADER_POLICY_IDS)
+        ).length,
+        strongLeaderEntryCount: conditionPairBuyBatches.filter((item) =>
+            hasPolicyId(item.policyTrail, CONDITION_PAIR_STRONG_LEADER_POLICY_IDS)
+        ).length,
+        hedgeOverlayCount: conditionPairBuyBatches.filter((item) =>
+            hasPolicyId(item.policyTrail, CONDITION_PAIR_HEDGE_POLICY_IDS)
+        ).length,
+        pairedConditionCount: pairedConditionIds.size,
+        leaderOnlyConditionCount: leaderOnlyConditionIds.size,
+        maxActionsPerConditionObserved:
+            conditionPairActionCountsByCondition.size > 0
+                ? Math.max(...conditionPairActionCountsByCondition.values())
                 : 0,
         buySlippageSkipCount: buyBatches.filter(
             (item) =>
@@ -602,6 +655,20 @@ const renderTextSummary = (summary) => {
     );
     lines.push(
         `- 同 condition 最大跟单次数观测值: ${formatCount(summary.batches.maxTicketsPerConditionObserved)}`
+    );
+    lines.push(
+        `- 配对覆盖批次 leader/strong leader/hedge: ` +
+            `${formatCount(summary.batches.leaderEntryCount)}/` +
+            `${formatCount(summary.batches.strongLeaderEntryCount)}/` +
+            `${formatCount(summary.batches.hedgeOverlayCount)}`
+    );
+    lines.push(
+        `- 配对覆盖 condition 仅 leader/已配对: ` +
+            `${formatCount(summary.batches.leaderOnlyConditionCount)}/` +
+            `${formatCount(summary.batches.pairedConditionCount)}`
+    );
+    lines.push(
+        `- 同 condition 最大动作次数观测值: ${formatCount(summary.batches.maxActionsPerConditionObserved)}`
     );
     lines.push(`- Buy 滑点跳过批次: ${formatCount(summary.batches.buySlippageSkipCount)}`);
     lines.push(

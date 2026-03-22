@@ -31,6 +31,16 @@ const SIGNAL_TICKET_POLICY_IDS = new Set([
     ...SIGNAL_STRONG_POLICY_IDS,
 ]);
 const SIGNAL_SECOND_TICKET_POLICY_IDS = new Set(['signal-second-ticket']);
+const CONDITION_PAIR_LEADER_POLICY_IDS = new Set([
+    'condition-leader-entry',
+    'condition-strong-leader-entry',
+]);
+const CONDITION_PAIR_STRONG_LEADER_POLICY_IDS = new Set(['condition-strong-leader-entry']);
+const CONDITION_PAIR_HEDGE_POLICY_IDS = new Set(['condition-hedge-overlay']);
+const CONDITION_PAIR_POLICY_IDS = new Set([
+    ...CONDITION_PAIR_LEADER_POLICY_IDS,
+    ...CONDITION_PAIR_HEDGE_POLICY_IDS,
+]);
 const DEFAULT_MODE = process.env.EXECUTION_MODE === 'trace' ? 'trace' : 'live';
 
 const parseArgs = (argv) => {
@@ -366,6 +376,34 @@ const summarizeExecutionBatches = (batches) => {
         const key = buildSignalConditionOutcomeKey(batch);
         signalTicketCountsByCondition.set(key, (signalTicketCountsByCondition.get(key) || 0) + 1);
     }
+    const conditionPairBuyBatches = buyBatches.filter((batch) =>
+        hasPolicyId(batch.policyTrail, CONDITION_PAIR_POLICY_IDS)
+    );
+    const conditionPairActionCountsByCondition = new Map();
+    for (const batch of conditionPairBuyBatches) {
+        if (['SKIPPED', 'FAILED'].includes(normalizeStatus(batch.status))) {
+            continue;
+        }
+
+        const conditionId = String(batch.conditionId || '').trim();
+        if (!conditionId) {
+            continue;
+        }
+
+        conditionPairActionCountsByCondition.set(
+            conditionId,
+            (conditionPairActionCountsByCondition.get(conditionId) || 0) + 1
+        );
+    }
+    const pairedConditionIds = new Set();
+    const leaderOnlyConditionIds = new Set();
+    for (const [conditionId, count] of conditionPairActionCountsByCondition.entries()) {
+        if (count >= 2) {
+            pairedConditionIds.add(conditionId);
+            continue;
+        }
+        leaderOnlyConditionIds.add(conditionId);
+    }
     const buyConfirmedCount = countItems(
         buyBatches,
         (batch) => normalizeStatus(batch.status) === 'CONFIRMED'
@@ -428,6 +466,21 @@ const summarizeExecutionBatches = (batches) => {
         maxTicketsPerConditionObserved:
             signalTicketCountsByCondition.size > 0
                 ? Math.max(...signalTicketCountsByCondition.values())
+                : 0,
+        leaderEntryCount: countItems(conditionPairBuyBatches, (batch) =>
+            hasPolicyId(batch.policyTrail, CONDITION_PAIR_LEADER_POLICY_IDS)
+        ),
+        strongLeaderEntryCount: countItems(conditionPairBuyBatches, (batch) =>
+            hasPolicyId(batch.policyTrail, CONDITION_PAIR_STRONG_LEADER_POLICY_IDS)
+        ),
+        hedgeOverlayCount: countItems(conditionPairBuyBatches, (batch) =>
+            hasPolicyId(batch.policyTrail, CONDITION_PAIR_HEDGE_POLICY_IDS)
+        ),
+        pairedConditionCount: pairedConditionIds.size,
+        leaderOnlyConditionCount: leaderOnlyConditionIds.size,
+        maxActionsPerConditionObserved:
+            conditionPairActionCountsByCondition.size > 0
+                ? Math.max(...conditionPairActionCountsByCondition.values())
                 : 0,
         buySlippageSkipCount: countItems(
             buyBatches,
@@ -813,6 +866,20 @@ const printHumanReadable = (summary) => {
         );
         lines.push(
             `- 同 condition 最大跟单次数观测值: ${toSafeNumber(summary.batchSummary.maxTicketsPerConditionObserved)}`
+        );
+        lines.push(
+            `- 配对覆盖批次 leader/strong leader/hedge: ` +
+                `${toSafeNumber(summary.batchSummary.leaderEntryCount)}/` +
+                `${toSafeNumber(summary.batchSummary.strongLeaderEntryCount)}/` +
+                `${toSafeNumber(summary.batchSummary.hedgeOverlayCount)}`
+        );
+        lines.push(
+            `- 配对覆盖 condition 仅 leader/已配对: ` +
+                `${toSafeNumber(summary.batchSummary.leaderOnlyConditionCount)}/` +
+                `${toSafeNumber(summary.batchSummary.pairedConditionCount)}`
+        );
+        lines.push(
+            `- 同 condition 最大动作次数观测值: ${toSafeNumber(summary.batchSummary.maxActionsPerConditionObserved)}`
         );
         lines.push(
             `- Buy 滑点跳过批次: ${toSafeNumber(summary.batchSummary.buySlippageSkipCount)}`
