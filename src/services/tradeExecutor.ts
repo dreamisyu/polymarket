@@ -230,6 +230,11 @@ const isLivePositionActiveForSignal = (position: UserPositionInterface) => {
 const countOpenLivePositions = (positions: UserPositionInterface[]) =>
     positions.filter((position) => isLivePositionActiveForSignal(position)).length;
 
+const buildLiveActivePositionValueUsdc = (positions: UserPositionInterface[]) =>
+    positions
+        .filter((position) => isLivePositionActiveForSignal(position))
+        .reduce((sum, position) => sum + Math.max(toSafeNumber(position.currentValue), 0), 0);
+
 const collectLiveConditionPairOutcomes = (
     positions: UserPositionInterface[],
     stateStore: LiveStateStore,
@@ -272,8 +277,11 @@ const buildConditionPairBestAskSum = async (
     return leaderAsk + hedgeAsk;
 };
 
-const buildLiveActiveExposureUsdc = (context: TradingContext, reservedBuyExposureUsdc: number) =>
-    Math.max(context.totalEquity - Math.max(toSafeNumber(context.availableBalance), 0), 0) +
+const buildLiveActiveExposureUsdc = (
+    context: Pick<TradingContext, 'positions'>,
+    reservedBuyExposureUsdc: number
+) =>
+    buildLiveActivePositionValueUsdc(context.positions) +
     Math.max(toSafeNumber(reservedBuyExposureUsdc), 0);
 
 const validateTradeForExecution = (trade: UserActivityInterface) => {
