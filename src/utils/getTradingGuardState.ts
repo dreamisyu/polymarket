@@ -6,6 +6,10 @@ import createLogger from './logger';
 const logger = createLogger('guard');
 const BALANCE_ALLOWANCE_PATH = '/balance-allowance';
 const REQUEST_TIMEOUT_MS = 5000;
+const GUARD_SUCCESS_CACHE_TTL_MS = 15000;
+const USDC_DECIMALS = 6;
+const USDC_BASE = 10n ** BigInt(USDC_DECIMALS);
+const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 
 interface TradingGuardState {
     availableBalance: number | null;
@@ -22,6 +26,10 @@ interface BalanceAllowanceState {
     source: 'sdk' | 'polymarket-api';
 }
 
+interface CachedTradingGuardState extends TradingGuardState {
+    updatedAt: number;
+}
+
 interface RuntimeClobClientShape {
     host?: string;
     signer?: ClobSigner;
@@ -33,9 +41,81 @@ interface RuntimeClobClientShape {
     };
 }
 
+let lastSuccessfulGuardState: CachedTradingGuardState | null = null;
+
 const toSafeNumber = (value: unknown): number | null => {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
+};
+
+const parseRawFixedPoint = (raw: bigint) => {
+    const whole = raw / USDC_BASE;
+    if (whole > MAX_SAFE_BIGINT) {
+        return Number.MAX_SAFE_INTEGER;
+    }
+
+    return Number(whole) + Number(raw % USDC_BASE) / 10 ** USDC_DECIMALS;
+};
+
+const parseCollateralAmount = (value: unknown): number | null => {
+    if (typeof value === 'bigint') {
+        return parseRawFixedPoint(value);
+    }
+
+    if (typeof value === 'string') {
+        const normalized = value.trim();
+        if (/^\d+$/.test(normalized)) {
+            return parseRawFixedPoint(BigInt(normalized));
+        }
+
+        return toSafeNumber(normalized);
+    }
+
+    return toSafeNumber(value);
+};
+
+const extractAllowanceAmount = (payload: {
+    allowance?: unknown;
+    allowances?: unknown;
+}): number | null => {
+    const directAllowance = parseCollateralAmount(payload.allowance);
+    if (directAllowance !== null) {
+        return directAllowance;
+    }
+
+    if (!payload.allowances || typeof payload.allowances !== 'object') {
+        return null;
+    }
+
+    let maxAllowance: number | null = null;
+    for (const rawValue of Object.values(payload.allowances as Record<string, unknown>)) {
+        const allowance = parseCollateralAmount(rawValue);
+        if (allowance === null) {
+            continue;
+        }
+
+        maxAllowance = maxAllowance === null ? allowance : Math.max(maxAllowance, allowance);
+    }
+
+    return maxAllowance;
+};
+
+const extractClobError = (payload: unknown): string | null => {
+    if (!payload || typeof payload !== 'object') {
+        return null;
+    }
+
+    const result = payload as Record<string, unknown>;
+    if (!Object.hasOwn(result, 'error') || result.error === undefined || result.error === null) {
+        return null;
+    }
+
+    const status = toSafeNumber(result.status);
+    if (status !== null) {
+        return `status=${status} reason=${String(result.error)}`;
+    }
+
+    return String(result.error);
 };
 
 const buildBalanceAllowanceUrl = (host: string, signatureType: SignatureType) => {
@@ -43,6 +123,57 @@ const buildBalanceAllowanceUrl = (host: string, signatureType: SignatureType) =>
     url.searchParams.set('asset_type', AssetType.COLLATERAL);
     url.searchParams.set('signature_type', String(signatureType));
     return url.toString();
+};
+
+const getRecentSuccessfulGuardState = () => {
+    if (!lastSuccessfulGuardState) {
+        return null;
+    }
+
+    const ageMs = Date.now() - lastSuccessfulGuardState.updatedAt;
+    if (ageMs > GUARD_SUCCESS_CACHE_TTL_MS) {
+        return null;
+    }
+
+    return {
+        state: lastSuccessfulGuardState,
+        ageMs,
+    };
+};
+
+const rememberSuccessfulGuardState = (state: TradingGuardState) => {
+    if (state.availableBalance === null || state.skipReason) {
+        return;
+    }
+
+    lastSuccessfulGuardState = {
+        ...state,
+        updatedAt: Date.now(),
+    };
+};
+
+const buildCachedGuardFallback = (
+    reason: string,
+    override: Partial<TradingGuardState> = {}
+): TradingGuardState | null => {
+    const cached = getRecentSuccessfulGuardState();
+    if (!cached) {
+        return null;
+    }
+
+    logger.warn(
+        `${reason}，已回退到 ${cached.ageMs}ms 内的最近成功余额快照 available=${cached.state.availableBalance?.toFixed(4)}`
+    );
+
+    return {
+        availableBalance: cached.state.availableBalance,
+        allowance: cached.state.allowance,
+        onChainBalance: cached.state.onChainBalance,
+        clobBalance: cached.state.clobBalance,
+        openOrdersCount: 0,
+        skipReason: '',
+        ...override,
+    };
 };
 
 const fetchBalanceAllowanceViaPolymarketApi = async (
@@ -87,6 +218,7 @@ const fetchBalanceAllowanceViaPolymarketApi = async (
         const payload = (await response.json()) as {
             balance?: unknown;
             allowance?: unknown;
+            allowances?: Record<string, unknown>;
             error?: string;
         };
 
@@ -98,8 +230,8 @@ const fetchBalanceAllowanceViaPolymarketApi = async (
         }
 
         return {
-            balance: toSafeNumber(payload.balance),
-            allowance: toSafeNumber(payload.allowance),
+            balance: parseCollateralAmount(payload.balance),
+            allowance: extractAllowanceAmount(payload),
             source: 'polymarket-api',
         };
     } catch (error) {
@@ -115,19 +247,36 @@ const loadBalanceAllowanceState = async (
 ): Promise<BalanceAllowanceState | null> => {
     try {
         try {
-            await clobClient.updateBalanceAllowance({
+            const updateResult = (await clobClient.updateBalanceAllowance({
                 asset_type: AssetType.COLLATERAL,
-            });
+            })) as unknown;
+            const updateError = extractClobError(updateResult);
+            if (updateError) {
+                logger.warn(
+                    `刷新代理钱包 balance allowance 失败，继续尝试读取现有余额快照 reason=${updateError}`
+                );
+            }
         } catch (error) {
             logger.warn('刷新代理钱包 balance allowance 失败，继续尝试读取现有余额快照', error);
         }
 
-        const balanceAllowance = await clobClient.getBalanceAllowance({
+        const balanceAllowance = (await clobClient.getBalanceAllowance({
             asset_type: AssetType.COLLATERAL,
-        });
+        })) as unknown;
+        const sdkError = extractClobError(balanceAllowance);
+        if (sdkError) {
+            logger.warn(`通过 SDK 读取代理钱包 balance allowance 失败 reason=${sdkError}`);
+            return fetchBalanceAllowanceViaPolymarketApi(clobClient);
+        }
+
+        const payload = balanceAllowance as {
+            balance?: unknown;
+            allowance?: unknown;
+            allowances?: Record<string, unknown>;
+        };
         return {
-            balance: toSafeNumber(balanceAllowance.balance),
-            allowance: toSafeNumber(balanceAllowance.allowance),
+            balance: parseCollateralAmount(payload.balance),
+            allowance: extractAllowanceAmount(payload),
             source: 'sdk',
         };
     } catch (error) {
@@ -153,13 +302,18 @@ const getTradingGuardState = async (clobClient: ClobClient): Promise<TradingGuar
             };
         }
 
-        const [onChainBalance, openOrders, balanceAllowanceState] = await Promise.all([
+        const [onChainBalance, openOrdersRaw, balanceAllowanceState] = await Promise.all([
             getMyBalance(funderAddress),
-            clobClient.getOpenOrders(undefined, true),
+            clobClient.getOpenOrders(undefined, true) as Promise<unknown>,
             loadBalanceAllowanceState(clobClient),
         ]);
+        const openOrdersError = extractClobError(openOrdersRaw);
+        if (openOrdersError) {
+            logger.warn(`读取代理钱包未完成挂单失败 reason=${openOrdersError}`);
+        }
+        const openOrders = Array.isArray(openOrdersRaw) ? openOrdersRaw : [];
 
-        if (Array.isArray(openOrders) && openOrders.length > 0) {
+        if (openOrders.length > 0) {
             return {
                 availableBalance: 0,
                 allowance: null,
@@ -172,22 +326,31 @@ const getTradingGuardState = async (clobClient: ClobClient): Promise<TradingGuar
 
         const clobBalance = balanceAllowanceState?.balance ?? null;
         const allowance = balanceAllowanceState?.allowance ?? null;
+        const recentSuccess = getRecentSuccessfulGuardState();
+        const resolvedClobBalance = clobBalance ?? recentSuccess?.state.clobBalance ?? null;
+        const resolvedAllowance = allowance ?? recentSuccess?.state.allowance ?? null;
 
-        if (clobBalance === null || allowance === null) {
-            return {
-                availableBalance: null,
-                allowance,
-                onChainBalance,
-                clobBalance,
-                openOrdersCount: 0,
-                skipReason: '',
-            };
+        if (resolvedClobBalance === null || resolvedAllowance === null) {
+            return (
+                buildCachedGuardFallback('代理钱包 balance allowance 接口暂时不可用', {
+                    onChainBalance: onChainBalance ?? recentSuccess?.state.onChainBalance ?? null,
+                    clobBalance: resolvedClobBalance,
+                    allowance: resolvedAllowance,
+                }) || {
+                    availableBalance: null,
+                    allowance: resolvedAllowance,
+                    onChainBalance,
+                    clobBalance: resolvedClobBalance,
+                    openOrdersCount: 0,
+                    skipReason: '',
+                }
+            );
         }
 
         const availableBalance =
             onChainBalance === null
-                ? Math.min(clobBalance, allowance)
-                : Math.min(onChainBalance, clobBalance, allowance);
+                ? Math.min(resolvedClobBalance, resolvedAllowance)
+                : Math.min(onChainBalance, resolvedClobBalance, resolvedAllowance);
 
         if (balanceAllowanceState?.source === 'polymarket-api') {
             logger.warn(
@@ -195,35 +358,39 @@ const getTradingGuardState = async (clobClient: ClobClient): Promise<TradingGuar
             );
         }
 
-        if (allowance <= 0) {
+        if (resolvedAllowance <= 0) {
             return {
                 availableBalance: 0,
-                allowance,
+                allowance: resolvedAllowance,
                 onChainBalance,
-                clobBalance,
+                clobBalance: resolvedClobBalance,
                 openOrdersCount: 0,
                 skipReason: 'CLOB 授权额度为 0，已暂停新的真实跟单',
             };
         }
 
-        return {
+        const result = {
             availableBalance,
-            allowance,
+            allowance: resolvedAllowance,
             onChainBalance,
-            clobBalance,
+            clobBalance: resolvedClobBalance,
             openOrdersCount: 0,
             skipReason: '',
         };
+        rememberSuccessfulGuardState(result);
+        return result;
     } catch (error) {
         logger.error('读取真实交易风控上下文失败', error);
-        return {
-            availableBalance: null,
-            allowance: null,
-            onChainBalance: null,
-            clobBalance: null,
-            openOrdersCount: 0,
-            skipReason: '',
-        };
+        return (
+            buildCachedGuardFallback('读取真实交易风控上下文失败') || {
+                availableBalance: null,
+                allowance: null,
+                onChainBalance: null,
+                clobBalance: null,
+                openOrdersCount: 0,
+                skipReason: '',
+            }
+        );
     }
 };
 

@@ -68,6 +68,7 @@ const BUY_INTENT_BUFFER_MAX_MS = ENV.BUY_INTENT_BUFFER_MAX_MS;
 const SIGNAL_BUFFER_MS = ENV.SIGNAL_BUFFER_MS;
 const BUY_MIN_TOP_UP_TRIGGER_USDC = ENV.BUY_MIN_TOP_UP_TRIGGER_USDC;
 const BUY_BOOTSTRAP_MAX_ACTIVE_RATIO = ENV.BUY_BOOTSTRAP_MAX_ACTIVE_RATIO;
+const BUY_SIZING_MODE = ENV.BUY_SIZING_MODE;
 const FOLLOW_MAX_OPEN_POSITIONS = ENV.FOLLOW_MAX_OPEN_POSITIONS;
 const FOLLOW_MAX_ACTIVE_EXPOSURE_USDC = ENV.FOLLOW_MAX_ACTIVE_EXPOSURE_USDC;
 const FOLLOW_MAX_TICKETS_PER_CONDITION = ENV.FOLLOW_MAX_TICKETS_PER_CONDITION;
@@ -90,6 +91,7 @@ const SIGNAL_BUY_BUFFER_POLICY_ID = 'signal-buy-intent-buffer';
 const SIGNAL_SECOND_TICKET_POLICY_ID = 'signal-second-ticket';
 const SIGNAL_MAX_TICKETS_POLICY_ID = 'signal-max-tickets';
 const MERGE_EXECUTION_POLICY_ID = 'live-condition-merge';
+const LIVE_RECOVERY_POLICY_ID = 'live-recovery-drop';
 const PROXY_POSITIONS_URL = `https://data-api.polymarket.com/positions?user=${PROXY_WALLET}&sizeThreshold=0`;
 const logger = createLogger('live');
 
@@ -168,6 +170,19 @@ const serializeBatch = (batch: CopyExecutionBatchInterface) => {
     const { _id, ...rest } = batch;
     return rest;
 };
+
+const buildRecoveryTradeTimestamp = (
+    trade: Pick<UserActivityInterface, 'sourceSnapshotCapturedAt' | 'timestamp'>
+) => Math.max(toSafeNumber(trade.sourceSnapshotCapturedAt), toSafeNumber(trade.timestamp), 0);
+
+const buildRecoveryPendingTradeReason = (ageMs: number) =>
+    `启动恢复时源账户快照已陈旧 ${ageMs}ms，超过 live 允许上限 ${LIVE_MAX_STALE_SNAPSHOT_MS}ms，已丢弃旧待执行交易`;
+
+const buildRecoveryBufferReason = (ageMs: number, recoveryWindowMs: number) =>
+    `启动恢复时旧缓冲已空转 ${ageMs}ms，超过恢复窗口 ${recoveryWindowMs}ms，已放弃该缓冲`;
+
+const buildRecoveryBatchReason = (ageMs: number) =>
+    `启动恢复时旧批次已等待 ${ageMs}ms，超过 live 快照时效 ${LIVE_MAX_STALE_SNAPSHOT_MS}ms，已放弃未提交批次`;
 
 const buildBootstrapBudgetRemainingUsdc = (context: TradingContext, stateStore: LiveStateStore) => {
     const activeBootstrapExposureUsdc = stateStore.activeBootstrapExposureUsdc();
@@ -286,6 +301,127 @@ class LiveTradeExecutorRuntime {
         }
     }
 
+    private queuePersistRecoveredTradeTerminalState(
+        trade: UserActivityInterface,
+        status: 'SKIPPED' | 'FAILED',
+        reason: string
+    ) {
+        const executedAt = Date.now();
+        this.queuePersistActivityUpdate([trade._id], {
+            bot: true,
+            botStatus: status,
+            botClaimedAt: 0,
+            botExecutedAt: executedAt,
+            botLastError: reason,
+            botPolicyTrail: [
+                buildPolicyTrailEntry(
+                    LIVE_RECOVERY_POLICY_ID,
+                    status === 'SKIPPED' ? 'SKIP' : 'RETRY',
+                    reason
+                ),
+            ],
+        });
+    }
+
+    private shouldRecoverPendingTrade(
+        trade: UserActivityInterface,
+        referencedTradeIds: Set<string>,
+        now = Date.now()
+    ) {
+        if (referencedTradeIds.has(String(trade._id))) {
+            return {
+                recover: true,
+                reason: '',
+            };
+        }
+
+        const snapshotTimestamp = buildRecoveryTradeTimestamp(trade);
+        if (snapshotTimestamp <= 0) {
+            return {
+                recover: false,
+                reason: '启动恢复时缺少源账户快照时间，已丢弃旧待执行交易',
+            };
+        }
+
+        const snapshotAgeMs = now - snapshotTimestamp;
+        if (snapshotAgeMs > LIVE_MAX_STALE_SNAPSHOT_MS) {
+            return {
+                recover: false,
+                reason: buildRecoveryPendingTradeReason(snapshotAgeMs),
+            };
+        }
+
+        return {
+            recover: true,
+            reason: '',
+        };
+    }
+
+    private shouldRecoverBuffer(buffer: CopyIntentBufferInterface, now = Date.now()) {
+        const lastSourceAt = Math.max(
+            toSafeNumber(buffer.sourceEndedAt),
+            toSafeNumber(buffer.sourceStartedAt),
+            0
+        );
+        const recoveryWindowMs = Math.max(
+            toSafeNumber(buffer.bufferWindowMs),
+            LIVE_MAX_STALE_SNAPSHOT_MS
+        );
+        if (lastSourceAt <= 0) {
+            return {
+                recover: false,
+                reason: '启动恢复时旧缓冲缺少时间戳，已放弃该缓冲',
+            };
+        }
+
+        const ageMs = now - lastSourceAt;
+        if (ageMs > recoveryWindowMs) {
+            return {
+                recover: false,
+                reason: buildRecoveryBufferReason(ageMs, recoveryWindowMs),
+            };
+        }
+
+        return {
+            recover: true,
+            reason: '',
+        };
+    }
+
+    private shouldRecoverBatch(batch: CopyExecutionBatchInterface, now = Date.now()) {
+        if (['SUBMITTED', 'PENDING_CONFIRMATION', 'TIMEOUT'].includes(batch.status)) {
+            return {
+                recover: true,
+                reason: '',
+            };
+        }
+
+        const lastSourceAt = Math.max(
+            toSafeNumber(batch.sourceEndedAt),
+            toSafeNumber(batch.sourceStartedAt),
+            0
+        );
+        if (lastSourceAt <= 0) {
+            return {
+                recover: false,
+                reason: '启动恢复时旧批次缺少时间戳，已放弃未提交批次',
+            };
+        }
+
+        const ageMs = now - lastSourceAt;
+        if (ageMs > LIVE_MAX_STALE_SNAPSHOT_MS) {
+            return {
+                recover: false,
+                reason: buildRecoveryBatchReason(ageMs),
+            };
+        }
+
+        return {
+            recover: true,
+            reason: '',
+        };
+    }
+
     private async hydrateRecoveryState() {
         const [recoverableTrades, openBuffers, activeBatches] = await Promise.all([
             UserActivity.find({
@@ -335,8 +471,62 @@ class LiveTradeExecutorRuntime {
                 .exec() as Promise<CopyExecutionBatchInterface[]>,
         ]);
 
-        this.stateStore.ingestTrades(recoverableTrades);
+        const now = Date.now();
+        const recoveredBuffers: CopyIntentBufferInterface[] = [];
+        const droppedBuffers: Array<{ buffer: CopyIntentBufferInterface; reason: string }> = [];
         for (const buffer of openBuffers) {
+            const recovery = this.shouldRecoverBuffer(buffer, now);
+            if (recovery.recover) {
+                recoveredBuffers.push(buffer);
+                continue;
+            }
+
+            droppedBuffers.push({ buffer, reason: recovery.reason });
+        }
+
+        const recoveredBatches: CopyExecutionBatchInterface[] = [];
+        const droppedBatches: Array<{ batch: CopyExecutionBatchInterface; reason: string }> = [];
+        for (const batch of activeBatches) {
+            const recovery = this.shouldRecoverBatch(batch, now);
+            if (recovery.recover) {
+                recoveredBatches.push(batch);
+                continue;
+            }
+
+            droppedBatches.push({ batch, reason: recovery.reason });
+        }
+
+        const referencedTradeIds = new Set<string>(
+            [
+                ...recoveredBuffers.flatMap((buffer) => buffer.sourceTradeIds),
+                ...recoveredBatches.flatMap((batch) => batch.sourceTradeIds),
+            ].map((tradeId) => String(tradeId))
+        );
+        const recoveredTrades: UserActivityInterface[] = [];
+        const droppedTrades: Array<{ trade: UserActivityInterface; reason: string }> = [];
+        for (const trade of recoverableTrades) {
+            const recovery = this.shouldRecoverPendingTrade(trade, referencedTradeIds, now);
+            if (recovery.recover) {
+                recoveredTrades.push(trade);
+                continue;
+            }
+
+            droppedTrades.push({ trade, reason: recovery.reason });
+        }
+
+        const terminalRecoveredTradeIds = new Set<string>();
+        const queueRecoveredTradeSkip = (trade: UserActivityInterface, reason: string) => {
+            const tradeId = String(trade._id);
+            if (terminalRecoveredTradeIds.has(tradeId)) {
+                return;
+            }
+
+            terminalRecoveredTradeIds.add(tradeId);
+            this.queuePersistRecoveredTradeTerminalState(trade, 'SKIPPED', reason);
+        };
+
+        this.stateStore.ingestTrades(recoveredTrades);
+        for (const buffer of recoveredBuffers) {
             const normalizedBuffer =
                 typeof (
                     buffer as CopyIntentBufferInterface & {
@@ -356,7 +546,7 @@ class LiveTradeExecutorRuntime {
             });
         }
 
-        for (const batch of activeBatches) {
+        for (const batch of recoveredBatches) {
             const normalizedBatch =
                 typeof (
                     batch as CopyExecutionBatchInterface & {
@@ -376,9 +566,77 @@ class LiveTradeExecutorRuntime {
             });
         }
 
-        if (recoverableTrades.length > 0 || openBuffers.length > 0 || activeBatches.length > 0) {
+        for (const { buffer, reason } of droppedBuffers) {
+            this.persistenceQueue.enqueue(`recovery-buffer:${String(buffer._id)}`, async () => {
+                await CopyIntentBuffer.updateOne(
+                    { _id: buffer._id },
+                    {
+                        $set: {
+                            state: 'SKIPPED',
+                            claimedAt: 0,
+                            completedAt: now,
+                            reason,
+                            policyTrail: mergePolicyTrail(buffer.policyTrail, [
+                                buildPolicyTrailEntry(LIVE_RECOVERY_POLICY_ID, 'SKIP', reason),
+                            ]),
+                        },
+                    }
+                );
+            });
+            for (const tradeId of buffer.sourceTradeIds) {
+                const trade = recoverableTrades.find(
+                    (item) => String(item._id) === String(tradeId)
+                );
+                if (trade) {
+                    queueRecoveredTradeSkip(trade, reason);
+                }
+            }
+        }
+
+        for (const { batch, reason } of droppedBatches) {
+            this.persistenceQueue.enqueue(`recovery-batch:${String(batch._id)}`, async () => {
+                await CopyExecutionBatch.updateOne(
+                    { _id: batch._id },
+                    {
+                        $set: {
+                            status: 'SKIPPED',
+                            claimedAt: 0,
+                            completedAt: now,
+                            reason,
+                            policyTrail: mergePolicyTrail(batch.policyTrail, [
+                                buildPolicyTrailEntry(LIVE_RECOVERY_POLICY_ID, 'SKIP', reason),
+                            ]),
+                        },
+                    }
+                );
+            });
+            for (const tradeId of batch.sourceTradeIds) {
+                const trade = recoverableTrades.find(
+                    (item) => String(item._id) === String(tradeId)
+                );
+                if (trade) {
+                    queueRecoveredTradeSkip(trade, reason);
+                }
+            }
+        }
+
+        for (const { trade, reason } of droppedTrades) {
+            queueRecoveredTradeSkip(trade, reason);
+        }
+
+        if (
+            recoveredTrades.length > 0 ||
+            recoveredBuffers.length > 0 ||
+            recoveredBatches.length > 0
+        ) {
             logger.warn(
-                `已恢复 live 状态 trades=${recoverableTrades.length} buffers=${openBuffers.length} batches=${activeBatches.length}`
+                `已恢复 live 状态 trades=${recoveredTrades.length} buffers=${recoveredBuffers.length} batches=${recoveredBatches.length}`
+            );
+        }
+
+        if (droppedTrades.length > 0 || droppedBuffers.length > 0 || droppedBatches.length > 0) {
+            logger.warn(
+                `启动恢复阶段已丢弃旧状态 trades=${droppedTrades.length} buffers=${droppedBuffers.length} batches=${droppedBatches.length}`
             );
         }
     }

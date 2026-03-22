@@ -178,7 +178,18 @@ class LiveSettlementReclaimer {
     private readonly autoRedeemEnabled = ENV.AUTO_REDEEM_ENABLED;
     private readonly intervalMs = ENV.AUTO_REDEEM_INTERVAL_MS;
     private readonly maxConditionsPerRun = ENV.AUTO_REDEEM_MAX_CONDITIONS_PER_RUN;
-    private readonly relayClient: RelayClient | null;
+    private readonly walletClient = this.autoRedeemEnabled
+        ? createWalletClient({
+              account: privateKeyToAccount(normalizePrivateKey(ENV.PRIVATE_KEY)),
+              chain: polygon,
+              transport: http(ENV.RPC_URL),
+          })
+        : null;
+    private readonly relayTxType =
+        ENV.POLYMARKET_RELAYER_TX_TYPE === 'PROXY' ? RelayerTxType.PROXY : RelayerTxType.SAFE;
+    private relayClient: RelayClient | null;
+    private usingBuilderAuth = false;
+    private redeemAuthUnavailable = false;
     private running = false;
     private nextRunAt = 0;
     private inflightTransactionId = '';
@@ -191,20 +202,34 @@ class LiveSettlementReclaimer {
             return;
         }
 
-        const walletClient = createWalletClient({
-            account: privateKeyToAccount(normalizePrivateKey(ENV.PRIVATE_KEY)),
-            chain: polygon,
-            transport: http(ENV.RPC_URL),
-        });
-        const txType =
-            ENV.POLYMARKET_RELAYER_TX_TYPE === 'PROXY' ? RelayerTxType.PROXY : RelayerTxType.SAFE;
-        this.relayClient = new RelayClient(
+        const builderConfig = buildBuilderConfig();
+        this.usingBuilderAuth = Boolean(builderConfig);
+        this.relayClient = this.createRelayClient(builderConfig);
+    }
+
+    private createRelayClient(builderConfig?: BuilderConfig) {
+        if (!this.walletClient) {
+            return null;
+        }
+
+        return new RelayClient(
             ENV.POLYMARKET_RELAYER_URL,
             RELAYER_CHAIN_ID,
-            walletClient,
-            buildBuilderConfig(),
-            txType
+            this.walletClient,
+            builderConfig,
+            this.relayTxType
         );
+    }
+
+    private disableBuilderAuthFallback() {
+        if (!this.usingBuilderAuth) {
+            return false;
+        }
+
+        this.usingBuilderAuth = false;
+        this.relayClient = this.createRelayClient();
+        logger.warn('builder 鉴权被 relayer 拒绝，自动回收已回退到无鉴权路径');
+        return true;
     }
 
     private scheduleNextRun(delayMs = this.intervalMs) {
@@ -264,7 +289,7 @@ class LiveSettlementReclaimer {
         this.scheduleNextRun();
     }
 
-    private async submitRedeemableBatch() {
+    private async submitRedeemableBatch(allowAuthFallback = true) {
         if (!this.relayClient) {
             return;
         }
@@ -299,6 +324,21 @@ class LiveSettlementReclaimer {
             this.scheduleNextRun();
         } catch (error) {
             const reason = extractErrorMessage(error);
+            if (allowAuthFallback && isAuthError(reason) && this.disableBuilderAuthFallback()) {
+                await this.submitRedeemableBatch(false);
+                return;
+            }
+
+            if (isAuthError(reason)) {
+                this.redeemAuthUnavailable = true;
+                logger.warn(
+                    '自动回收鉴权失败，已在当前进程禁用 AUTO_REDEEM；请检查 relayer 权限或 builder 凭据'
+                );
+                this.clearInflightTransaction();
+                this.scheduleNextRun(AUTH_ERROR_BACKOFF_MS);
+                return;
+            }
+
             logger.error(`自动回收提交失败 reason=${reason}`, error);
             this.clearInflightTransaction();
             this.scheduleNextRun(isAuthError(reason) ? AUTH_ERROR_BACKOFF_MS : FAILURE_BACKOFF_MS);
@@ -550,7 +590,7 @@ class LiveSettlementReclaimer {
         try {
             await this.sweepResolvedConditions();
 
-            if (!this.autoRedeemEnabled || !this.relayClient) {
+            if (!this.autoRedeemEnabled || !this.relayClient || this.redeemAuthUnavailable) {
                 return;
             }
 
