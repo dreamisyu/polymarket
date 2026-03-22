@@ -304,7 +304,9 @@ const getTradingGuardState = async (clobClient: ClobClient): Promise<TradingGuar
 
         const [onChainBalance, openOrdersRaw, balanceAllowanceState] = await Promise.all([
             getMyBalance(funderAddress),
-            clobClient.getOpenOrders(undefined, true) as Promise<unknown>,
+            (clobClient.getOpenOrders(undefined, true) as Promise<unknown>).catch((error) => ({
+                error: (error as Error)?.message || String(error),
+            })),
             loadBalanceAllowanceState(clobClient),
         ]);
         const openOrdersError = extractClobError(openOrdersRaw);

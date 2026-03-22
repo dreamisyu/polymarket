@@ -5,7 +5,7 @@ import {
     RelayerTxType,
     Transaction,
 } from '@polymarket/builder-relayer-client';
-import { BuilderApiKeyCreds, BuilderConfig } from '@polymarket/builder-signing-sdk';
+import type { BuilderConfig } from '@polymarket/builder-signing-sdk';
 import { CopyExecutionBatchInterface, CopyIntentBufferInterface } from '../interfaces/Execution';
 import { UserActivityInterface, UserPositionInterface } from '../interfaces/User';
 import { ENV } from '../config/env';
@@ -18,6 +18,12 @@ import {
     fetchPolymarketMarketResolution,
     isResolvedPolymarketMarket,
 } from '../utils/polymarketMarketResolution';
+import createClobClient from '../utils/createClobClient';
+import {
+    getEffectiveRelayerMode,
+    getLiveBuilderConfigRuntime,
+    toRelayerTxType,
+} from '../utils/liveRelayerRuntime';
 import { privateKeyToAccount } from 'viem/accounts';
 import { polygon } from 'viem/chains';
 import { Address, Hex, createWalletClient, encodeFunctionData, http, zeroHash } from 'viem';
@@ -78,22 +84,6 @@ const extractErrorMessage = (error: unknown) =>
     );
 
 const isAuthError = (message: string) => /401|403|unauthorized|forbidden|builder/i.test(message);
-
-const buildBuilderConfig = () => {
-    const creds: BuilderApiKeyCreds = {
-        key: ENV.POLY_BUILDER_API_KEY,
-        secret: ENV.POLY_BUILDER_SECRET,
-        passphrase: ENV.POLY_BUILDER_PASSPHRASE,
-    };
-
-    if (!creds.key || !creds.secret || !creds.passphrase) {
-        return undefined;
-    }
-
-    return new BuilderConfig({
-        localBuilderCreds: creds,
-    });
-};
 
 const groupRedeemablePositions = (positions: UserPositionInterface[]): RedeemBatch[] => {
     const grouped = new Map<
@@ -185,9 +175,9 @@ class LiveSettlementReclaimer {
               transport: http(ENV.RPC_URL),
           })
         : null;
-    private readonly relayTxType =
-        ENV.POLYMARKET_RELAYER_TX_TYPE === 'PROXY' ? RelayerTxType.PROXY : RelayerTxType.SAFE;
+    private relayTxType: RelayerTxType = toRelayerTxType(ENV.POLYMARKET_RELAYER_TX_TYPE);
     private relayClient: RelayClient | null;
+    private relayReadyPromise: Promise<void> | null = null;
     private usingBuilderAuth = false;
     private redeemAuthUnavailable = false;
     private running = false;
@@ -197,14 +187,32 @@ class LiveSettlementReclaimer {
     private inflightConditionCount = 0;
 
     constructor() {
-        if (!this.autoRedeemEnabled) {
-            this.relayClient = null;
+        this.relayClient = null;
+    }
+
+    private async ensureRelayClient() {
+        if (!this.autoRedeemEnabled || !this.walletClient) {
             return;
         }
 
-        const builderConfig = buildBuilderConfig();
-        this.usingBuilderAuth = Boolean(builderConfig);
-        this.relayClient = this.createRelayClient(builderConfig);
+        if (!this.relayReadyPromise) {
+            this.relayReadyPromise = (async () => {
+                const effectiveMode = await getEffectiveRelayerMode();
+                const builderRuntime = await getLiveBuilderConfigRuntime(() => createClobClient());
+                this.relayTxType = toRelayerTxType(effectiveMode);
+                this.usingBuilderAuth = Boolean(builderRuntime.builderConfig);
+                this.relayClient = this.createRelayClient(builderRuntime.builderConfig);
+                logger.info(
+                    `自动回收鉴权已就绪 txType=${effectiveMode} builder=${builderRuntime.source}`
+                );
+            })().catch((error) => {
+                this.relayClient = this.createRelayClient();
+                this.usingBuilderAuth = false;
+                logger.warn('初始化自动回收 relayer 鉴权失败，已回退到无鉴权路径', error);
+            });
+        }
+
+        await this.relayReadyPromise;
     }
 
     private createRelayClient(builderConfig?: BuilderConfig) {
@@ -589,6 +597,7 @@ class LiveSettlementReclaimer {
         this.running = true;
         try {
             await this.sweepResolvedConditions();
+            await this.ensureRelayClient();
 
             if (!this.autoRedeemEnabled || !this.relayClient || this.redeemAuthUnavailable) {
                 return;

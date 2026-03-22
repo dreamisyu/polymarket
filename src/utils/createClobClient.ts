@@ -1,6 +1,7 @@
 import { ApiKeyCreds, ClobClient, SignatureType } from '@polymarket/clob-client';
 import { TypedDataDomain, TypedDataField, Wallet } from 'ethers';
 import { ENV } from '../config/env';
+import { getEffectiveRelayerMode } from './liveRelayerRuntime';
 
 const PROXY_WALLET = ENV.PROXY_WALLET;
 const PRIVATE_KEY = ENV.PRIVATE_KEY;
@@ -9,8 +10,8 @@ const CLOB_HTTP_URL = ENV.CLOB_HTTP_URL;
 type TypedDataTypes = Record<string, Array<TypedDataField>>;
 type TypedDataValue = Record<string, unknown>;
 
-const resolveSignatureType = () =>
-    ENV.POLYMARKET_RELAYER_TX_TYPE === 'PROXY'
+const resolveSignatureType = async () =>
+    (await getEffectiveRelayerMode()) === 'PROXY'
         ? SignatureType.POLY_PROXY
         : SignatureType.POLY_GNOSIS_SAFE;
 
@@ -61,14 +62,21 @@ const createSigner = () => {
 const createClobClient = async (): Promise<ClobClient> => {
     const chainId = 137;
     const signer = createSigner();
-    const signatureType = resolveSignatureType();
+    const signatureType = await resolveSignatureType();
     const bootstrapClient = new ClobClient(
         CLOB_HTTP_URL,
         chainId,
         signer,
         undefined,
         signatureType,
-        PROXY_WALLET
+        PROXY_WALLET,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true
     );
     const derivedCreds = await bootstrapClient.deriveApiKey();
     const rawCreds = isValidApiKeyCreds(derivedCreds)
@@ -86,7 +94,21 @@ const createClobClient = async (): Promise<ClobClient> => {
     }
     const creds = rawCreds;
 
-    return new ClobClient(CLOB_HTTP_URL, chainId, signer, creds, signatureType, PROXY_WALLET);
+    return new ClobClient(
+        CLOB_HTTP_URL,
+        chainId,
+        signer,
+        creds,
+        signatureType,
+        PROXY_WALLET,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true
+    );
 };
 
 export default createClobClient;
