@@ -17,6 +17,7 @@ const BUY_FIRST_ENTRY_TICKET_ALLOWED_BY_ORDER_CAP =
 const SIGNAL_IGNORE_BUY_BELOW_USDC = ENV.SIGNAL_IGNORE_BUY_BELOW_USDC;
 const SIGNAL_WEAK_SOURCE_BUY_USDC = ENV.SIGNAL_WEAK_SOURCE_BUY_USDC;
 const SIGNAL_WEAK_SOURCE_BUY_COUNT = ENV.SIGNAL_WEAK_SOURCE_BUY_COUNT;
+const SIGNAL_SINGLE_TRADE_WEAK_USDC = ENV.SIGNAL_SINGLE_TRADE_WEAK_USDC;
 const SIGNAL_MIN_SOURCE_BUY_USDC = ENV.SIGNAL_MIN_SOURCE_BUY_USDC;
 const SIGNAL_MIN_SOURCE_BUY_COUNT = ENV.SIGNAL_MIN_SOURCE_BUY_COUNT;
 const SIGNAL_STRONG_SOURCE_BUY_USDC = ENV.SIGNAL_STRONG_SOURCE_BUY_USDC;
@@ -162,7 +163,8 @@ export const getSignalTicketUsdc = (tier: Exclude<SignalBuyTier, ''>) =>
 const getTriggeredSignalTier = (
     sourceUsdcTotal: number,
     sourceTradeCount: number,
-    ticketCountBefore: number
+    ticketCountBefore: number,
+    maxSingleSourceUsdc: number
 ): SignalBuyTier => {
     const allowWeakTier = ticketCountBefore <= 0;
     const triggeredStrongSignal =
@@ -173,8 +175,9 @@ const getTriggeredSignalTier = (
         sourceTradeCount >= SIGNAL_MIN_SOURCE_BUY_COUNT;
     const triggeredWeakSignal =
         allowWeakTier &&
-        sourceUsdcTotal >= SIGNAL_WEAK_SOURCE_BUY_USDC &&
-        sourceTradeCount >= SIGNAL_WEAK_SOURCE_BUY_COUNT;
+        (maxSingleSourceUsdc >= SIGNAL_SINGLE_TRADE_WEAK_USDC ||
+            (sourceUsdcTotal >= SIGNAL_WEAK_SOURCE_BUY_USDC &&
+                sourceTradeCount >= SIGNAL_WEAK_SOURCE_BUY_COUNT));
 
     if (triggeredStrongSignal) {
         return 'strong';
@@ -332,11 +335,13 @@ export const evaluateSignalBuyTrade = (
 export const evaluateBufferedSignalBuy = (params: {
     sourceUsdcTotal: number;
     sourceTradeCount: number;
+    maxSingleSourceUsdc?: number;
     existingTicketCount?: number;
     maxTicketsPerCondition?: number;
 }): SignalBufferedBuyEvaluation => {
     const sourceUsdcTotal = Math.max(toSafeNumber(params.sourceUsdcTotal), 0);
     const sourceTradeCount = Math.max(Math.trunc(toSafeNumber(params.sourceTradeCount)), 0);
+    const maxSingleSourceUsdc = Math.max(toSafeNumber(params.maxSingleSourceUsdc), 0);
     const existingTicketCount = Math.max(Math.trunc(toSafeNumber(params.existingTicketCount)), 0);
     const maxTicketsPerCondition = Math.max(
         Math.trunc(toSafeNumber(params.maxTicketsPerCondition, FOLLOW_MAX_TICKETS_PER_CONDITION)),
@@ -362,12 +367,17 @@ export const evaluateBufferedSignalBuy = (params: {
         };
     }
 
-    const tier = getTriggeredSignalTier(sourceUsdcTotal, sourceTradeCount, existingTicketCount);
+    const tier = getTriggeredSignalTier(
+        sourceUsdcTotal,
+        sourceTradeCount,
+        existingTicketCount,
+        maxSingleSourceUsdc
+    );
     const nextTicketIndex = existingTicketCount + 1;
     if (!tier) {
         const weakThresholdText =
             existingTicketCount <= 0
-                ? `、${SIGNAL_WEAK_SOURCE_BUY_USDC.toFixed(4)} USDC / ${SIGNAL_WEAK_SOURCE_BUY_COUNT} 笔`
+                ? `、单笔 ${SIGNAL_SINGLE_TRADE_WEAK_USDC.toFixed(4)} USDC 或累计 ${SIGNAL_WEAK_SOURCE_BUY_USDC.toFixed(4)} USDC / ${SIGNAL_WEAK_SOURCE_BUY_COUNT} 笔`
                 : '';
         return {
             status: 'SKIP',

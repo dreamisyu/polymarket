@@ -24,6 +24,7 @@ import {
     evaluateDirectBuyIntent,
     evaluateSignalBuyTrade,
     getSignalTierLabel,
+    isTradeWithinSignalMarketScope,
     getTradeSourceUsdc,
     sortTradesAsc,
 } from '../utils/copyIntentPlanning';
@@ -72,6 +73,7 @@ const BUY_SIZING_MODE = ENV.BUY_SIZING_MODE;
 const FOLLOW_MAX_OPEN_POSITIONS = ENV.FOLLOW_MAX_OPEN_POSITIONS;
 const FOLLOW_MAX_ACTIVE_EXPOSURE_USDC = ENV.FOLLOW_MAX_ACTIVE_EXPOSURE_USDC;
 const FOLLOW_MAX_TICKETS_PER_CONDITION = ENV.FOLLOW_MAX_TICKETS_PER_CONDITION;
+const FOLLOW_POSITION_DUST_USDC = ENV.FOLLOW_POSITION_DUST_USDC;
 const LOOP_INTERVAL_MS = ENV.LIVE_EXECUTOR_LOOP_INTERVAL_MS;
 const CONTEXT_TTL_MS = ENV.LIVE_STATE_REFRESH_MS;
 const LIVE_MAX_STALE_SNAPSHOT_MS = ENV.LIVE_MAX_STALE_SNAPSHOT_MS;
@@ -192,8 +194,26 @@ const buildBootstrapBudgetRemainingUsdc = (context: TradingContext, stateStore: 
     );
 };
 
+const isLivePositionActiveForSignal = (position: UserPositionInterface) => {
+    const size = Math.max(toSafeNumber(position.size), 0);
+    const currentValue = Math.max(toSafeNumber(position.currentValue), 0);
+    if (size <= EPSILON || currentValue + EPSILON < FOLLOW_POSITION_DUST_USDC) {
+        return false;
+    }
+
+    if (position.redeemable) {
+        return false;
+    }
+
+    if (BUY_SIZING_MODE === 'signal_fixed_ticket' && !isTradeWithinSignalMarketScope(position)) {
+        return false;
+    }
+
+    return true;
+};
+
 const countOpenLivePositions = (positions: UserPositionInterface[]) =>
-    positions.filter((position) => Math.max(toSafeNumber(position.size), 0) > EPSILON).length;
+    positions.filter((position) => isLivePositionActiveForSignal(position)).length;
 
 const buildLiveActiveExposureUsdc = (context: TradingContext, reservedBuyExposureUsdc: number) =>
     Math.max(context.totalEquity - Math.max(toSafeNumber(context.availableBalance), 0), 0) +
@@ -1500,6 +1520,7 @@ class LiveTradeExecutorRuntime {
         const signalEvaluation = evaluateBufferedSignalBuy({
             sourceUsdcTotal: buffer.sourceUsdcTotal,
             sourceTradeCount: buffer.sourceTradeCount,
+            maxSingleSourceUsdc: Math.max(...trades.map((trade) => getTradeSourceUsdc(trade)), 0),
             existingTicketCount: signalTicketCount,
             maxTicketsPerCondition: FOLLOW_MAX_TICKETS_PER_CONDITION,
         });
@@ -1707,6 +1728,7 @@ class LiveTradeExecutorRuntime {
         const signalEvaluation = evaluateBufferedSignalBuy({
             sourceUsdcTotal: nextSourceUsdc,
             sourceTradeCount: nextSourceTradeCount,
+            maxSingleSourceUsdc: normalizedSourceUsdc,
             existingTicketCount,
             maxTicketsPerCondition: FOLLOW_MAX_TICKETS_PER_CONDITION,
         });

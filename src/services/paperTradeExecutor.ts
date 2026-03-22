@@ -26,6 +26,7 @@ import {
     evaluateDirectBuyIntent,
     evaluateSignalBuyTrade,
     getSignalTierLabel,
+    isTradeWithinSignalMarketScope,
     getTradeSourceUsdc,
     sortTradesAsc,
 } from '../utils/copyIntentPlanning';
@@ -90,6 +91,7 @@ const BUY_BOOTSTRAP_MAX_ACTIVE_RATIO = ENV.BUY_BOOTSTRAP_MAX_ACTIVE_RATIO;
 const FOLLOW_MAX_OPEN_POSITIONS = ENV.FOLLOW_MAX_OPEN_POSITIONS;
 const FOLLOW_MAX_ACTIVE_EXPOSURE_USDC = ENV.FOLLOW_MAX_ACTIVE_EXPOSURE_USDC;
 const FOLLOW_MAX_TICKETS_PER_CONDITION = ENV.FOLLOW_MAX_TICKETS_PER_CONDITION;
+const FOLLOW_POSITION_DUST_USDC = ENV.FOLLOW_POSITION_DUST_USDC;
 const MIN_MARKET_BUY_USDC = 1;
 const TRACE_BUY_BUFFER_POLICY_ID = 'trace-buy-intent-buffer';
 const TRACE_SIGNAL_BUFFER_POLICY_ID = 'trace-signal-buy-intent-buffer';
@@ -2004,10 +2006,44 @@ const loadBootstrapBudgetRemainingUsdc = async (portfolio: TracePortfolioDocumen
     return Math.max(budgetCapUsdc - activeExposureUsdc, 0);
 };
 
-const countOpenTracePositions = async () =>
-    TracePosition.countDocuments({
+const isTracePositionActiveForSignal = (
+    position: Pick<
+        TracePositionInterface,
+        'size' | 'marketValue' | 'title' | 'marketSlug' | 'closedAt'
+    >
+) => {
+    const size = Math.max(toSafeNumber(position.size), 0);
+    const marketValue = Math.max(toSafeNumber(position.marketValue), 0);
+    if (size <= EPSILON || marketValue + EPSILON < FOLLOW_POSITION_DUST_USDC) {
+        return false;
+    }
+
+    if (toSafeNumber(position.closedAt) > 0) {
+        return false;
+    }
+
+    return isTradeWithinSignalMarketScope({
+        title: position.title,
+        slug: position.marketSlug,
+        eventSlug: position.marketSlug,
+    });
+};
+
+const countOpenTracePositions = async () => {
+    const positions = await TracePosition.find({
         size: { $gt: EPSILON },
-    }).exec();
+    })
+        .select({
+            size: 1,
+            marketValue: 1,
+            title: 1,
+            marketSlug: 1,
+            closedAt: 1,
+        })
+        .lean()
+        .exec();
+    return positions.filter((position) => isTracePositionActiveForSignal(position)).length;
+};
 
 const buildTraceActiveExposureUsdc = (
     portfolio: Pick<TracePortfolioInterface, 'positionsMarketValue'>,
@@ -2613,6 +2649,7 @@ const flushTraceSignalBuyBuffer = async (
     const signalEvaluation = evaluateBufferedSignalBuy({
         sourceUsdcTotal: buffer.sourceUsdcTotal,
         sourceTradeCount: buffer.sourceTradeCount,
+        maxSingleSourceUsdc: Math.max(...trades.map((trade) => getTradeSourceUsdc(trade)), 0),
         existingTicketCount: signalTicketCount,
         maxTicketsPerCondition: FOLLOW_MAX_TICKETS_PER_CONDITION,
     });
@@ -2885,6 +2922,7 @@ const bufferTraceSignalBuyIntent = async (params: {
     const signalEvaluation = evaluateBufferedSignalBuy({
         sourceUsdcTotal: nextSourceUsdc,
         sourceTradeCount: nextSourceTradeCount,
+        maxSingleSourceUsdc: normalizedSourceUsdc,
         existingTicketCount,
         maxTicketsPerCondition: FOLLOW_MAX_TICKETS_PER_CONDITION,
     });

@@ -364,7 +364,7 @@ export const ENV = {
         'BUY_FIRST_ENTRY_SIGNAL_MIN_USDC'
     ),
     SIGNAL_BUFFER_MS: parsePositiveInteger(
-        readEnv('SIGNAL_BUFFER_MS') || '15000',
+        readEnv('SIGNAL_BUFFER_MS') || '5000',
         'SIGNAL_BUFFER_MS'
     ),
     SIGNAL_IGNORE_BUY_BELOW_USDC: parseNonNegativeNumber(
@@ -372,27 +372,31 @@ export const ENV = {
         'SIGNAL_IGNORE_BUY_BELOW_USDC'
     ),
     SIGNAL_WEAK_SOURCE_BUY_USDC: parseNonNegativeNumber(
-        readEnv('SIGNAL_WEAK_SOURCE_BUY_USDC') || '18',
+        readEnv('SIGNAL_WEAK_SOURCE_BUY_USDC') || '8',
         'SIGNAL_WEAK_SOURCE_BUY_USDC'
     ),
     SIGNAL_WEAK_SOURCE_BUY_COUNT: parsePositiveInteger(
-        readEnv('SIGNAL_WEAK_SOURCE_BUY_COUNT') || '12',
+        readEnv('SIGNAL_WEAK_SOURCE_BUY_COUNT') || '2',
         'SIGNAL_WEAK_SOURCE_BUY_COUNT'
     ),
+    SIGNAL_SINGLE_TRADE_WEAK_USDC: parseNonNegativeNumber(
+        readEnv('SIGNAL_SINGLE_TRADE_WEAK_USDC') || '8',
+        'SIGNAL_SINGLE_TRADE_WEAK_USDC'
+    ),
     SIGNAL_MIN_SOURCE_BUY_USDC: parseNonNegativeNumber(
-        readEnv('SIGNAL_MIN_SOURCE_BUY_USDC') || '22',
+        readEnv('SIGNAL_MIN_SOURCE_BUY_USDC') || '12',
         'SIGNAL_MIN_SOURCE_BUY_USDC'
     ),
     SIGNAL_MIN_SOURCE_BUY_COUNT: parsePositiveInteger(
-        readEnv('SIGNAL_MIN_SOURCE_BUY_COUNT') || '10',
+        readEnv('SIGNAL_MIN_SOURCE_BUY_COUNT') || '3',
         'SIGNAL_MIN_SOURCE_BUY_COUNT'
     ),
     SIGNAL_STRONG_SOURCE_BUY_USDC: parseNonNegativeNumber(
-        readEnv('SIGNAL_STRONG_SOURCE_BUY_USDC') || '34',
+        readEnv('SIGNAL_STRONG_SOURCE_BUY_USDC') || '20',
         'SIGNAL_STRONG_SOURCE_BUY_USDC'
     ),
     SIGNAL_STRONG_SOURCE_BUY_COUNT: parsePositiveInteger(
-        readEnv('SIGNAL_STRONG_SOURCE_BUY_COUNT') || '14',
+        readEnv('SIGNAL_STRONG_SOURCE_BUY_COUNT') || '5',
         'SIGNAL_STRONG_SOURCE_BUY_COUNT'
     ),
     FOLLOW_WEAK_TICKET_USDC: parseNonNegativeNumber(
@@ -404,7 +408,7 @@ export const ENV = {
         'FOLLOW_FIXED_TICKET_USDC'
     ),
     FOLLOW_STRONG_TICKET_USDC: parseNonNegativeNumber(
-        readEnv('FOLLOW_STRONG_TICKET_USDC') || '2.5',
+        readEnv('FOLLOW_STRONG_TICKET_USDC') || '2',
         'FOLLOW_STRONG_TICKET_USDC'
     ),
     FOLLOW_MAX_OPEN_POSITIONS: parsePositiveInteger(
@@ -419,6 +423,10 @@ export const ENV = {
     FOLLOW_MAX_TICKETS_PER_CONDITION: parsePositiveInteger(
         readEnv('FOLLOW_MAX_TICKETS_PER_CONDITION') || '2',
         'FOLLOW_MAX_TICKETS_PER_CONDITION'
+    ),
+    FOLLOW_POSITION_DUST_USDC: parseNonNegativeNumber(
+        readEnv('FOLLOW_POSITION_DUST_USDC') || '0.5',
+        'FOLLOW_POSITION_DUST_USDC'
     ),
     BUY_DUST_RESIDUAL_MODE: parseBuyDustResidualMode(readEnv('BUY_DUST_RESIDUAL_MODE'), 'trim'),
     MARKET_CACHE_TTL_MS: parsePositiveInteger(
