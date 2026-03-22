@@ -1736,9 +1736,7 @@ class LiveTradeExecutorRuntime {
               )
             : [String(trade._id)];
         const previewTrades = sortTradesAsc(
-            this.stateStore
-                .getTradesByIds(previewTradeIds.map((item) => new mongoose.Types.ObjectId(item)))
-                .concat(openBuffer ? [] : [trade])
+            this.stateStore.getTradesByIds(previewTradeIds).concat(openBuffer ? [] : [trade])
         );
         const previewEvaluation = evaluateBufferedConditionPairBuy({
             trades: previewTrades.length > 0 ? previewTrades : [trade],

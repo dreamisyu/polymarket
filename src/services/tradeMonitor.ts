@@ -703,6 +703,30 @@ const upsertTrades = async (
     }
 };
 
+const loadSyncedTradesForCallback = async (trades: UserActivityInterface[]) => {
+    const activityKeys = [...new Set(trades.map((trade) => String(trade.activityKey || '').trim()))]
+        .filter(Boolean);
+    if (activityKeys.length === 0) {
+        return [] as UserActivityInterface[];
+    }
+
+    const persistedTrades = (await UserActivity.find({
+        activityKey: { $in: activityKeys },
+    })
+        .sort({ timestamp: 1 })
+        .exec()) as UserActivityInterface[];
+    const normalizedPersistedTrades = persistedTrades
+        .map(normalizeTrade)
+        .filter((trade): trade is UserActivityInterface => trade !== null);
+    const tradeByActivityKey = new Map(
+        normalizedPersistedTrades.map((trade) => [String(trade.activityKey || ''), trade])
+    );
+
+    return activityKeys
+        .map((activityKey) => tradeByActivityKey.get(activityKey))
+        .filter((trade): trade is UserActivityInterface => Boolean(trade));
+};
+
 const syncStoredTrades = async (
     storedTrades: UserActivityInterface[],
     snapshots: Map<string, TradeSnapshotFields>
@@ -807,7 +831,8 @@ const fetchTradeData = async (options: TradeMonitorOptions = {}) => {
             mergedFetchedTrades.snapshots,
             snapshotCapturedAt
         );
-        options.onSourceTradesSynced?.(mergedFetchedTrades.trades);
+        const callbackTrades = await loadSyncedTradesForCallback(mergedFetchedTrades.trades);
+        options.onSourceTradesSynced?.(callbackTrades);
         await writeSyncState(
             fetchedTrades.length > 0 ? fetchedTrades[fetchedTrades.length - 1] : null,
             endTimestamp

@@ -137,7 +137,7 @@ class LiveStateStore {
         return this.tradeStates.get(buildTradeKey(trade));
     }
 
-    getTradesByIds(tradeIds: mongoose.Types.ObjectId[]) {
+    getTradesByIds(tradeIds: Array<mongoose.Types.ObjectId | string>) {
         const tradeIdSet = new Set(tradeIds.map((item) => String(item)));
         return [...this.tradeStates.values()]
             .filter((state) => tradeIdSet.has(String(state.trade._id)))
