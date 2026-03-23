@@ -122,6 +122,15 @@ const resolutionCache = new Map<
         resolution: PolymarketMarketResolution | null;
     }
 >();
+let traceMarketStreamRef: ClobMarketStream | null = null;
+
+const requireTraceMarketStream = () => {
+    if (!traceMarketStreamRef) {
+        throw new Error('模拟盘口流未初始化');
+    }
+
+    return traceMarketStreamRef;
+};
 
 type ExecutionStatus = 'FILLED' | 'SKIPPED';
 type TracePortfolioDocument = HydratedDocument<TracePortfolioInterface>;
@@ -2581,13 +2590,14 @@ const finalizeSkippedBuffer = async (
 
 const flushTraceBuyBuffer = async (
     buffer: CopyIntentBufferInterface,
+    marketStream: ClobMarketStream,
     options: {
         skipReason?: string;
         extraPolicyTrail?: ExecutionPolicyTrailEntry[];
     } = {}
 ) => {
     if (buffer.sizingMode === 'condition_pair_overlay') {
-        await flushTraceConditionPairBuyBuffer(buffer, options);
+        await flushTraceConditionPairBuyBuffer(buffer, marketStream, options);
         return;
     }
 
@@ -2694,6 +2704,7 @@ const flushTraceBuyBuffer = async (
 
 const flushTraceConditionPairBuyBuffer = async (
     buffer: CopyIntentBufferInterface,
+    marketStream: ClobMarketStream,
     options: {
         skipReason?: string;
         extraPolicyTrail?: ExecutionPolicyTrailEntry[];
@@ -2994,7 +3005,7 @@ const flushTraceSignalBuyBuffer = async (
     );
 };
 
-const flushDueBuyBuffers = async () => {
+const flushDueBuyBuffers = async (marketStream: ClobMarketStream) => {
     const buffers = (await TraceIntentBuffer.find({
         state: 'OPEN',
         condition: 'buy',
@@ -3004,7 +3015,7 @@ const flushDueBuyBuffers = async () => {
         .exec()) as CopyIntentBufferInterface[];
 
     for (const buffer of buffers) {
-        await flushTraceBuyBuffer(buffer);
+        await flushTraceBuyBuffer(buffer, marketStream);
     }
 };
 
@@ -3031,7 +3042,7 @@ const bufferTraceBuyIntent = async (params: {
 
     let openBuffer = await loadOpenBuyBufferForTrade(trade);
     if (openBuffer && shouldFlushBufferBeforeAppendingTrade(openBuffer, trade)) {
-        await flushTraceBuyBuffer(openBuffer, {
+        await flushTraceBuyBuffer(openBuffer, requireTraceMarketStream(), {
             extraPolicyTrail: [
                 buildPolicyTrailEntry(
                     TRACE_BUY_BUFFER_POLICY_ID,
@@ -3151,7 +3162,7 @@ const bufferTraceConditionPairBuyIntent = async (params: {
 
     let openBuffer = await loadOpenBuyBufferForTrade(trade);
     if (openBuffer && shouldFlushBufferBeforeAppendingTrade(openBuffer, trade)) {
-        await flushTraceBuyBuffer(openBuffer, {
+        await flushTraceBuyBuffer(openBuffer, requireTraceMarketStream(), {
             extraPolicyTrail: [
                 buildPolicyTrailEntry(
                     CONDITION_PAIR_BUFFER_POLICY_ID,
@@ -3285,7 +3296,7 @@ const bufferTraceSignalBuyIntent = async (params: {
 
     let openBuffer = await loadOpenBuyBufferForTrade(trade);
     if (openBuffer && shouldFlushBufferBeforeAppendingTrade(openBuffer, trade)) {
-        await flushTraceBuyBuffer(openBuffer, {
+        await flushTraceBuyBuffer(openBuffer, requireTraceMarketStream(), {
             extraPolicyTrail: [
                 buildPolicyTrailEntry(
                     TRACE_SIGNAL_BUFFER_POLICY_ID,
@@ -3759,7 +3770,7 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
             const existingPosition = await loadExistingPosition(trade);
             let openBuffer = await loadOpenBuyBufferForTrade(trade);
             if (openBuffer && shouldFlushBufferBeforeAppendingTrade(openBuffer, trade)) {
-                await flushTraceBuyBuffer(openBuffer, {
+                await flushTraceBuyBuffer(openBuffer, requireTraceMarketStream(), {
                     extraPolicyTrail: [
                         buildPolicyTrailEntry(
                             openBuffer.sizingMode === 'signal_fixed_ticket'
@@ -4240,6 +4251,7 @@ export const createTraceSettlementScheduler = () => {
 };
 
 const paperTradeExecutor = async (marketStream: ClobMarketStream) => {
+    traceMarketStreamRef = marketStream;
     logger.info('启动模拟跟单');
     const processingCount = await TraceExecutionBatch.countDocuments({ status: 'PROCESSING' });
     if (processingCount > 0) {
@@ -4254,7 +4266,7 @@ const paperTradeExecutor = async (marketStream: ClobMarketStream) => {
             await processPendingTrades(pendingTrades);
         }
 
-        await flushDueBuyBuffers();
+        await flushDueBuyBuffers(marketStream);
         await executeReadyBatches(marketStream);
 
         const [openBatchCount, openBufferCount] = await Promise.all([
