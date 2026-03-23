@@ -40,6 +40,11 @@ const PAIR_STRONG_TICKET_USDC = ENV.PAIR_STRONG_TICKET_USDC;
 const PAIR_HEDGE_TICKET_USDC = ENV.PAIR_HEDGE_TICKET_USDC;
 const PAIR_HEDGE_PRICE_SUM_MAX = ENV.PAIR_HEDGE_PRICE_SUM_MAX;
 const PAIR_MAX_ACTIONS_PER_CONDITION = ENV.PAIR_MAX_ACTIONS_PER_CONDITION;
+const PAIR_HEDGE_WAIT_MS = ENV.PAIR_HEDGE_WAIT_MS;
+const PAIR_HEDGE_RECHECK_MS = ENV.PAIR_HEDGE_RECHECK_MS;
+const PAIR_HEDGE_MIN_SOURCE_USDC = ENV.PAIR_HEDGE_MIN_SOURCE_USDC;
+const PAIR_HEDGE_MIN_SOURCE_COUNT = ENV.PAIR_HEDGE_MIN_SOURCE_COUNT;
+const PAIR_HEDGE_MIN_SOURCE_RATIO = ENV.PAIR_HEDGE_MIN_SOURCE_RATIO;
 const FOLLOW_MARKET_SCOPE = ENV.FOLLOW_MARKET_SCOPE;
 const EPSILON = 1e-8;
 
@@ -107,7 +112,7 @@ export interface ConditionPairSignalSummary {
 }
 
 export interface ConditionPairBufferedBuyEvaluation {
-    status: 'EXECUTE' | 'SKIP';
+    status: 'EXECUTE' | 'SKIP' | 'DEFER';
     action: 'leader' | 'hedge' | '';
     requestedUsdc: number;
     selectedOutcome: string;
@@ -115,6 +120,7 @@ export interface ConditionPairBufferedBuyEvaluation {
     summary: ConditionPairSignalSummary;
     reason: string;
     policyTrail: ExecutionPolicyTrailEntry[];
+    deferMs?: number;
 }
 
 const dedupeReasons = (...reasons: string[]) =>
@@ -489,14 +495,33 @@ export const evaluateBufferedConditionPairBuy = (params: {
     existingOutcome?: string;
     existingActionCount?: number;
     hedgePriceSum?: number | null;
+    bufferAgeMs?: number;
 }): ConditionPairBufferedBuyEvaluation => {
     const summary = summarizeConditionPairSignals(params.trades);
     const existingActionCount = Math.max(toSafeNumber(params.existingActionCount), 0);
     const existingOutcome = String(params.existingOutcome || '').trim();
+    const bufferAgeMs = Math.max(toSafeNumber(params.bufferAgeMs), 0);
     const hedgePriceSum =
         params.hedgePriceSum === null || params.hedgePriceSum === undefined
             ? null
             : Math.max(toSafeNumber(params.hedgePriceSum), 0);
+    const buildOverlayDefer = (
+        policyId: string,
+        reason: string
+    ): ConditionPairBufferedBuyEvaluation => ({
+        status: 'DEFER',
+        action: '',
+        requestedUsdc: 0,
+        selectedOutcome: '',
+        selectedTrade: null,
+        summary,
+        reason,
+        policyTrail: [buildTrailEntry(policyId, 'DEFER', reason)],
+        deferMs: Math.max(
+            Math.min(PAIR_HEDGE_RECHECK_MS, Math.max(PAIR_HEDGE_WAIT_MS - bufferAgeMs, 0)),
+            0
+        ),
+    });
 
     if (!summary.leader) {
         return {
@@ -639,6 +664,13 @@ export const evaluateBufferedConditionPairBuy = (params: {
         .filter((item): item is ConditionPairOutcomeSignalSummary => Boolean(item))
         .find((item) => normalizeOutcomeKey(item.outcome) !== normalizeOutcomeKey(existingOutcome));
     if (!hedgeCandidate) {
+        if (bufferAgeMs < PAIR_HEDGE_WAIT_MS) {
+            return buildOverlayDefer(
+                'condition-overlay-no-follower',
+                `condition ${existingOutcome} 已有主方向仓位，继续等待 ${PAIR_HEDGE_WAIT_MS}ms 内的反向 overlay 信号`
+            );
+        }
+
         return {
             status: 'SKIP',
             action: '',
@@ -657,7 +689,43 @@ export const evaluateBufferedConditionPairBuy = (params: {
         };
     }
 
+    const hedgeSignalRatio =
+        summary.leader && summary.leader.sourceUsdc > 0
+            ? hedgeCandidate.sourceUsdc / summary.leader.sourceUsdc
+            : 0;
+    const hedgeSignalReady =
+        hedgeCandidate.sourceUsdc >= PAIR_HEDGE_MIN_SOURCE_USDC &&
+        hedgeCandidate.sourceTradeCount >= PAIR_HEDGE_MIN_SOURCE_COUNT &&
+        hedgeSignalRatio >= PAIR_HEDGE_MIN_SOURCE_RATIO;
+
+    if (!hedgeSignalReady) {
+        const reason =
+            `反向 overlay 累计 ${hedgeCandidate.sourceUsdc.toFixed(4)} USDC / ${hedgeCandidate.sourceTradeCount} 笔，` +
+            `占主方向 ${(hedgeSignalRatio * 100).toFixed(2)}%，未达到 overlay 阈值`;
+        if (bufferAgeMs < PAIR_HEDGE_WAIT_MS) {
+            return buildOverlayDefer('condition-overlay-no-follower', reason);
+        }
+
+        return {
+            status: 'SKIP',
+            action: '',
+            requestedUsdc: 0,
+            selectedOutcome: '',
+            selectedTrade: null,
+            summary,
+            reason,
+            policyTrail: [buildTrailEntry('condition-overlay-no-follower', 'SKIP', reason)],
+        };
+    }
+
     if (hedgePriceSum === null || hedgePriceSum <= 0) {
+        if (bufferAgeMs < PAIR_HEDGE_WAIT_MS) {
+            return buildOverlayDefer(
+                'condition-overlay-no-book',
+                '当前缺少可用盘口，暂缓保守型 overlay 配对'
+            );
+        }
+
         return {
             status: 'SKIP',
             action: '',
@@ -677,6 +745,11 @@ export const evaluateBufferedConditionPairBuy = (params: {
     }
 
     if (hedgePriceSum > PAIR_HEDGE_PRICE_SUM_MAX) {
+        const reason = `当前双边买价和 ${hedgePriceSum.toFixed(4)} 高于配对阈值 ${PAIR_HEDGE_PRICE_SUM_MAX.toFixed(4)}`;
+        if (bufferAgeMs < PAIR_HEDGE_WAIT_MS) {
+            return buildOverlayDefer('condition-overlay-no-pair-edge', `${reason}，继续等待更优配对边际`);
+        }
+
         return {
             status: 'SKIP',
             action: '',
@@ -684,12 +757,12 @@ export const evaluateBufferedConditionPairBuy = (params: {
             selectedOutcome: '',
             selectedTrade: null,
             summary,
-            reason: `当前双边买价和 ${hedgePriceSum.toFixed(4)} 高于配对阈值 ${PAIR_HEDGE_PRICE_SUM_MAX.toFixed(4)}，已放弃 overlay`,
+            reason: `${reason}，已放弃 overlay`,
             policyTrail: [
                 buildTrailEntry(
                     'condition-overlay-no-pair-edge',
                     'SKIP',
-                    `当前双边买价和 ${hedgePriceSum.toFixed(4)} 高于配对阈值 ${PAIR_HEDGE_PRICE_SUM_MAX.toFixed(4)}`
+                    reason
                 ),
             ],
         };

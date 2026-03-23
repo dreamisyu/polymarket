@@ -28,6 +28,7 @@ import {
     evaluateSignalBuyTrade,
     getSignalTierLabel,
     isTradeWithinSignalMarketScope,
+    summarizeConditionPairSignals,
     getTradeSourceUsdc,
     sortTradesAsc,
 } from '../utils/copyIntentPlanning';
@@ -94,6 +95,7 @@ const FOLLOW_MAX_ACTIVE_EXPOSURE_USDC = ENV.FOLLOW_MAX_ACTIVE_EXPOSURE_USDC;
 const FOLLOW_MAX_TICKETS_PER_CONDITION = ENV.FOLLOW_MAX_TICKETS_PER_CONDITION;
 const PAIR_OVERLAY_MIN_BUY_USDC = ENV.PAIR_OVERLAY_MIN_BUY_USDC;
 const PAIR_HEDGE_PRICE_SUM_MAX = ENV.PAIR_HEDGE_PRICE_SUM_MAX;
+const PAIR_HEDGE_WAIT_MS = ENV.PAIR_HEDGE_WAIT_MS;
 const PAIR_MAX_ACTIONS_PER_CONDITION = ENV.PAIR_MAX_ACTIONS_PER_CONDITION;
 const FOLLOW_POSITION_DUST_USDC = ENV.FOLLOW_POSITION_DUST_USDC;
 const MIN_MARKET_BUY_USDC = 1;
@@ -2716,23 +2718,25 @@ const flushTraceConditionPairBuyBuffer = async (
     const existingOutcome = existingOutcomes.length === 1 ? existingOutcomes[0] : '';
     let hedgePriceSum: number | null = null;
     if (existingOutcomes.length === 1) {
-        const preliminary = evaluateBufferedConditionPairBuy({
-            trades,
-            existingOutcome,
-            existingActionCount: existingOutcomes.length,
-        });
-        if (preliminary.selectedTrade) {
+        const summary = summarizeConditionPairSignals(trades);
+        const hedgeCandidate = [summary.leader, summary.follower]
+            .filter(Boolean)
+            .find(
+                (item) =>
+                    normalizeOutcomeLabel(item?.outcome) !== normalizeOutcomeLabel(existingOutcome)
+            );
+        if (hedgeCandidate) {
             const leaderTrade =
                 trades.find(
                     (trade) =>
                         trade.conditionId === latestTrade.conditionId &&
                         normalizeOutcomeLabel(trade.outcome) ===
                             normalizeOutcomeLabel(existingOutcome)
-                ) || preliminary.selectedTrade;
+                ) || hedgeCandidate.latestTrade;
             hedgePriceSum = await buildTraceConditionPairBestAskSum(
                 marketStream,
                 leaderTrade,
-                preliminary.selectedTrade
+                hedgeCandidate.latestTrade
             );
         }
     }
@@ -2742,12 +2746,36 @@ const flushTraceConditionPairBuyBuffer = async (
         existingOutcome,
         existingActionCount: existingOutcomes.length,
         hedgePriceSum,
+        bufferAgeMs: Math.max(Date.now() - toSafeNumber(buffer.sourceStartedAt), 0),
     });
     policyTrail = mergePolicyTrail(
         buffer.policyTrail,
         options.extraPolicyTrail,
         evaluation.policyTrail
     );
+
+    if (evaluation.status === 'DEFER') {
+        const deferMs = Math.max(toSafeNumber(evaluation.deferMs), 0);
+        const nextFlushAt = Date.now() + deferMs;
+        await TraceIntentBuffer.updateOne(
+            { _id: buffer._id },
+            {
+                $set: {
+                    state: 'OPEN',
+                    reason: mergeReasons(buffer.reason || '', evaluation.reason),
+                    policyTrail,
+                    flushAfter: nextFlushAt,
+                    expireAt: nextFlushAt,
+                    claimedAt: 0,
+                    completedAt: 0,
+                },
+            }
+        );
+        logger.debug(
+            `${formatBufferRef(buffer)} 延迟重试模拟 condition 配对缓冲 deferMs=${deferMs} reason=${evaluation.reason}`
+        );
+        return;
+    }
 
     if (evaluation.status === 'SKIP' || !evaluation.selectedTrade) {
         await finalizeSkippedBuffer(
@@ -3146,10 +3174,17 @@ const bufferTraceConditionPairBuyIntent = async (params: {
         trades: previewTrades,
         existingOutcome: existingOutcomes.length === 1 ? existingOutcomes[0] : '',
         existingActionCount: existingOutcomes.length,
+        bufferAgeMs: openBuffer
+            ? Math.max(Date.now() - toSafeNumber(openBuffer.sourceStartedAt), 0)
+            : 0,
     });
-    const flushImmediately =
-        existingOutcomes.length === 0 && previewEvaluation.status === 'EXECUTE';
-    const nextFlushAt = flushImmediately ? Date.now() : Date.now() + SIGNAL_BUFFER_MS;
+    const flushImmediately = previewEvaluation.status === 'EXECUTE';
+    const nextFlushAt = flushImmediately
+        ? Date.now()
+        : Date.now() +
+          (previewEvaluation.status === 'DEFER'
+              ? Math.max(toSafeNumber(previewEvaluation.deferMs), 0)
+              : SIGNAL_BUFFER_MS);
     const nextReason = mergeReasons(openBuffer?.reason || '', reason);
     const nextPolicyTrail = mergePolicyTrail(openBuffer?.policyTrail, policyTrail, [
         buildPolicyTrailEntry(
@@ -3157,7 +3192,9 @@ const bufferTraceConditionPairBuyIntent = async (params: {
             'DEFER',
             flushImmediately
                 ? `condition 累计源买单 ${nextSourceUsdc.toFixed(4)} USDC / ${nextSourceTradeCount} 笔，已达到 leader 触发阈值`
-                : `condition 累计源买单 ${nextSourceUsdc.toFixed(4)} USDC / ${nextSourceTradeCount} 笔，继续等待 ${SIGNAL_BUFFER_MS}ms 窗口收敛`
+                : previewEvaluation.status === 'DEFER'
+                  ? `condition 累计源买单 ${nextSourceUsdc.toFixed(4)} USDC / ${nextSourceTradeCount} 笔，继续等待 overlay 条件在 ${PAIR_HEDGE_WAIT_MS}ms 内收敛`
+                  : `condition 累计源买单 ${nextSourceUsdc.toFixed(4)} USDC / ${nextSourceTradeCount} 笔，继续等待 ${SIGNAL_BUFFER_MS}ms 窗口收敛`
         ),
     ]);
 

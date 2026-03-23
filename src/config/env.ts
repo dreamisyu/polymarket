@@ -419,11 +419,11 @@ export const ENV = {
         'PAIR_LEADER_MIN_SOURCE_COUNT'
     ),
     PAIR_LEADER_MIN_SHARE: parsePositiveNumber(
-        readEnv('PAIR_LEADER_MIN_SHARE') || '0.65',
+        readEnv('PAIR_LEADER_MIN_SHARE') || '0.6',
         'PAIR_LEADER_MIN_SHARE'
     ),
     PAIR_LEADER_MIN_EDGE_USDC: parsePositiveNumber(
-        readEnv('PAIR_LEADER_MIN_EDGE_USDC') || '4',
+        readEnv('PAIR_LEADER_MIN_EDGE_USDC') || '3',
         'PAIR_LEADER_MIN_EDGE_USDC'
     ),
     PAIR_STRONG_SOURCE_USDC: parsePositiveNumber(
@@ -435,11 +435,11 @@ export const ENV = {
         'PAIR_STRONG_SOURCE_COUNT'
     ),
     PAIR_STRONG_MIN_SHARE: parsePositiveNumber(
-        readEnv('PAIR_STRONG_MIN_SHARE') || '0.7',
+        readEnv('PAIR_STRONG_MIN_SHARE') || '0.66',
         'PAIR_STRONG_MIN_SHARE'
     ),
     PAIR_STRONG_MIN_EDGE_USDC: parsePositiveNumber(
-        readEnv('PAIR_STRONG_MIN_EDGE_USDC') || '8',
+        readEnv('PAIR_STRONG_MIN_EDGE_USDC') || '6',
         'PAIR_STRONG_MIN_EDGE_USDC'
     ),
     PAIR_LEADER_TICKET_USDC: parsePositiveNumber(
@@ -457,6 +457,26 @@ export const ENV = {
     PAIR_HEDGE_PRICE_SUM_MAX: parsePositiveNumber(
         readEnv('PAIR_HEDGE_PRICE_SUM_MAX') || '0.96',
         'PAIR_HEDGE_PRICE_SUM_MAX'
+    ),
+    PAIR_HEDGE_WAIT_MS: parsePositiveInteger(
+        readEnv('PAIR_HEDGE_WAIT_MS') || '30000',
+        'PAIR_HEDGE_WAIT_MS'
+    ),
+    PAIR_HEDGE_RECHECK_MS: parsePositiveInteger(
+        readEnv('PAIR_HEDGE_RECHECK_MS') || '2000',
+        'PAIR_HEDGE_RECHECK_MS'
+    ),
+    PAIR_HEDGE_MIN_SOURCE_USDC: parsePositiveNumber(
+        readEnv('PAIR_HEDGE_MIN_SOURCE_USDC') || '8',
+        'PAIR_HEDGE_MIN_SOURCE_USDC'
+    ),
+    PAIR_HEDGE_MIN_SOURCE_COUNT: parsePositiveInteger(
+        readEnv('PAIR_HEDGE_MIN_SOURCE_COUNT') || '2',
+        'PAIR_HEDGE_MIN_SOURCE_COUNT'
+    ),
+    PAIR_HEDGE_MIN_SOURCE_RATIO: parsePositiveNumber(
+        readEnv('PAIR_HEDGE_MIN_SOURCE_RATIO') || '0.25',
+        'PAIR_HEDGE_MIN_SOURCE_RATIO'
     ),
     PAIR_MAX_ACTIONS_PER_CONDITION: parsePositiveInteger(
         readEnv('PAIR_MAX_ACTIONS_PER_CONDITION') || '2',

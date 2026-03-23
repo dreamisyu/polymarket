@@ -26,6 +26,7 @@ import {
     evaluateSignalBuyTrade,
     getSignalTierLabel,
     isTradeWithinSignalMarketScope,
+    summarizeConditionPairSignals,
     getTradeSourceUsdc,
     sortTradesAsc,
 } from '../utils/copyIntentPlanning';
@@ -73,6 +74,7 @@ const BUY_BOOTSTRAP_MAX_ACTIVE_RATIO = ENV.BUY_BOOTSTRAP_MAX_ACTIVE_RATIO;
 const BUY_SIZING_MODE = ENV.BUY_SIZING_MODE;
 const PAIR_OVERLAY_MIN_BUY_USDC = ENV.PAIR_OVERLAY_MIN_BUY_USDC;
 const PAIR_HEDGE_PRICE_SUM_MAX = ENV.PAIR_HEDGE_PRICE_SUM_MAX;
+const PAIR_HEDGE_WAIT_MS = ENV.PAIR_HEDGE_WAIT_MS;
 const FOLLOW_MAX_OPEN_POSITIONS = ENV.FOLLOW_MAX_OPEN_POSITIONS;
 const FOLLOW_MAX_ACTIVE_EXPOSURE_USDC = ENV.FOLLOW_MAX_ACTIVE_EXPOSURE_USDC;
 const FOLLOW_MAX_TICKETS_PER_CONDITION = ENV.FOLLOW_MAX_TICKETS_PER_CONDITION;
@@ -1594,12 +1596,15 @@ class LiveTradeExecutorRuntime {
         const existingOutcome = existingOutcomes.length === 1 ? existingOutcomes[0] : '';
         let hedgePriceSum: number | null = null;
         if (existingOutcomes.length === 1) {
-            const preliminary = evaluateBufferedConditionPairBuy({
-                trades,
-                existingOutcome,
-                existingActionCount: existingOutcomes.length,
-            });
-            if (preliminary.selectedTrade) {
+            const summary = summarizeConditionPairSignals(trades);
+            const hedgeCandidate = [summary.leader, summary.follower]
+                .filter(Boolean)
+                .find(
+                    (item) =>
+                        normalizeOutcomeLabel(item?.outcome) !==
+                        normalizeOutcomeLabel(existingOutcome)
+                );
+            if (hedgeCandidate) {
                 const leaderPosition = context.positions.find(
                     (position) =>
                         position.conditionId === latestTrade.conditionId &&
@@ -1613,12 +1618,12 @@ class LiveTradeExecutorRuntime {
                             trade.conditionId === latestTrade.conditionId &&
                             normalizeOutcomeLabel(trade.outcome) ===
                                 normalizeOutcomeLabel(existingOutcome)
-                    ) || preliminary.selectedTrade;
+                    ) || hedgeCandidate.latestTrade;
                 if (leaderPosition || leaderTrade) {
                     hedgePriceSum = await buildConditionPairBestAskSum(
                         this.marketStream,
                         leaderTrade,
-                        preliminary.selectedTrade
+                        hedgeCandidate.latestTrade
                     );
                 }
             }
@@ -1629,12 +1634,30 @@ class LiveTradeExecutorRuntime {
             existingOutcome,
             existingActionCount: existingOutcomes.length,
             hedgePriceSum,
+            bufferAgeMs: Math.max(Date.now() - toSafeNumber(buffer.sourceStartedAt), 0),
         });
         finalPolicyTrail = mergePolicyTrail(
             buffer.policyTrail,
             options.extraPolicyTrail,
             evaluation.policyTrail
         );
+
+        if (evaluation.status === 'DEFER') {
+            const deferMs = Math.max(toSafeNumber(evaluation.deferMs), 0);
+            const nextFlushAt = Date.now() + deferMs;
+            buffer.state = 'OPEN';
+            buffer.reason = mergeReasons(buffer.reason, evaluation.reason);
+            buffer.policyTrail = finalPolicyTrail;
+            buffer.flushAfter = nextFlushAt;
+            buffer.expireAt = nextFlushAt;
+            buffer.completedAt = 0;
+            this.stateStore.createOrUpdateBuffer(buffer);
+            this.queuePersistBuffer(buffer);
+            logger.debug(
+                `${buffer.bufferKey} 延迟重试 live condition 配对缓冲 deferMs=${deferMs} reason=${evaluation.reason}`
+            );
+            return;
+        }
 
         if (evaluation.status === 'SKIP' || !evaluation.selectedTrade) {
             finalizeSkip(options.skipReason || mergeReasons(buffer.reason, evaluation.reason));
@@ -1750,10 +1773,17 @@ class LiveTradeExecutorRuntime {
             trades: previewTrades.length > 0 ? previewTrades : [trade],
             existingOutcome: existingOutcomes.length === 1 ? existingOutcomes[0] : '',
             existingActionCount: existingOutcomes.length,
+            bufferAgeMs: openBuffer
+                ? Math.max(Date.now() - toSafeNumber(openBuffer.sourceStartedAt), 0)
+                : 0,
         });
-        const flushImmediately =
-            existingOutcomes.length === 0 && previewEvaluation.status === 'EXECUTE';
-        const nextFlushAt = flushImmediately ? Date.now() : Date.now() + SIGNAL_BUFFER_MS;
+        const flushImmediately = previewEvaluation.status === 'EXECUTE';
+        const nextFlushAt = flushImmediately
+            ? Date.now()
+            : Date.now() +
+              (previewEvaluation.status === 'DEFER'
+                  ? Math.max(toSafeNumber(previewEvaluation.deferMs), 0)
+                  : SIGNAL_BUFFER_MS);
         const nextReason = mergeReasons(openBuffer?.reason, reason);
         const nextPolicyTrail = mergePolicyTrail(openBuffer?.policyTrail, policyTrail, [
             buildPolicyTrailEntry(
@@ -1761,7 +1791,9 @@ class LiveTradeExecutorRuntime {
                 'DEFER',
                 flushImmediately
                     ? `condition 累计源买单 ${nextSourceUsdc.toFixed(4)} USDC / ${nextSourceTradeCount} 笔，已达到 leader 触发阈值`
-                    : `condition 累计源买单 ${nextSourceUsdc.toFixed(4)} USDC / ${nextSourceTradeCount} 笔，继续等待 ${SIGNAL_BUFFER_MS}ms 窗口收敛`
+                    : previewEvaluation.status === 'DEFER'
+                      ? `condition 累计源买单 ${nextSourceUsdc.toFixed(4)} USDC / ${nextSourceTradeCount} 笔，继续等待 overlay 条件在 ${PAIR_HEDGE_WAIT_MS}ms 内收敛`
+                      : `condition 累计源买单 ${nextSourceUsdc.toFixed(4)} USDC / ${nextSourceTradeCount} 笔，继续等待 ${SIGNAL_BUFFER_MS}ms 窗口收敛`
             ),
         ]);
 
