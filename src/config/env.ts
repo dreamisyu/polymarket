@@ -371,7 +371,7 @@ export const ENV = {
         'BUY_FIRST_ENTRY_SIGNAL_MIN_USDC'
     ),
     SIGNAL_BUFFER_MS: parsePositiveInteger(
-        readEnv('SIGNAL_BUFFER_MS') || '5000',
+        readEnv('SIGNAL_BUFFER_MS') || '2000',
         'SIGNAL_BUFFER_MS'
     ),
     SIGNAL_IGNORE_BUY_BELOW_USDC: parseNonNegativeNumber(
@@ -411,11 +411,11 @@ export const ENV = {
         'PAIR_OVERLAY_MIN_BUY_USDC'
     ),
     PAIR_LEADER_MIN_SOURCE_USDC: parsePositiveNumber(
-        readEnv('PAIR_LEADER_MIN_SOURCE_USDC') || '10',
+        readEnv('PAIR_LEADER_MIN_SOURCE_USDC') || '6',
         'PAIR_LEADER_MIN_SOURCE_USDC'
     ),
     PAIR_LEADER_MIN_SOURCE_COUNT: parsePositiveInteger(
-        readEnv('PAIR_LEADER_MIN_SOURCE_COUNT') || '3',
+        readEnv('PAIR_LEADER_MIN_SOURCE_COUNT') || '2',
         'PAIR_LEADER_MIN_SOURCE_COUNT'
     ),
     PAIR_LEADER_MIN_SHARE: parsePositiveNumber(
@@ -427,11 +427,11 @@ export const ENV = {
         'PAIR_LEADER_MIN_EDGE_USDC'
     ),
     PAIR_STRONG_SOURCE_USDC: parsePositiveNumber(
-        readEnv('PAIR_STRONG_SOURCE_USDC') || '18',
+        readEnv('PAIR_STRONG_SOURCE_USDC') || '12',
         'PAIR_STRONG_SOURCE_USDC'
     ),
     PAIR_STRONG_SOURCE_COUNT: parsePositiveInteger(
-        readEnv('PAIR_STRONG_SOURCE_COUNT') || '5',
+        readEnv('PAIR_STRONG_SOURCE_COUNT') || '3',
         'PAIR_STRONG_SOURCE_COUNT'
     ),
     PAIR_STRONG_MIN_SHARE: parsePositiveNumber(
@@ -447,7 +447,7 @@ export const ENV = {
         'PAIR_LEADER_TICKET_USDC'
     ),
     PAIR_STRONG_TICKET_USDC: parsePositiveNumber(
-        readEnv('PAIR_STRONG_TICKET_USDC') || '1.8',
+        readEnv('PAIR_STRONG_TICKET_USDC') || '1.5',
         'PAIR_STRONG_TICKET_USDC'
     ),
     PAIR_HEDGE_TICKET_USDC: parsePositiveNumber(
@@ -455,8 +455,12 @@ export const ENV = {
         'PAIR_HEDGE_TICKET_USDC'
     ),
     PAIR_HEDGE_PRICE_SUM_MAX: parsePositiveNumber(
-        readEnv('PAIR_HEDGE_PRICE_SUM_MAX') || '0.96',
+        readEnv('PAIR_HEDGE_PRICE_SUM_MAX') || '1.05',
         'PAIR_HEDGE_PRICE_SUM_MAX'
+    ),
+    PAIR_HEDGE_CHEAP_ASK_MAX: parsePositiveNumber(
+        readEnv('PAIR_HEDGE_CHEAP_ASK_MAX') || '0.35',
+        'PAIR_HEDGE_CHEAP_ASK_MAX'
     ),
     PAIR_HEDGE_WAIT_MS: parsePositiveInteger(
         readEnv('PAIR_HEDGE_WAIT_MS') || '30000',
@@ -467,7 +471,7 @@ export const ENV = {
         'PAIR_HEDGE_RECHECK_MS'
     ),
     PAIR_HEDGE_MIN_SOURCE_USDC: parsePositiveNumber(
-        readEnv('PAIR_HEDGE_MIN_SOURCE_USDC') || '8',
+        readEnv('PAIR_HEDGE_MIN_SOURCE_USDC') || '5',
         'PAIR_HEDGE_MIN_SOURCE_USDC'
     ),
     PAIR_HEDGE_MIN_SOURCE_COUNT: parsePositiveInteger(
@@ -475,7 +479,7 @@ export const ENV = {
         'PAIR_HEDGE_MIN_SOURCE_COUNT'
     ),
     PAIR_HEDGE_MIN_SOURCE_RATIO: parsePositiveNumber(
-        readEnv('PAIR_HEDGE_MIN_SOURCE_RATIO') || '0.25',
+        readEnv('PAIR_HEDGE_MIN_SOURCE_RATIO') || '0.2',
         'PAIR_HEDGE_MIN_SOURCE_RATIO'
     ),
     PAIR_MAX_ACTIONS_PER_CONDITION: parsePositiveInteger(

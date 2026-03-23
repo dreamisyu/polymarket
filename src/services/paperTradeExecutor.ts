@@ -2124,7 +2124,11 @@ const buildTraceConditionPairBestAskSum = async (
         return null;
     }
 
-    return leaderAsk + hedgeAsk;
+    return {
+        leaderAsk,
+        hedgeAsk,
+        sum: leaderAsk + hedgeAsk,
+    };
 };
 
 const buildTraceActiveExposureUsdc = (
@@ -2728,6 +2732,7 @@ const flushTraceConditionPairBuyBuffer = async (
     const existingOutcomes = await loadTraceConditionPairActionOutcomes(latestTrade.conditionId);
     const existingOutcome = existingOutcomes.length === 1 ? existingOutcomes[0] : '';
     let hedgePriceSum: number | null = null;
+    let hedgeBestAsk: number | null = null;
     if (existingOutcomes.length === 1) {
         const summary = summarizeConditionPairSignals(trades);
         const hedgeCandidate = [summary.leader, summary.follower]
@@ -2744,11 +2749,13 @@ const flushTraceConditionPairBuyBuffer = async (
                         normalizeOutcomeLabel(trade.outcome) ===
                             normalizeOutcomeLabel(existingOutcome)
                 ) || hedgeCandidate.latestTrade;
-            hedgePriceSum = await buildTraceConditionPairBestAskSum(
+            const hedgePricing = await buildTraceConditionPairBestAskSum(
                 marketStream,
                 leaderTrade,
                 hedgeCandidate.latestTrade
             );
+            hedgePriceSum = hedgePricing?.sum ?? null;
+            hedgeBestAsk = hedgePricing?.hedgeAsk ?? null;
         }
     }
 
@@ -2757,6 +2764,7 @@ const flushTraceConditionPairBuyBuffer = async (
         existingOutcome,
         existingActionCount: existingOutcomes.length,
         hedgePriceSum,
+        hedgeBestAsk,
         bufferAgeMs: Math.max(Date.now() - toSafeNumber(buffer.sourceStartedAt), 0),
     });
     policyTrail = mergePolicyTrail(

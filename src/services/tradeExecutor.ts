@@ -276,7 +276,11 @@ const buildConditionPairBestAskSum = async (
         return null;
     }
 
-    return leaderAsk + hedgeAsk;
+    return {
+        leaderAsk,
+        hedgeAsk,
+        sum: leaderAsk + hedgeAsk,
+    };
 };
 
 const buildLiveActiveExposureUsdc = (
@@ -1595,6 +1599,7 @@ class LiveTradeExecutorRuntime {
         );
         const existingOutcome = existingOutcomes.length === 1 ? existingOutcomes[0] : '';
         let hedgePriceSum: number | null = null;
+        let hedgeBestAsk: number | null = null;
         if (existingOutcomes.length === 1) {
             const summary = summarizeConditionPairSignals(trades);
             const hedgeCandidate = [summary.leader, summary.follower]
@@ -1620,11 +1625,13 @@ class LiveTradeExecutorRuntime {
                                 normalizeOutcomeLabel(existingOutcome)
                     ) || hedgeCandidate.latestTrade;
                 if (leaderPosition || leaderTrade) {
-                    hedgePriceSum = await buildConditionPairBestAskSum(
+                    const hedgePricing = await buildConditionPairBestAskSum(
                         this.marketStream,
                         leaderTrade,
                         hedgeCandidate.latestTrade
                     );
+                    hedgePriceSum = hedgePricing?.sum ?? null;
+                    hedgeBestAsk = hedgePricing?.hedgeAsk ?? null;
                 }
             }
         }
@@ -1634,6 +1641,7 @@ class LiveTradeExecutorRuntime {
             existingOutcome,
             existingActionCount: existingOutcomes.length,
             hedgePriceSum,
+            hedgeBestAsk,
             bufferAgeMs: Math.max(Date.now() - toSafeNumber(buffer.sourceStartedAt), 0),
         });
         finalPolicyTrail = mergePolicyTrail(

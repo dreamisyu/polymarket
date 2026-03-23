@@ -39,6 +39,7 @@ const PAIR_LEADER_TICKET_USDC = ENV.PAIR_LEADER_TICKET_USDC;
 const PAIR_STRONG_TICKET_USDC = ENV.PAIR_STRONG_TICKET_USDC;
 const PAIR_HEDGE_TICKET_USDC = ENV.PAIR_HEDGE_TICKET_USDC;
 const PAIR_HEDGE_PRICE_SUM_MAX = ENV.PAIR_HEDGE_PRICE_SUM_MAX;
+const PAIR_HEDGE_CHEAP_ASK_MAX = ENV.PAIR_HEDGE_CHEAP_ASK_MAX;
 const PAIR_MAX_ACTIONS_PER_CONDITION = ENV.PAIR_MAX_ACTIONS_PER_CONDITION;
 const PAIR_HEDGE_WAIT_MS = ENV.PAIR_HEDGE_WAIT_MS;
 const PAIR_HEDGE_RECHECK_MS = ENV.PAIR_HEDGE_RECHECK_MS;
@@ -495,6 +496,7 @@ export const evaluateBufferedConditionPairBuy = (params: {
     existingOutcome?: string;
     existingActionCount?: number;
     hedgePriceSum?: number | null;
+    hedgeBestAsk?: number | null;
     bufferAgeMs?: number;
 }): ConditionPairBufferedBuyEvaluation => {
     const summary = summarizeConditionPairSignals(params.trades);
@@ -505,6 +507,10 @@ export const evaluateBufferedConditionPairBuy = (params: {
         params.hedgePriceSum === null || params.hedgePriceSum === undefined
             ? null
             : Math.max(toSafeNumber(params.hedgePriceSum), 0);
+    const hedgeBestAsk =
+        params.hedgeBestAsk === null || params.hedgeBestAsk === undefined
+            ? null
+            : Math.max(toSafeNumber(params.hedgeBestAsk), 0);
     const buildOverlayDefer = (
         policyId: string,
         reason: string
@@ -718,6 +724,47 @@ export const evaluateBufferedConditionPairBuy = (params: {
         };
     }
 
+    if (
+        hedgeBestAsk !== null &&
+        hedgeBestAsk > 0 &&
+        hedgeBestAsk <= PAIR_HEDGE_CHEAP_ASK_MAX
+    ) {
+        const triggerReason =
+            `condition 已建立 ${existingOutcome} 主方向仓位，` +
+            `反向盘口买价 ${hedgeBestAsk.toFixed(4)} 不高于 cheap follower 阈值 ${PAIR_HEDGE_CHEAP_ASK_MAX.toFixed(4)}，` +
+            `已触发延迟 overlay 补边 ${PAIR_HEDGE_TICKET_USDC.toFixed(4)} USDC`;
+        const capped = clampConditionPairTicket(PAIR_HEDGE_TICKET_USDC);
+        if (capped.status === 'SKIP') {
+            return {
+                status: 'SKIP',
+                action: '',
+                requestedUsdc: capped.requestedUsdc,
+                selectedOutcome: '',
+                selectedTrade: null,
+                summary,
+                reason: dedupeReasons(triggerReason, capped.reason),
+                policyTrail: [
+                    buildTrailEntry(buildConditionPairPolicyId('hedge'), 'SKIP', triggerReason),
+                    ...capped.policyTrail,
+                ],
+            };
+        }
+
+        return {
+            status: 'EXECUTE',
+            action: 'hedge',
+            requestedUsdc: capped.requestedUsdc,
+            selectedOutcome: hedgeCandidate.outcome,
+            selectedTrade: hedgeCandidate.latestTrade,
+            summary,
+            reason: dedupeReasons(triggerReason, capped.reason),
+            policyTrail: [
+                buildTrailEntry(buildConditionPairPolicyId('hedge'), 'ADJUST', triggerReason),
+                ...capped.policyTrail,
+            ],
+        };
+    }
+
     if (hedgePriceSum === null || hedgePriceSum <= 0) {
         if (bufferAgeMs < PAIR_HEDGE_WAIT_MS) {
             return buildOverlayDefer(
@@ -745,9 +792,14 @@ export const evaluateBufferedConditionPairBuy = (params: {
     }
 
     if (hedgePriceSum > PAIR_HEDGE_PRICE_SUM_MAX) {
-        const reason = `当前双边买价和 ${hedgePriceSum.toFixed(4)} 高于配对阈值 ${PAIR_HEDGE_PRICE_SUM_MAX.toFixed(4)}`;
+        const reason =
+            `当前反向盘口买价 ${hedgeBestAsk?.toFixed(4) ?? 'NA'} 高于 cheap follower 阈值 ${PAIR_HEDGE_CHEAP_ASK_MAX.toFixed(4)}，` +
+            `且双边买价和 ${hedgePriceSum.toFixed(4)} 高于回退阈值 ${PAIR_HEDGE_PRICE_SUM_MAX.toFixed(4)}`;
         if (bufferAgeMs < PAIR_HEDGE_WAIT_MS) {
-            return buildOverlayDefer('condition-overlay-no-pair-edge', `${reason}，继续等待更优配对边际`);
+            return buildOverlayDefer(
+                'condition-overlay-no-pair-edge',
+                `${reason}，继续等待更优 follower 价格`
+            );
         }
 
         return {
@@ -770,7 +822,8 @@ export const evaluateBufferedConditionPairBuy = (params: {
 
     const triggerReason =
         `condition 已建立 ${existingOutcome} 主方向仓位，` +
-        `当前双边买价和 ${hedgePriceSum.toFixed(4)}，已触发保守型 overlay 配对 ${PAIR_HEDGE_TICKET_USDC.toFixed(4)} USDC`;
+        `当前反向盘口买价 ${hedgeBestAsk?.toFixed(4) ?? 'NA'}，双边买价和 ${hedgePriceSum.toFixed(4)}，` +
+        `已触发回退型 overlay 配对 ${PAIR_HEDGE_TICKET_USDC.toFixed(4)} USDC`;
     const capped = clampConditionPairTicket(PAIR_HEDGE_TICKET_USDC);
     if (capped.status === 'SKIP') {
         return {
