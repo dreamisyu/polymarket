@@ -261,6 +261,30 @@ const collectLiveConditionPairOutcomes = (
     return [...outcomes];
 };
 
+const resolveLiveConditionPairLeaderOutcome = (
+    positions: UserPositionInterface[],
+    stateStore: LiveStateStore,
+    conditionId: string
+) => {
+    const leaderFromActions = stateStore.getConditionPairLeaderOutcome(conditionId);
+    if (leaderFromActions) {
+        return leaderFromActions;
+    }
+
+    const bestPosition = positions
+        .filter(
+            (position) =>
+                position.conditionId === conditionId &&
+                Math.max(toSafeNumber(position.size), 0) > EPSILON
+        )
+        .sort(
+            (left, right) =>
+                Math.max(toSafeNumber(right.size), 0) - Math.max(toSafeNumber(left.size), 0)
+        )[0];
+
+    return String(bestPosition?.outcome || '').trim();
+};
+
 const buildConditionPairBestAskSum = async (
     marketStream: ClobMarketStream,
     leaderTrade: Pick<UserActivityInterface, 'asset'>,
@@ -1593,9 +1617,16 @@ class LiveTradeExecutorRuntime {
             this.stateStore,
             latestTrade.conditionId
         );
-        const existingOutcome = existingOutcomes.length === 1 ? existingOutcomes[0] : '';
+        const existingActionCount = this.stateStore.countConditionPairActions(
+            latestTrade.conditionId
+        );
+        const existingOutcome = resolveLiveConditionPairLeaderOutcome(
+            context.positions,
+            this.stateStore,
+            latestTrade.conditionId
+        );
         let hedgePriceSum: number | null = null;
-        if (existingOutcomes.length === 1) {
+        if (existingOutcome) {
             const summary = summarizeConditionPairSignals(trades);
             const hedgeCandidate = [summary.leader, summary.follower]
                 .filter(Boolean)
@@ -1632,7 +1663,7 @@ class LiveTradeExecutorRuntime {
         const evaluation = evaluateBufferedConditionPairBuy({
             trades,
             existingOutcome,
-            existingActionCount: existingOutcomes.length,
+            existingActionCount,
             hedgePriceSum,
             bufferAgeMs: Math.max(Date.now() - toSafeNumber(buffer.sourceStartedAt), 0),
         });
@@ -1735,8 +1766,18 @@ class LiveTradeExecutorRuntime {
         reason?: string;
         policyTrail?: ExecutionPolicyTrailEntry[];
         existingOutcomes?: string[];
+        existingActionCount?: number;
+        existingOutcome?: string;
     }) {
-        const { trade, sourceUsdc, reason = '', policyTrail = [], existingOutcomes = [] } = params;
+        const {
+            trade,
+            sourceUsdc,
+            reason = '',
+            policyTrail = [],
+            existingOutcomes = [],
+            existingActionCount = existingOutcomes.length,
+            existingOutcome = existingOutcomes.length === 1 ? existingOutcomes[0] : '',
+        } = params;
         const normalizedSourceUsdc = Math.max(toSafeNumber(sourceUsdc), 0);
         if (normalizedSourceUsdc <= 0) {
             return;
@@ -1771,8 +1812,8 @@ class LiveTradeExecutorRuntime {
         );
         const previewEvaluation = evaluateBufferedConditionPairBuy({
             trades: previewTrades.length > 0 ? previewTrades : [trade],
-            existingOutcome: existingOutcomes.length === 1 ? existingOutcomes[0] : '',
-            existingActionCount: existingOutcomes.length,
+            existingOutcome,
+            existingActionCount,
             bufferAgeMs: openBuffer
                 ? Math.max(Date.now() - toSafeNumber(openBuffer.sourceStartedAt), 0)
                 : 0,
@@ -2225,9 +2266,17 @@ class LiveTradeExecutorRuntime {
                             this.stateStore,
                             trade.conditionId
                         );
+                        const existingActionCount = this.stateStore.countConditionPairActions(
+                            trade.conditionId
+                        );
+                        const existingOutcome = resolveLiveConditionPairLeaderOutcome(
+                            context.positions,
+                            this.stateStore,
+                            trade.conditionId
+                        );
                         if (
                             latestBuffer === null &&
-                            existingOutcomes.length >= PAIR_MAX_ACTIONS_PER_CONDITION
+                            existingActionCount >= PAIR_MAX_ACTIONS_PER_CONDITION
                         ) {
                             const reason = buildConditionPairMaxActionsReason();
                             this.finalizeTradeState(state, 'SKIPPED', reason, [
@@ -2246,6 +2295,8 @@ class LiveTradeExecutorRuntime {
                             reason: signalTradeEvaluation.reason,
                             policyTrail: signalTradeEvaluation.policyTrail,
                             existingOutcomes,
+                            existingActionCount,
+                            existingOutcome,
                         });
                         logger.debug(
                             `${formatTradeRef(trade)} 已写入实盘 condition 配对缓冲 sourceUsdc=${formatAmount(signalTradeEvaluation.sourceUsdc)}`

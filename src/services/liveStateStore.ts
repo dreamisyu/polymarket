@@ -26,6 +26,10 @@ const CONDITION_PAIR_POLICY_IDS = [
     'condition-strong-leader-entry',
     'condition-hedge-overlay',
 ];
+const CONDITION_PAIR_LEADER_POLICY_IDS = [
+    'condition-leader-entry',
+    'condition-strong-leader-entry',
+];
 const ACTIVE_BUY_BATCH_STATUSES = [
     'READY',
     'PROCESSING',
@@ -514,7 +518,47 @@ class LiveStateStore {
     }
 
     countConditionPairActions(conditionId: string) {
-        return this.getConditionPairActionOutcomes(conditionId).length;
+        return [...this.batchesById.values()].filter(
+            (batch) =>
+                batch.conditionId === conditionId &&
+                batch.condition === 'buy' &&
+                !['SKIPPED', 'FAILED'].includes(batch.status) &&
+                hasPolicyId(batch.policyTrail, CONDITION_PAIR_POLICY_IDS)
+        ).length;
+    }
+
+    getConditionPairLeaderOutcome(conditionId: string) {
+        const leaderBatches = [...this.batchesById.values()]
+            .filter(
+                (batch) =>
+                    batch.conditionId === conditionId &&
+                    batch.condition === 'buy' &&
+                    !['SKIPPED', 'FAILED'].includes(batch.status) &&
+                    hasPolicyId(batch.policyTrail, CONDITION_PAIR_LEADER_POLICY_IDS)
+            )
+            .sort((left, right) => {
+                const leftTs = Math.max(
+                    toSafeNumber(left.completedAt),
+                    toSafeNumber(left.confirmedAt),
+                    toSafeNumber(left.submittedAt),
+                    toSafeNumber(left.sourceEndedAt),
+                    0
+                );
+                const rightTs = Math.max(
+                    toSafeNumber(right.completedAt),
+                    toSafeNumber(right.confirmedAt),
+                    toSafeNumber(right.submittedAt),
+                    toSafeNumber(right.sourceEndedAt),
+                    0
+                );
+                if (leftTs === rightTs) {
+                    return String(left._id).localeCompare(String(right._id));
+                }
+
+                return leftTs - rightTs;
+            });
+
+        return String(leaderBatches.slice(-1)[0]?.outcome || '').trim();
     }
 
     markBootstrapExposure(

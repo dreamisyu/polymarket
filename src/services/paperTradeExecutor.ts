@@ -2067,7 +2067,7 @@ const countOpenTracePositions = async () => {
     return positions.filter((position) => isTracePositionActiveForSignal(position)).length;
 };
 
-const loadTraceConditionPairActionOutcomes = async (conditionId: string) => {
+const loadTraceConditionPairActionState = async (conditionId: string) => {
     const [positions, batches] = await Promise.all([
         TracePosition.find({
             conditionId,
@@ -2089,24 +2089,75 @@ const loadTraceConditionPairActionOutcomes = async (conditionId: string) => {
                 ],
             },
         })
-            .select({ outcome: 1 })
+            .select({
+                outcome: 1,
+                policyTrail: 1,
+                sourceEndedAt: 1,
+                submittedAt: 1,
+                confirmedAt: 1,
+                completedAt: 1,
+            })
             .lean()
             .exec(),
     ]);
 
     const outcomes = new Set<string>();
+    let leaderOutcome = '';
+    let leaderTimestamp = 0;
+    let fallbackOutcome = '';
+    let fallbackSize = 0;
     for (const position of positions) {
         if (isTracePositionActiveForSignal(position)) {
-            outcomes.add(String(position.outcome || '').trim());
-        }
-    }
-    for (const batch of batches) {
-        if (batch.outcome) {
-            outcomes.add(String(batch.outcome).trim());
+            const normalizedOutcome = String(position.outcome || '').trim();
+            if (!normalizedOutcome) {
+                continue;
+            }
+
+            outcomes.add(normalizedOutcome);
+            const normalizedSize = Math.max(toSafeNumber(position.size), 0);
+            if (normalizedSize > fallbackSize) {
+                fallbackSize = normalizedSize;
+                fallbackOutcome = normalizedOutcome;
+            }
         }
     }
 
-    return [...outcomes].filter(Boolean);
+    let actionCount = 0;
+    for (const batch of batches) {
+        actionCount += 1;
+        const normalizedOutcome = String(batch.outcome || '').trim();
+        if (!normalizedOutcome) {
+            continue;
+        }
+
+        outcomes.add(normalizedOutcome);
+        const isLeaderAction = (batch.policyTrail || []).some((entry) =>
+            ['condition-leader-entry', 'condition-strong-leader-entry'].includes(
+                String(entry?.policyId || '')
+            )
+        );
+        if (!isLeaderAction) {
+            continue;
+        }
+
+        const timestamp = Math.max(
+            toSafeNumber((batch as { completedAt?: number }).completedAt),
+            toSafeNumber((batch as { confirmedAt?: number }).confirmedAt),
+            toSafeNumber((batch as { submittedAt?: number }).submittedAt),
+            toSafeNumber((batch as { sourceEndedAt?: number }).sourceEndedAt),
+            0
+        );
+        if (timestamp >= leaderTimestamp) {
+            leaderTimestamp = timestamp;
+            leaderOutcome = normalizedOutcome;
+        }
+    }
+
+    return {
+        outcomes: [...outcomes].filter(Boolean),
+        actionCount,
+        leaderOutcome: leaderOutcome || fallbackOutcome,
+    };
 };
 
 const buildTraceConditionPairBestAskSum = async (
@@ -2725,10 +2776,11 @@ const flushTraceConditionPairBuyBuffer = async (
     }
 
     const portfolio = await ensurePortfolio();
-    const existingOutcomes = await loadTraceConditionPairActionOutcomes(latestTrade.conditionId);
-    const existingOutcome = existingOutcomes.length === 1 ? existingOutcomes[0] : '';
+    const existingState = await loadTraceConditionPairActionState(latestTrade.conditionId);
+    const existingOutcomes = existingState.outcomes;
+    const existingOutcome = existingState.leaderOutcome;
     let hedgePriceSum: number | null = null;
-    if (existingOutcomes.length === 1) {
+    if (existingOutcome) {
         const summary = summarizeConditionPairSignals(trades);
         const hedgeCandidate = [summary.leader, summary.follower]
             .filter(Boolean)
@@ -2755,7 +2807,7 @@ const flushTraceConditionPairBuyBuffer = async (
     const evaluation = evaluateBufferedConditionPairBuy({
         trades,
         existingOutcome,
-        existingActionCount: existingOutcomes.length,
+        existingActionCount: existingState.actionCount,
         hedgePriceSum,
         bufferAgeMs: Math.max(Date.now() - toSafeNumber(buffer.sourceStartedAt), 0),
     });
@@ -3153,8 +3205,18 @@ const bufferTraceConditionPairBuyIntent = async (params: {
     reason?: string;
     policyTrail?: ExecutionPolicyTrailEntry[];
     existingOutcomes?: string[];
+    existingActionCount?: number;
+    existingOutcome?: string;
 }) => {
-    const { trade, sourceUsdc, reason = '', policyTrail = [], existingOutcomes = [] } = params;
+    const {
+        trade,
+        sourceUsdc,
+        reason = '',
+        policyTrail = [],
+        existingOutcomes = [],
+        existingActionCount = existingOutcomes.length,
+        existingOutcome = existingOutcomes.length === 1 ? existingOutcomes[0] : '',
+    } = params;
     const normalizedSourceUsdc = Math.max(toSafeNumber(sourceUsdc), 0);
     if (normalizedSourceUsdc <= 0) {
         return;
@@ -3183,8 +3245,8 @@ const bufferTraceConditionPairBuyIntent = async (params: {
         : [trade];
     const previewEvaluation = evaluateBufferedConditionPairBuy({
         trades: previewTrades,
-        existingOutcome: existingOutcomes.length === 1 ? existingOutcomes[0] : '',
-        existingActionCount: existingOutcomes.length,
+        existingOutcome,
+        existingActionCount,
         bufferAgeMs: openBuffer
             ? Math.max(Date.now() - toSafeNumber(openBuffer.sourceStartedAt), 0)
             : 0,
@@ -3810,12 +3872,11 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
                     continue;
                 }
 
-                const existingOutcomes = await loadTraceConditionPairActionOutcomes(
-                    trade.conditionId
-                );
+                const existingState = await loadTraceConditionPairActionState(trade.conditionId);
+                const existingOutcomes = existingState.outcomes;
                 if (
                     openBuffer === null &&
-                    existingOutcomes.length >= PAIR_MAX_ACTIONS_PER_CONDITION
+                    existingState.actionCount >= PAIR_MAX_ACTIONS_PER_CONDITION
                 ) {
                     const reason = buildConditionPairMaxActionsReason();
                     await recordSkippedDirectTrade({
@@ -3844,6 +3905,8 @@ const processPendingTrades = async (trades: UserActivityInterface[]) => {
                     reason: signalTradeEvaluation.reason,
                     policyTrail: signalTradeEvaluation.policyTrail,
                     existingOutcomes,
+                    existingActionCount: existingState.actionCount,
+                    existingOutcome: existingState.leaderOutcome,
                 });
                 logger.debug(
                     `${formatTradeRef(trade)} 已写入模拟 condition 配对缓冲 sourceUsdc=${formatAmount(signalTradeEvaluation.sourceUsdc)}`
