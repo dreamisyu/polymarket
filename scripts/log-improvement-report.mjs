@@ -3,7 +3,7 @@ import {
     formatPct,
     formatTimestamp,
     pct,
-    pushSuggestion,
+    pushSuggestion, readEnv,
     takeTopEntries,
     toSafeNumber,
 } from './lib/runtime.mjs';
@@ -127,8 +127,8 @@ if (argv.help) {
 const stripAnsi = (value) => String(value || '').replace(/\u001b\[[0-9;]*m/g, '');
 
 const readInputText = () => {
+    const chunks = [];
     if (argv.files.length > 0) {
-        const chunks = [];
         for (const filePath of argv.files) {
             if (!existsSync(filePath)) {
                 throw new Error(`日志文件不存在: ${filePath}`);
@@ -140,11 +140,12 @@ const readInputText = () => {
         return chunks.join('\n');
     }
 
-    if (!process.stdin.isTTY) {
+    const filePath = readEnv('LOG_FILE_PATH');
+    if (!existsSync(filePath) && !process.stdin.isTTY) {
         return readFileSync(0, 'utf8');
     }
-
-    throw new Error('未提供 --file，且 stdin 为空');
+    chunks.push(readFileSync(filePath, 'utf8'));
+    return chunks.join('\n');
 };
 
 const normalizeSignature = (line) =>

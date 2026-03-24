@@ -1,37 +1,3 @@
-// target-wallet-strategy-analyzer.mjs
-//
-// 完全适配当前 lib 文件导出的 Polymarket bot 分析脚本。
-//
-// 依赖的导出（与你现有 lib 对齐）：
-// - ./lib/runtime.mjs
-//   buildTimeRange, quantile, formatUsd, formatPct, toSafeNumber
-// - ./lib/polymarketApi.mjs
-//   fetchPolymarketActivities, fetchPolymarketPositions
-//
-// 用途：
-// 1) 价格感知的活动画像
-// 2) condition/outcome 级 episode 建仓分析
-// 3) 小资金阈值穿越分析（例如 1u / 2u / 5u 何时能凑够，并且那时已经追价多少）
-// 4) 双边 overlay / merge 代理分析
-// 5) 给出更适合优化跟单逻辑的策略提示
-//
-// 用法示例：
-// node scripts/target-wallet-strategy-analyzer.mjs \
-//   --user-address 0x297fbd45782af37d899015aebbc52437f3d55103 \
-//   --hours 6
-//
-// node scripts/target-wallet-strategy-analyzer.mjs \
-//   --user-address 0x297fbd45782af37d899015aebbc52437f3d55103 \
-//   --hours 6 \
-//   --scope crypto-5m
-//
-// node scripts/target-wallet-strategy-analyzer.mjs \
-//   --user-address 0x297fbd45782af37d899015aebbc52437f3d55103 \
-//   --hours 6 \
-//   --episode-gap-ms 5000 \
-//   --thresholds-usdc 1,2,5,10,20 \
-//   --json
-
 import {
     buildTimeRange,
     quantile,
@@ -749,7 +715,7 @@ async function main() {
         return;
     }
 
-    console.log('目标账户远程画像（价格感知增强版）');
+    console.log('目标账户远程画像');
     console.log(`- 账户: ${args.userAddress}`);
     console.log(`- 时间范围: ${fromIso} ~ ${toIso}`);
     console.log(`- scope: ${args.scope}`);
@@ -791,7 +757,7 @@ async function main() {
     console.log('');
 
     for (const threshold of args.thresholdsUsdc) {
-        console.log(`阈值穿越（价格感知跟单代理）- ${threshold}u`);
+        console.log(`阈值穿越）- ${threshold}u`);
         const lines = renderThresholds(thresholdHits, threshold, args.topN);
         if (lines.length) {
             for (const line of lines) console.log(line);
@@ -805,10 +771,10 @@ async function main() {
         console.log('');
     }
 
-    console.log('策略提示');
-    for (const hint of result.hints) {
-        console.log(`- ${hint}`);
-    }
+    // console.log('策略提示');
+    // for (const hint of result.hints) {
+    //     console.log(`- ${hint}`);
+    // }
 }
 
 main().catch((error) => {

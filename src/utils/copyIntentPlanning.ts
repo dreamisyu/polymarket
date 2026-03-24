@@ -196,7 +196,7 @@ export const isTradeWithinSignalMarketScope = (
 
     return (
         normalizedSlug.includes('btc-updown-5m') ||
-        normalizedSlug.includes('eth-updown-5m') ||
+        // normalizedSlug.includes('eth-updown-5m') ||
         titleFallbackMatched
     );
 };
