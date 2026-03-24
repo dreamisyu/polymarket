@@ -18,5 +18,4 @@
         "tsBuildInfoFile": "./tsconfig.tsbuildinfo"
     },
     "include": ["src/**/*.ts"],
-    "exclude": ["dist", "node_modules", "coverage"]
 }

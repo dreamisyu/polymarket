@@ -191,12 +191,14 @@ export const isTradeWithinSignalMarketScope = (
     const titleFallbackMatched =
         !normalizedSlug &&
         (normalizedTitle.includes('bitcoin up or down') ||
-            normalizedTitle.includes('ethereum up or down')) &&
+            normalizedTitle.includes('Ethereum Up or Down') ||
+            normalizedTitle.includes('Solana Up or Down ') ||
+            normalizedTitle.includes('XRP Up or Down')) &&
         isFiveMinuteUpdownTitle(normalizedTitle);
 
     return (
         normalizedSlug.includes('btc-updown-5m') ||
-        normalizedSlug.includes('eth-updown-5m') ||
+        // normalizedSlug.includes('eth-updown-5m') ||
         titleFallbackMatched
     );
 };

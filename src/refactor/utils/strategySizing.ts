@@ -1,0 +1,145 @@
+import type { RefactorConfig } from '../config/runtimeConfig';
+import type { SourceTradeEvent, StrategySizingDecision } from '../domain/types';
+import { computeBuyTargetUsdc, computeSellTargetSize } from '../../utils/executionPlanning';
+import { isTradeWithinSignalMarketScope } from '../../utils/copyIntentPlanning';
+
+export const computeProportionalDecision = (
+    event: SourceTradeEvent,
+    availableBalance: number,
+    localPositionSize: number
+): StrategySizingDecision => {
+    if (event.action === 'buy') {
+        const result = computeBuyTargetUsdc(event as never, availableBalance);
+        if (result.status !== 'READY') {
+            return {
+                status: 'skip',
+                reason: result.reason,
+            };
+        }
+
+        return {
+            status: 'ready',
+            requestedUsdc: result.requestedUsdc,
+            reason: result.reason,
+            note: result.note,
+        };
+    }
+
+    if (event.action === 'sell' || event.action === 'merge') {
+        const result = computeSellTargetSize(
+            event.action === 'merge' ? 'merge' : 'sell',
+            localPositionSize,
+            event as never,
+            Math.max(Number(event.sourcePositionSizeAfterTrade) || 0, 0)
+        );
+        if (result.status !== 'READY') {
+            return {
+                status: 'skip',
+                reason: result.reason,
+            };
+        }
+
+        return {
+            status: 'ready',
+            requestedSize: result.requestedSize,
+            reason: result.reason,
+        };
+    }
+
+    return {
+        status: 'skip',
+        reason: '当前事件不在跟单策略范围内',
+    };
+};
+
+export const computeFixedAmountDecision = (
+    event: SourceTradeEvent,
+    availableBalance: number,
+    localPositionSize: number,
+    config: RefactorConfig
+): StrategySizingDecision => {
+    if (event.action === 'buy') {
+        const requestedUsdc = Math.min(config.fixedTradeAmountUsdc, availableBalance);
+        if (requestedUsdc <= 0) {
+            return {
+                status: 'skip',
+                reason: '本地可用余额不足',
+            };
+        }
+
+        return {
+            status: 'ready',
+            requestedUsdc,
+            reason: '',
+            note: `固定金额策略 ${requestedUsdc.toFixed(4)} USDC`,
+        };
+    }
+
+    return computeProportionalDecision(event, availableBalance, localPositionSize);
+};
+
+export const computeSignalDecision = (
+    event: SourceTradeEvent,
+    availableBalance: number,
+    localPositionSize: number,
+    config: RefactorConfig
+): StrategySizingDecision => {
+    if (event.action !== 'buy') {
+        return computeProportionalDecision(event, availableBalance, localPositionSize);
+    }
+
+    if (config.signalMarketScope === 'crypto_updown_5m' && !isTradeWithinSignalMarketScope(event as never)) {
+        return {
+            status: 'skip',
+            reason: '当前信号策略仅跟 BTC/ETH 5 分钟 Up/Down 市场',
+        };
+    }
+
+    const buildSignalDecision = (
+        requestedUsdc: number,
+        note: string,
+        ticketTier: NonNullable<StrategySizingDecision['ticketTier']>
+    ): StrategySizingDecision =>
+        requestedUsdc <= 0
+            ? {
+                  status: 'skip',
+                  reason: '本地可用余额不足',
+              }
+            : {
+                  status: 'ready',
+                  requestedUsdc,
+                  reason: '',
+                  note,
+                  ticketTier,
+              };
+
+    const sourceUsdc = Math.max(Number(event.usdcSize) || 0, 0);
+    if (sourceUsdc >= config.signalStrongThresholdUsdc) {
+        return buildSignalDecision(
+            Math.min(config.signalStrongTicketUsdc, availableBalance),
+            '强信号票据',
+            'strong'
+        );
+    }
+
+    if (sourceUsdc >= config.signalNormalThresholdUsdc) {
+        return buildSignalDecision(
+            Math.min(config.signalNormalTicketUsdc, availableBalance),
+            '普通信号票据',
+            'normal'
+        );
+    }
+
+    if (sourceUsdc >= config.signalWeakThresholdUsdc) {
+        return buildSignalDecision(
+            Math.min(config.signalWeakTicketUsdc, availableBalance),
+            '弱信号票据',
+            'weak'
+        );
+    }
+
+    return {
+        status: 'skip',
+        reason: '未达到信号策略的最小触发阈值',
+    };
+};
