@@ -407,7 +407,7 @@ export const ENV = {
         'SIGNAL_STRONG_SOURCE_BUY_COUNT'
     ),
     PAIR_OVERLAY_MIN_BUY_USDC: parsePositiveNumber(
-        readEnv('PAIR_OVERLAY_MIN_BUY_USDC') || '1.2',
+        readEnv('PAIR_OVERLAY_MIN_BUY_USDC') || '1',
         'PAIR_OVERLAY_MIN_BUY_USDC'
     ),
     PAIR_LEADER_MIN_SOURCE_USDC: parsePositiveNumber(
