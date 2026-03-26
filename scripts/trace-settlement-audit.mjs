@@ -1059,7 +1059,8 @@ const main = async () => {
         });
         lines.push('');
         lines.push('偏差最大的市场:');
-        summary.topMismatches.forEach((item) => {
+        summary.topMismatches
+            .filter(item=>formatNumber(item.local.mispricingDelta)>0).forEach((item) => {
             lines.push(
                 `- ${item.title} | winner=${item.winner || '未知'} | 当前=${formatNumber(
                     item.local.currentValue
