@@ -48,7 +48,8 @@ export class ProportionalSizingNode extends BaseSizingNode {
         return computeProportionalDecision(
             ctx.state.sourceEvent!,
             Math.max(Number(ctx.state.portfolio?.cashBalance) || 0, 0),
-            Math.max(Number(ctx.state.localPosition?.size) || 0, 0)
+            Math.max(Number(ctx.state.localPosition?.size) || 0, 0),
+            ctx.runtime.config
         );
     }
 }

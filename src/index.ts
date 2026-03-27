@@ -1,5 +1,5 @@
 import { main } from './refactor/app/main';
-import createLogger from './utils/logger';
+import { createLogger } from './refactor/utils/logger';
 
 const logger = createLogger('app');
 

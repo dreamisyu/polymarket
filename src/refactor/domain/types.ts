@@ -75,6 +75,12 @@ export interface PositionSnapshot {
     lastUpdatedAt?: number;
 }
 
+export interface ConditionPositionSnapshot {
+    conditionId: string;
+    positions: PositionSnapshot[];
+    mergeableSize: number;
+}
+
 export interface PortfolioSnapshot {
     cashBalance: number;
     realizedPnl: number;
@@ -92,6 +98,12 @@ export interface TradeExecutionRequest {
     note?: string;
 }
 
+export interface MergeExecutionRequest {
+    sourceEvent: SourceTradeEvent;
+    requestedSize: number;
+    note?: string;
+}
+
 export interface TradeExecutionResult {
     status: WorkflowExecutionStatus;
     reason: string;
@@ -106,6 +118,12 @@ export interface TradeExecutionResult {
     minedAt?: number;
     confirmedAt?: number;
     metadata?: Record<string, unknown>;
+}
+
+export interface MonitorSyncResult {
+    events: SourceTradeEvent[];
+    newEvents: SourceTradeEvent[];
+    syncedAt: number;
 }
 
 export interface WorkflowExecutionRecord {

@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import type { RefactorConfig } from '../../config/runtimeConfig';
+import type { RuntimeConfig } from '../../config/runtimeConfig';
 import type {
     PortfolioSnapshot,
     PositionSnapshot,
@@ -40,8 +40,17 @@ class MongoSourceEventStore implements SourceEventStore {
     async upsertMany(events: SourceTradeEvent[]) {
         const uniqueEvents = dedupeEvents(events).filter((event) => event.activityKey);
         if (uniqueEvents.length === 0) {
-            return;
+            return [];
         }
+
+        const activityKeys = uniqueEvents.map((event) => event.activityKey);
+        const existingEvents = await this.SourceEvent.find(
+            { activityKey: { $in: activityKeys } },
+            { activityKey: 1 }
+        ).lean<Array<Pick<SourceTradeEvent, 'activityKey'>>>();
+        const existingKeySet = new Set(
+            existingEvents.map((event) => String(event.activityKey || '').trim()).filter(Boolean)
+        );
 
         await this.SourceEvent.bulkWrite(
             uniqueEvents.map((event) => {
@@ -67,29 +76,21 @@ class MongoSourceEventStore implements SourceEventStore {
                 };
             })
         );
-    }
 
-    async claimNextPending(now: number) {
-        const document = await this.SourceEvent.findOneAndUpdate(
-            {
-                executionIntent: 'EXECUTE',
-                status: { $in: ['pending', 'retry'] },
-                $or: [{ nextRetryAt: { $exists: false } }, { nextRetryAt: 0 }, { nextRetryAt: { $lte: now } }],
-            },
-            {
-                $set: {
-                    status: 'processing',
-                    claimedAt: now,
-                    lastError: '',
-                },
-                $inc: {
-                    attemptCount: 1,
-                },
-            },
-            { sort: { timestamp: 1 }, new: true }
-        ).lean<SourceTradeEvent | null>();
+        const newActivityKeys = uniqueEvents
+            .filter((event) => !existingKeySet.has(event.activityKey))
+            .map((event) => event.activityKey);
+        if (newActivityKeys.length === 0) {
+            return [];
+        }
 
-        return document || null;
+        const persistedEvents = await this.SourceEvent.find({
+            activityKey: { $in: newActivityKeys },
+        })
+            .sort({ timestamp: 1 })
+            .lean<SourceTradeEvent[]>();
+
+        return persistedEvents || [];
     }
 
     async markConfirmed(eventId: string, reason: string, now: number) {
@@ -146,6 +147,26 @@ class MongoSourceEventStore implements SourceEventStore {
                 },
             }
         );
+    }
+
+    async skipOutstandingByCondition(conditionId: string, reason: string, now: number) {
+        const result = await this.SourceEvent.updateMany(
+            {
+                conditionId,
+                executionIntent: 'EXECUTE',
+                status: { $in: ['pending', 'retry'] },
+            },
+            {
+                $set: {
+                    status: 'skipped',
+                    processedAt: now,
+                    claimedAt: 0,
+                    lastError: reason,
+                },
+            }
+        );
+
+        return result.modifiedCount;
     }
 }
 
@@ -238,7 +259,10 @@ class MongoSettlementTaskStore implements SettlementTaskStore {
         this.SettlementTask = getSettlementTaskModel(scopeKey);
     }
 
-    async touchFromEvent(event: SourceTradeEvent) {
+    async touchFromEvent(
+        event: SourceTradeEvent,
+        options: { reason?: string; triggerNow?: boolean } = {}
+    ) {
         if (!event.conditionId) {
             return;
         }
@@ -250,8 +274,8 @@ class MongoSettlementTaskStore implements SettlementTaskStore {
                     title: event.title,
                     marketSlug: event.slug || event.eventSlug,
                     status: 'pending',
-                    reason: '',
-                    nextRetryAt: 0,
+                    reason: options.reason || '',
+                    nextRetryAt: options.triggerNow ? 0 : 0,
                 },
                 $setOnInsert: {
                     retryCount: 0,
@@ -317,7 +341,7 @@ class MongoSettlementTaskStore implements SettlementTaskStore {
     }
 }
 
-export const createRefactorStores = (config: RefactorConfig) => ({
+export const createRefactorStores = (config: RuntimeConfig) => ({
     sourceEvents: new MongoSourceEventStore(config.scopeKey),
     executions: new MongoExecutionStore(config.scopeKey),
     ledger: config.runMode === 'paper' ? new MongoLedgerStore(config.scopeKey) : undefined,

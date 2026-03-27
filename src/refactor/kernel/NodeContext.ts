@@ -6,6 +6,9 @@ export interface NodeContext<TState extends Record<string, unknown> = Record<str
     workflowKind: WorkflowKind;
     runMode: RunMode;
     strategyKind?: StrategyKind;
+    parentWorkflowId?: string;
+    dispatchReason?: string;
+    dispatchId?: string;
     runtime: RefactorRuntime;
     state: TState;
     startedAt: number;

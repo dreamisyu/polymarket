@@ -1,40 +1,48 @@
-import ClobMarketStream from '../../../services/clobMarketStream';
-import { buildChunkExecutionPlan, cloneMarketSnapshot } from '../../../utils/executionPlanning';
-import type { RefactorConfig } from '../../config/runtimeConfig';
+import { ClobClient } from '@polymarket/clob-client';
+import type { RuntimeConfig } from '../../config/runtimeConfig';
 import type {
+    MergeExecutionRequest,
     PortfolioSnapshot,
     PositionSnapshot,
     SourceTradeEvent,
     TradeExecutionRequest,
     TradeExecutionResult,
 } from '../../domain/types';
+import { buildChunkExecutionPlan, buildMarketBookSnapshot } from '../../utils/executionPlanning';
+import { normalizeSize } from '../../utils/math';
 import type { LedgerStore, LoggerLike, TradingGateway } from '../runtime/contracts';
-import { buildPortfolioSnapshot } from './shared';
+import { buildConditionPositionSnapshot, buildPortfolioSnapshot } from './shared';
 
-const EPSILON = 1e-8;
+const epsilon = 1e-8;
 
-const toRequestedUsdc = (request: TradeExecutionRequest, event: SourceTradeEvent) =>
-    Math.max(Number(request.requestedUsdc) || 0, 0) || Math.max(Number(event.usdcSize) || 0, 0);
-
-const toRequestedSize = (request: TradeExecutionRequest, event: SourceTradeEvent) =>
-    Math.max(Number(request.requestedSize) || 0, 0) || Math.max(Number(event.size) || 0, 0);
+const emptyResult = (reason: string, request: { requestedUsdc?: number; requestedSize?: number }, event: SourceTradeEvent) => ({
+    status: 'skipped' as const,
+    reason,
+    requestedUsdc: Math.max(Number(request.requestedUsdc) || Number(event.usdcSize) || 0, 0),
+    requestedSize: Math.max(Number(request.requestedSize) || Number(event.size) || 0, 0),
+    executedUsdc: 0,
+    executedSize: 0,
+    executionPrice: 0,
+    orderIds: [],
+    transactionHashes: [],
+});
 
 export class PaperTradingGateway implements TradingGateway {
-    private readonly config: RefactorConfig;
+    private readonly config: RuntimeConfig;
     private readonly logger: LoggerLike;
     private readonly ledgerStore: LedgerStore;
-    private readonly marketStream: ClobMarketStream;
+    private readonly clobClient: ClobClient;
 
     constructor(params: {
-        config: RefactorConfig;
+        config: RuntimeConfig;
         logger: LoggerLike;
         ledgerStore: LedgerStore;
-        marketStream: ClobMarketStream;
+        clobClient: ClobClient;
     }) {
         this.config = params.config;
         this.logger = params.logger;
         this.ledgerStore = params.ledgerStore;
-        this.marketStream = params.marketStream;
+        this.clobClient = params.clobClient;
     }
 
     async getPortfolioSnapshot(): Promise<PortfolioSnapshot> {
@@ -46,105 +54,55 @@ export class PaperTradingGateway implements TradingGateway {
         return this.ledgerStore.findPositionByAsset(event.asset);
     }
 
-    async execute(request: TradeExecutionRequest): Promise<TradeExecutionResult> {
+    async listConditionPositions(conditionId: string) {
+        const positions = await this.ledgerStore.listPositions();
+        return buildConditionPositionSnapshot(positions, conditionId);
+    }
+
+    async executeTrade(request: TradeExecutionRequest): Promise<TradeExecutionResult> {
         const event = request.sourceEvent;
         if (event.action !== 'buy' && event.action !== 'sell') {
-            return {
-                status: 'skipped',
-                reason: '当前版本仅对 TRADE BUY/SELL 走模拟交易网关',
-                requestedUsdc: toRequestedUsdc(request, event),
-                requestedSize: toRequestedSize(request, event),
-                executedUsdc: 0,
-                executedSize: 0,
-                executionPrice: 0,
-                orderIds: [],
-                transactionHashes: [],
-            };
+            return emptyResult('当前节点仅处理 BUY/SELL', request, event);
         }
 
         await this.ledgerStore.ensurePortfolio(this.config.traceInitialBalance);
-        const [portfolio, localPosition, marketSnapshot] = await Promise.all([
+        const [portfolio, localPosition, orderBook] = await Promise.all([
             this.ledgerStore.getPortfolio(),
             this.ledgerStore.findPositionByAsset(event.asset),
-            this.marketStream.getSnapshot(event.asset),
+            this.clobClient.getOrderBook(event.asset),
         ]);
-
-        if (!marketSnapshot) {
-            return {
-                status: 'retry',
-                reason: '模拟盘口快照不可用',
-                requestedUsdc: toRequestedUsdc(request, event),
-                requestedSize: toRequestedSize(request, event),
-                executedUsdc: 0,
-                executedSize: 0,
-                executionPrice: 0,
-                orderIds: [],
-                transactionHashes: [],
-            };
-        }
-
+        const snapshot = buildMarketBookSnapshot(event.asset, orderBook);
         const plan = buildChunkExecutionPlan({
             condition: event.action,
-            trade: event as never,
+            trade: event,
             myPositionSize: Math.max(Number(localPosition?.size) || 0, 0),
             sourcePositionAfterTradeSize: Math.max(Number(event.sourcePositionSizeAfterTrade) || 0, 0),
             availableBalance: Math.max(Number(portfolio.cashBalance) || 0, 0),
-            marketSnapshot: cloneMarketSnapshot(marketSnapshot),
+            marketSnapshot: snapshot,
+            config: this.config,
             requestedUsdcOverride: request.requestedUsdc,
             requestedSizeOverride: request.requestedSize,
             sourcePriceOverride: event.price,
             noteOverride: request.note,
         });
-
         if (plan.status === 'SKIPPED') {
-            return {
-                status: 'skipped',
-                reason: plan.reason,
-                requestedUsdc: toRequestedUsdc(request, event),
-                requestedSize: toRequestedSize(request, event),
-                executedUsdc: 0,
-                executedSize: 0,
-                executionPrice: 0,
-                orderIds: [],
-                transactionHashes: [],
-            };
+            return emptyResult(plan.reason, request, event);
         }
-
         if (plan.status !== 'READY') {
             return {
+                ...emptyResult(plan.reason, request, event),
                 status: 'retry',
                 reason: plan.reason,
-                requestedUsdc: toRequestedUsdc(request, event),
-                requestedSize: toRequestedSize(request, event),
-                executedUsdc: 0,
-                executedSize: 0,
-                executionPrice: 0,
-                orderIds: [],
-                transactionHashes: [],
             };
         }
 
         const executedUsdc = event.action === 'buy' ? plan.orderAmount : plan.orderAmount * plan.executionPrice;
-        const executedSize =
-            event.action === 'buy'
-                ? executedUsdc / Math.max(plan.executionPrice || 0, 0.0001)
-                : plan.orderAmount;
-        const nextPosition = await this.applyExecution(
-            event,
-            localPosition,
-            portfolio,
-            executedUsdc,
-            executedSize,
-            plan.executionPrice
-        );
-
-        this.logger.debug(
-            `模拟成交 activityKey=${event.activityKey} price=${plan.executionPrice} size=${executedSize.toFixed(4)}`
-        );
-
+        const executedSize = event.action === 'buy' ? executedUsdc / Math.max(plan.executionPrice, 0.0001) : plan.orderAmount;
+        await this.applyTradeExecution(event, localPosition, portfolio, executedUsdc, executedSize, plan.executionPrice);
+        this.logger.debug(`模拟成交 activityKey=${event.activityKey} price=${plan.executionPrice} size=${executedSize.toFixed(4)}`);
         return {
             status: 'confirmed',
-            reason: plan.note || request.note || '',
+            reason: request.note || '',
             requestedUsdc: plan.requestedUsdc,
             requestedSize: plan.requestedSize,
             executedUsdc,
@@ -153,15 +111,71 @@ export class PaperTradingGateway implements TradingGateway {
             orderIds: [],
             transactionHashes: [],
             confirmedAt: Date.now(),
-            metadata: nextPosition
-                ? {
-                      nextPositionSize: nextPosition.size,
-                  }
-                : undefined,
         };
     }
 
-    private async applyExecution(
+    async executeMerge(request: MergeExecutionRequest): Promise<TradeExecutionResult> {
+        const event = request.sourceEvent;
+        await this.ledgerStore.ensurePortfolio(this.config.traceInitialBalance);
+        const [portfolio, positions] = await Promise.all([
+            this.ledgerStore.getPortfolio(),
+            this.ledgerStore.listPositions(),
+        ]);
+        const snapshot = buildConditionPositionSnapshot(positions, event.conditionId);
+        const requestedSize = Math.min(Math.max(Number(request.requestedSize) || 0, 0), snapshot.mergeableSize);
+        if (requestedSize <= 0 || snapshot.positions.length < 2) {
+            return emptyResult('本地缺少可 merge 的 complete set', request, event);
+        }
+
+        let nextCashBalance = portfolio.cashBalance + requestedSize;
+        let nextRealizedPnl = portfolio.realizedPnl;
+        const positionsByAsset = new Map(positions.map((position) => [position.asset, { ...position }]));
+
+        for (const position of snapshot.positions) {
+            const current = positionsByAsset.get(position.asset);
+            if (!current) {
+                continue;
+            }
+
+            const sizeBefore = Math.max(Number(current.size) || 0, 0);
+            const releasedCostBasis = sizeBefore > 0 ? (Number(current.costBasis) || 0) * (requestedSize / sizeBefore) : 0;
+            const proceedsShare = requestedSize / snapshot.positions.length;
+            const realizedPnlDelta = proceedsShare - releasedCostBasis;
+            current.size = normalizeSize(sizeBefore - requestedSize);
+            current.costBasis = normalizeSize((Number(current.costBasis) || 0) - releasedCostBasis);
+            current.realizedPnl = (Number(current.realizedPnl) || 0) + realizedPnlDelta;
+            current.marketValue = current.size * Math.max(Number(current.marketPrice) || 0, 0);
+            current.avgPrice = current.size > epsilon ? current.costBasis / current.size : 0;
+            current.lastUpdatedAt = Date.now();
+            nextRealizedPnl += realizedPnlDelta;
+
+            if (current.size <= epsilon) {
+                positionsByAsset.delete(current.asset);
+                await this.ledgerStore.deletePosition(current.asset);
+            } else {
+                await this.ledgerStore.savePosition(current);
+            }
+        }
+
+        const nextPositions = [...positionsByAsset.values()].filter((position) => position.size > epsilon);
+        const nextPortfolio = buildPortfolioSnapshot(nextCashBalance, nextRealizedPnl, nextPositions);
+        await this.ledgerStore.savePortfolio(nextPortfolio);
+
+        return {
+            status: 'confirmed',
+            reason: request.note || '已完成 condition merge',
+            requestedUsdc: requestedSize,
+            requestedSize,
+            executedUsdc: requestedSize,
+            executedSize: requestedSize,
+            executionPrice: 1,
+            orderIds: [],
+            transactionHashes: [],
+            confirmedAt: Date.now(),
+        };
+    }
+
+    private async applyTradeExecution(
         event: SourceTradeEvent,
         currentPosition: PositionSnapshot | null,
         currentPortfolio: PortfolioSnapshot,
@@ -198,7 +212,7 @@ export class PaperTradingGateway implements TradingGateway {
             nextPosition = {
                 ...basePosition,
                 size: totalSize,
-                avgPrice: totalSize > EPSILON ? totalCost / totalSize : 0,
+                avgPrice: totalSize > epsilon ? totalCost / totalSize : 0,
                 costBasis: totalCost,
                 marketPrice: executionPrice,
                 marketValue: totalSize * executionPrice,
@@ -206,19 +220,19 @@ export class PaperTradingGateway implements TradingGateway {
             };
         } else {
             const sellSize = Math.min(executedSize, basePosition.size);
-            const avgPrice = basePosition.size > EPSILON ? basePosition.costBasis / basePosition.size : basePosition.avgPrice;
+            const avgPrice = basePosition.size > epsilon ? basePosition.costBasis / basePosition.size : basePosition.avgPrice;
             const realizedPnlDelta = executedUsdc - avgPrice * sellSize;
             const remainingSize = Math.max(basePosition.size - sellSize, 0);
             const remainingCostBasis = Math.max(basePosition.costBasis - avgPrice * sellSize, 0);
             nextCashBalance += executedUsdc;
             nextRealizedPnl += realizedPnlDelta;
             nextPosition =
-                remainingSize <= EPSILON
+                remainingSize <= epsilon
                     ? null
                     : {
                           ...basePosition,
                           size: remainingSize,
-                          avgPrice: remainingSize > EPSILON ? remainingCostBasis / remainingSize : 0,
+                          avgPrice: remainingSize > epsilon ? remainingCostBasis / remainingSize : 0,
                           costBasis: remainingCostBasis,
                           marketPrice: executionPrice,
                           marketValue: remainingSize * executionPrice,
@@ -227,7 +241,7 @@ export class PaperTradingGateway implements TradingGateway {
                       };
         }
 
-        if (nextPosition && nextPosition.size > EPSILON) {
+        if (nextPosition && nextPosition.size > epsilon) {
             await this.ledgerStore.savePosition(nextPosition);
         } else if (currentPosition) {
             await this.ledgerStore.deletePosition(currentPosition.asset);
@@ -236,6 +250,5 @@ export class PaperTradingGateway implements TradingGateway {
         const nextPositions = nextPosition ? [...withoutCurrent, nextPosition] : withoutCurrent;
         const nextPortfolio = buildPortfolioSnapshot(nextCashBalance, nextRealizedPnl, nextPositions);
         await this.ledgerStore.savePortfolio(nextPortfolio);
-        return nextPosition;
     }
 }

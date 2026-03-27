@@ -3,5 +3,5 @@ export const toSafeNumber = (value: unknown, fallback = 0) => {
     return Number.isFinite(parsed) ? parsed : fallback;
 };
 
-export const clampPositive = (value: number, ceiling: number) =>
-    Math.max(Math.min(value, ceiling), 0);
+export const normalizeSize = (value: number, epsilon = 1e-8) =>
+    Math.abs(value) < epsilon ? 0 : value;

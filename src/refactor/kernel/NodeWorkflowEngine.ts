@@ -50,4 +50,22 @@ export class NodeWorkflowEngine {
             visitedNodeIds,
         };
     }
+
+    runDetached<TState extends Record<string, unknown>>(
+        ctx: NodeContext<TState>,
+        workflow: NodeWorkflowDefinition
+    ) {
+        void this.run(ctx, workflow).catch((error) => {
+            ctx.runtime.logger.error(
+                {
+                    workflowId: ctx.workflowId,
+                    workflowKind: ctx.workflowKind,
+                    parentWorkflowId: ctx.parentWorkflowId,
+                    dispatchId: ctx.dispatchId,
+                },
+                '异步子工作流执行失败'
+            );
+            ctx.runtime.logger.error(error);
+        });
+    }
 }

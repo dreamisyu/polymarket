@@ -1,6 +1,9 @@
-import type createLogger from '../../../utils/logger';
-import type { RefactorConfig } from '../../config/runtimeConfig';
+import type { Logger } from '../../utils/logger';
+import type { RuntimeConfig } from '../../config/runtimeConfig';
 import type {
+    ConditionPositionSnapshot,
+    MergeExecutionRequest,
+    MonitorSyncResult,
     PortfolioSnapshot,
     PositionSnapshot,
     SettlementTask,
@@ -9,16 +12,15 @@ import type {
     TradeExecutionResult,
     WorkflowExecutionRecord,
 } from '../../domain/types';
-
-export type LoggerLike = ReturnType<typeof createLogger>;
+export type LoggerLike = Logger;
 
 export interface SourceEventStore {
-    upsertMany(events: SourceTradeEvent[]): Promise<void>;
-    claimNextPending(now: number): Promise<SourceTradeEvent | null>;
+    upsertMany(events: SourceTradeEvent[]): Promise<SourceTradeEvent[]>;
     markConfirmed(eventId: string, reason: string, now: number): Promise<void>;
     markSkipped(eventId: string, reason: string, now: number): Promise<void>;
     markRetry(eventId: string, reason: string, now: number, delayMs: number): Promise<void>;
     markFailed(eventId: string, reason: string, now: number): Promise<void>;
+    skipOutstandingByCondition(conditionId: string, reason: string, now: number): Promise<number>;
 }
 
 export interface ExecutionStore {
@@ -36,20 +38,25 @@ export interface LedgerStore {
 }
 
 export interface SettlementTaskStore {
-    touchFromEvent(event: SourceTradeEvent): Promise<void>;
+    touchFromEvent(
+        event: SourceTradeEvent,
+        options?: { reason?: string; triggerNow?: boolean }
+    ): Promise<void>;
     claimDue(now: number): Promise<SettlementTask | null>;
     markSettled(taskId: string, winnerOutcome: string, reason: string, now: number): Promise<void>;
     markRetry(taskId: string, reason: string, now: number, delayMs: number): Promise<void>;
 }
 
 export interface MonitorGateway {
-    start(onEvents: (events: SourceTradeEvent[]) => Promise<void>): Promise<void>;
+    syncOnce(): Promise<MonitorSyncResult>;
 }
 
 export interface TradingGateway {
     getPortfolioSnapshot(): Promise<PortfolioSnapshot>;
     getPositionForEvent(event: SourceTradeEvent): Promise<PositionSnapshot | null>;
-    execute(request: TradeExecutionRequest): Promise<TradeExecutionResult>;
+    listConditionPositions(conditionId: string): Promise<ConditionPositionSnapshot>;
+    executeTrade(request: TradeExecutionRequest): Promise<TradeExecutionResult>;
+    executeMerge(request: MergeExecutionRequest): Promise<TradeExecutionResult>;
 }
 
 export interface SettlementGateway {
@@ -70,7 +77,7 @@ export interface RefactorGateways {
 }
 
 export interface RefactorRuntime {
-    config: RefactorConfig;
+    config: RuntimeConfig;
     logger: LoggerLike;
     stores: RefactorStores;
     gateways: RefactorGateways;

@@ -7,6 +7,12 @@ import type {
     WorkflowExecutionRecord,
 } from '../../domain/types';
 
+interface MonitorCursorState {
+    wallet: string;
+    lastSyncedTimestamp: number;
+    lastSyncedActivityKey: string;
+}
+
 const normalizeKey = (value: string) => value.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
 
 const getModel = <T>(modelName: string, schema: Schema, collectionName: string): Model<T> => {
@@ -163,39 +169,57 @@ const settlementTaskSchema = new Schema<SettlementTask>(
 settlementTaskSchema.index({ conditionId: 1 }, { unique: true });
 settlementTaskSchema.index({ status: 1, nextRetryAt: 1 });
 
+const monitorCursorSchema = new Schema<MonitorCursorState>(
+    {
+        wallet: { type: String, required: true },
+        lastSyncedTimestamp: { type: Number, required: true, default: 0 },
+        lastSyncedActivityKey: { type: String, required: true, default: '' },
+    },
+    { timestamps: true }
+);
+
+monitorCursorSchema.index({ wallet: 1 }, { unique: true });
+
 const buildCollectionName = (prefix: string, scopeKey: string) => `${prefix}_${normalizeKey(scopeKey)}`;
 
 export const getSourceEventModel = (scopeKey: string) =>
     getModel<SourceTradeEvent>(
-        `RefactorSourceEvents_${normalizeKey(scopeKey)}`,
+        `SourceEvents_${normalizeKey(scopeKey)}`,
         sourceEventSchema,
-        buildCollectionName('rf_source_events', scopeKey)
+        buildCollectionName('source_events', scopeKey)
     );
 
 export const getExecutionModel = (scopeKey: string) =>
     getModel<WorkflowExecutionRecord>(
-        `RefactorExecutions_${normalizeKey(scopeKey)}`,
+        `Executions_${normalizeKey(scopeKey)}`,
         executionSchema,
-        buildCollectionName('rf_executions', scopeKey)
+        buildCollectionName('executions', scopeKey)
     );
 
 export const getPositionModel = (scopeKey: string) =>
     getModel<PositionSnapshot>(
-        `RefactorPositions_${normalizeKey(scopeKey)}`,
+        `Positions_${normalizeKey(scopeKey)}`,
         positionSchema,
-        buildCollectionName('rf_positions', scopeKey)
+        buildCollectionName('positions', scopeKey)
     );
 
 export const getPortfolioModel = (scopeKey: string) =>
     getModel<PortfolioSnapshot>(
-        `RefactorPortfolios_${normalizeKey(scopeKey)}`,
+        `Portfolios_${normalizeKey(scopeKey)}`,
         portfolioSchema,
-        buildCollectionName('rf_portfolios', scopeKey)
+        buildCollectionName('portfolios', scopeKey)
     );
 
 export const getSettlementTaskModel = (scopeKey: string) =>
     getModel<SettlementTask>(
-        `RefactorSettlementTasks_${normalizeKey(scopeKey)}`,
+        `SettlementTasks_${normalizeKey(scopeKey)}`,
         settlementTaskSchema,
-        buildCollectionName('rf_settlement_tasks', scopeKey)
+        buildCollectionName('settlement_tasks', scopeKey)
+    );
+
+export const getMonitorCursorModel = (scopeKey: string) =>
+    getModel<MonitorCursorState>(
+        `MonitorCursor_${normalizeKey(scopeKey)}`,
+        monitorCursorSchema,
+        buildCollectionName('monitor_cursors', scopeKey)
     );

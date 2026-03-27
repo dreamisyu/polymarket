@@ -1,16 +1,23 @@
+import type { RuntimeConfig } from '../../config/runtimeConfig';
 import {
-    fetchPolymarketMarketResolution,
-    isResolvedPolymarketMarket,
+    fetchMarketResolution,
+    isResolvedMarket,
     normalizeOutcomeLabel,
-} from '../../../utils/polymarketMarketResolution';
+} from '../../utils/resolution';
 import type { LedgerStore, SettlementGateway, SettlementTaskStore } from '../runtime/contracts';
 import { buildPortfolioSnapshot } from '../trading/shared';
 
 export class PaperSettlementGateway implements SettlementGateway {
+    private readonly config: RuntimeConfig;
     private readonly settlementTasks: SettlementTaskStore;
     private readonly ledgerStore: LedgerStore;
 
-    constructor(params: { settlementTasks: SettlementTaskStore; ledgerStore: LedgerStore }) {
+    constructor(params: {
+        config: RuntimeConfig;
+        settlementTasks: SettlementTaskStore;
+        ledgerStore: LedgerStore;
+    }) {
+        this.config = params.config;
         this.settlementTasks = params.settlementTasks;
         this.ledgerStore = params.ledgerStore;
     }
@@ -22,13 +29,16 @@ export class PaperSettlementGateway implements SettlementGateway {
             return;
         }
 
-        const resolution = await fetchPolymarketMarketResolution({
-            conditionId: task.conditionId,
-            marketSlug: task.marketSlug,
-            title: task.title,
-        });
+        const resolution = await fetchMarketResolution(
+            {
+                conditionId: task.conditionId,
+                marketSlug: task.marketSlug,
+                title: task.title,
+            },
+            this.config
+        );
 
-        if (!isResolvedPolymarketMarket(resolution)) {
+        if (!isResolvedMarket(resolution)) {
             await this.settlementTasks.markRetry(
                 String(task._id),
                 '市场尚未 resolved，等待下次结算轮次',

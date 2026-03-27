@@ -5,6 +5,7 @@ import type { NodeContext } from '../kernel/NodeContext';
 import type { NodeResult } from '../kernel/NodeResult';
 import { NodeRegistry } from '../kernel/NodeRegistry';
 import { NodeWorkflowEngine } from '../kernel/NodeWorkflowEngine';
+import { DispatchCopyTradeNode } from '../nodes/monitor/DispatchCopyTradeNode';
 
 class TestNode extends BaseNode {
     private readonly handler: (ctx: NodeContext) => Promise<NodeResult>;
@@ -30,12 +31,15 @@ const buildTestContext = (): NodeContext => ({
             strategyKind: 'fixed_amount',
             sourceWallet: 'source',
             targetWallet: 'target',
+            mongoUri: 'mongodb://localhost/test',
             scopeKey: 'scope',
-            traceId: 'trace',
-            traceLabel: 'trace',
-            monitorLoopIntervalMs: 1000,
-            strategyLoopIntervalMs: 1000,
-            settlementLoopIntervalMs: 1000,
+            monitorIntervalMs: 1000,
+            monitorInitialLookbackMs: 1000,
+            monitorOverlapMs: 1000,
+            activitySyncLimit: 100,
+            activityAdjacentMergeWindowMs: 1000,
+            snapshotStaleAfterMs: 1000,
+            settlementIntervalMs: 1000,
             fixedTradeAmountUsdc: 1,
             maxOpenPositions: 4,
             maxActiveExposureUsdc: 10,
@@ -48,8 +52,31 @@ const buildTestContext = (): NodeContext => ({
             signalStrongTicketUsdc: 3,
             maxRetryCount: 3,
             retryBackoffMs: 1000,
+            clobHttpUrl: 'https://clob.polymarket.com',
+            dataApiUrl: 'https://data-api.polymarket.com',
+            gammaApiUrl: 'https://gamma-api.polymarket.com',
+            rpcUrl: 'https://polygon.drpc.org',
+            marketWsUrl: 'wss://example.com/market',
+            userWsUrl: 'wss://example.com/user',
+            marketWsEnabled: false,
+            marketCacheTtlMs: 1000,
+            marketWsReconnectMs: 1000,
+            marketWsSnapshotWaitMs: 1000,
+            userWsReconnectMs: 1000,
+            orderConfirmationTimeoutMs: 1000,
+            orderConfirmationPollMs: 1000,
+            orderConfirmationBlocks: 1,
             liveConfirmTimeoutMs: 1000,
             liveReconcileAfterTimeoutMs: 1000,
+            maxSlippageBps: 100,
+            maxOrderUsdc: 10,
+            buyDustResidualMode: 'trim',
+            relayerTxType: 'SAFE',
+            usdcContractAddress: '0x0000000000000000000000000000000000000001',
+            ctfContractAddress: '0x0000000000000000000000000000000000000002',
+            autoRedeemEnabled: false,
+            autoRedeemIntervalMs: 1000,
+            autoRedeemMaxConditionsPerRun: 1,
             traceInitialBalance: 1000,
         },
         logger: {
@@ -57,7 +84,7 @@ const buildTestContext = (): NodeContext => ({
             info: jest.fn(),
             warn: jest.fn(),
             error: jest.fn(),
-        },
+        } as never,
         stores: {
             sourceEvents: {} as never,
             executions: {} as never,
@@ -113,5 +140,52 @@ describe('NodeWorkflowEngine', () => {
 
         expect(visited).toEqual(['a', 'b']);
         expect(summary.lastNodeId).toBe('b');
+    });
+});
+
+describe('DispatchCopyTradeNode', () => {
+    it('只异步派发 EXECUTE 事件', async () => {
+        const runDetached = jest.fn();
+        const node = new DispatchCopyTradeNode({
+            engine: { runDetached } as unknown as NodeWorkflowEngine,
+            workflow: { headNodeId: 'copytrade.context', transitions: new Map() },
+            buildCopyTradeContext: (event) =>
+                ({
+                    ...buildTestContext(),
+                    workflowId: `copytrade:${event.activityKey}`,
+                    workflowKind: 'copytrade',
+                    state: {
+                        sourceEvent: event,
+                    },
+                }) as NodeContext,
+        });
+
+        const ctx = {
+            ...buildTestContext(),
+            workflowId: 'monitor:test',
+            workflowKind: 'monitor',
+            state: {
+                newEvents: [
+                    {
+                        _id: '1',
+                        activityKey: 'execute-1',
+                        executionIntent: 'EXECUTE',
+                    },
+                    {
+                        _id: '2',
+                        activityKey: 'sync-1',
+                        executionIntent: 'SYNC_ONLY',
+                    },
+                ],
+            },
+        } as unknown as NodeContext;
+
+        const result = await node.doAction(ctx);
+
+        expect(result.status).toBe('success');
+        expect(runDetached).toHaveBeenCalledTimes(1);
+        expect((runDetached.mock.calls[0]?.[0] as NodeContext).workflowId).toBe(
+            'copytrade:execute-1'
+        );
     });
 });

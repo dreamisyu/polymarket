@@ -1,15 +1,16 @@
-import type { RefactorConfig } from '../config/runtimeConfig';
+import type { RuntimeConfig } from '../config/runtimeConfig';
 import type { SourceTradeEvent, StrategySizingDecision } from '../domain/types';
-import { computeBuyTargetUsdc, computeSellTargetSize } from '../../utils/executionPlanning';
-import { isTradeWithinSignalMarketScope } from '../../utils/copyIntentPlanning';
+import { computeBuyTargetUsdc, computeSellTargetSize } from './executionPlanning';
+import { isTradeWithinSignalMarketScope } from './marketScope';
 
 export const computeProportionalDecision = (
     event: SourceTradeEvent,
     availableBalance: number,
-    localPositionSize: number
+    localPositionSize: number,
+    config: Pick<RuntimeConfig, 'maxOrderUsdc'>
 ): StrategySizingDecision => {
     if (event.action === 'buy') {
-        const result = computeBuyTargetUsdc(event as never, availableBalance);
+        const result = computeBuyTargetUsdc(event, availableBalance, config);
         if (result.status !== 'READY') {
             return {
                 status: 'skip',
@@ -56,7 +57,7 @@ export const computeFixedAmountDecision = (
     event: SourceTradeEvent,
     availableBalance: number,
     localPositionSize: number,
-    config: RefactorConfig
+    config: Pick<RuntimeConfig, 'fixedTradeAmountUsdc'>
 ): StrategySizingDecision => {
     if (event.action === 'buy') {
         const requestedUsdc = Math.min(config.fixedTradeAmountUsdc, availableBalance);
@@ -75,20 +76,35 @@ export const computeFixedAmountDecision = (
         };
     }
 
-    return computeProportionalDecision(event, availableBalance, localPositionSize);
+    return computeProportionalDecision(event, availableBalance, localPositionSize, {
+        maxOrderUsdc: 0,
+    });
 };
 
 export const computeSignalDecision = (
     event: SourceTradeEvent,
     availableBalance: number,
     localPositionSize: number,
-    config: RefactorConfig
+    config: Pick<
+        RuntimeConfig,
+        | 'signalMarketScope'
+        | 'signalWeakThresholdUsdc'
+        | 'signalNormalThresholdUsdc'
+        | 'signalStrongThresholdUsdc'
+        | 'signalWeakTicketUsdc'
+        | 'signalNormalTicketUsdc'
+        | 'signalStrongTicketUsdc'
+        | 'maxOrderUsdc'
+    >
 ): StrategySizingDecision => {
     if (event.action !== 'buy') {
-        return computeProportionalDecision(event, availableBalance, localPositionSize);
+        return computeProportionalDecision(event, availableBalance, localPositionSize, config);
     }
 
-    if (config.signalMarketScope === 'crypto_updown_5m' && !isTradeWithinSignalMarketScope(event as never)) {
+    if (
+        config.signalMarketScope === 'crypto_updown_5m' &&
+        !isTradeWithinSignalMarketScope(event)
+    ) {
         return {
             status: 'skip',
             reason: '当前信号策略仅跟 BTC/ETH 5 分钟 Up/Down 市场',

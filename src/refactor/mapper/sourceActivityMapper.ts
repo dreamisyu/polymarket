@@ -1,10 +1,11 @@
-import type { UserActivityInterface } from '../../interfaces/User';
-import { ENV } from '../../config/env';
-import buildActivityKey from '../../utils/buildActivityKey';
-import { resolveExecutionIntent, resolveTradeAction } from '../../utils/executionSemantics';
+import type { RuntimeConfig } from '../config/runtimeConfig';
 import type { SourceTradeEvent, TradeAction } from '../domain/types';
+import type { SourceActivityRecord } from '../types/polymarket';
+import { buildActivityKey } from '../utils/activityKey';
+import { resolveExecutionIntent, resolveTradeAction } from '../utils/executionSemantics';
+import { toSafeNumber } from '../utils/math';
 
-const normalizeTradeAction = (trade: UserActivityInterface): TradeAction => {
+const normalizeTradeAction = (trade: SourceActivityRecord): TradeAction => {
     const tradeAction = resolveTradeAction(trade).toLowerCase();
     if (tradeAction === 'buy' || tradeAction === 'sell') {
         return tradeAction;
@@ -18,10 +19,13 @@ const normalizeTradeAction = (trade: UserActivityInterface): TradeAction => {
     return 'redeem';
 };
 
-export const mapSourceActivity = (trade: UserActivityInterface): SourceTradeEvent => ({
+export const mapSourceActivity = (
+    trade: SourceActivityRecord,
+    config: Pick<RuntimeConfig, 'runMode'>
+): SourceTradeEvent => ({
     sourceWallet: String(trade.proxyWallet || '').trim(),
     activityKey: String(trade.activityKey || '').trim() || buildActivityKey(trade),
-    timestamp: Number(trade.timestamp) || Date.now(),
+    timestamp: toSafeNumber(trade.timestamp, Date.now()),
     type: String(trade.type || '').trim().toUpperCase(),
     side: String(trade.side || '').trim().toUpperCase(),
     action: normalizeTradeAction(trade),
@@ -29,14 +33,14 @@ export const mapSourceActivity = (trade: UserActivityInterface): SourceTradeEven
     conditionId: String(trade.conditionId || '').trim(),
     asset: String(trade.asset || '').trim(),
     outcome: String(trade.outcome || '').trim(),
-    outcomeIndex: Number(trade.outcomeIndex) || 0,
+    outcomeIndex: toSafeNumber(trade.outcomeIndex),
     title: String(trade.title || '').trim(),
     slug: String(trade.slug || '').trim(),
     eventSlug: String(trade.eventSlug || '').trim(),
-    price: Number(trade.price) || 0,
-    size: Number(trade.size) || 0,
-    usdcSize: Number(trade.usdcSize) || 0,
-    executionIntent: resolveExecutionIntent(trade, ENV.EXECUTION_MODE),
+    price: toSafeNumber(trade.price),
+    size: toSafeNumber(trade.size),
+    usdcSize: toSafeNumber(trade.usdcSize),
+    executionIntent: resolveExecutionIntent(trade, config.runMode),
     sourceBalanceAfterTrade: trade.sourceBalanceAfterTrade,
     sourceBalanceBeforeTrade: trade.sourceBalanceBeforeTrade,
     sourcePositionSizeAfterTrade: trade.sourcePositionSizeAfterTrade,
@@ -50,5 +54,7 @@ export const mapSourceActivity = (trade: UserActivityInterface): SourceTradeEven
         sourceActivityKeys: trade.sourceActivityKeys,
         sourceTransactionHashes: trade.sourceTransactionHashes,
         sourceTradeCount: trade.sourceTradeCount,
+        sourceStartedAt: trade.sourceStartedAt,
+        sourceEndedAt: trade.sourceEndedAt,
     },
 });

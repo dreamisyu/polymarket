@@ -1,10 +1,11 @@
-import type { UserPositionInterface } from '../../../interfaces/User';
-import type { PortfolioSnapshot, PositionSnapshot, SourceTradeEvent } from '../../domain/types';
-import { normalizeOutcomeLabel } from '../../../utils/polymarketMarketResolution';
+import type { ConditionPositionSnapshot, PortfolioSnapshot, PositionSnapshot, SourceTradeEvent } from '../../domain/types';
+import type { UserPositionRecord } from '../../types/polymarket';
+import { buildConditionOutcomeKey, computeConditionMergeableSize } from '../../utils/conditionMath';
+import { normalizeOutcomeLabel } from '../../utils/resolution';
 
-const EPSILON = 1e-8;
+const epsilon = 1e-8;
 
-export const mapUserPosition = (position: UserPositionInterface): PositionSnapshot => ({
+export const mapUserPosition = (position: UserPositionRecord): PositionSnapshot => ({
     asset: String(position.asset || '').trim(),
     conditionId: String(position.conditionId || '').trim(),
     outcome: String(position.outcome || '').trim(),
@@ -13,16 +14,13 @@ export const mapUserPosition = (position: UserPositionInterface): PositionSnapsh
     avgPrice: Math.max(Number(position.avgPrice) || 0, 0),
     marketPrice: Math.max(Number(position.curPrice) || 0, 0),
     marketValue: Math.max(Number(position.currentValue) || 0, 0),
-    costBasis: Math.max(Number(position.initialValue) || 0, 0),
+    costBasis: Math.max(Number(position.avgPrice) || 0, 0) * Math.max(Number(position.size) || 0, 0),
     realizedPnl: Number(position.realizedPnl) || 0,
     redeemable: Boolean(position.redeemable),
     lastUpdatedAt: Date.now(),
 });
 
-export const findMatchingPosition = (
-    positions: UserPositionInterface[],
-    event: SourceTradeEvent
-): UserPositionInterface | undefined =>
+export const findMatchingPosition = (positions: UserPositionRecord[], event: SourceTradeEvent): UserPositionRecord | undefined =>
     positions.find((position) => position.asset === event.asset) ||
     positions.find(
         (position) =>
@@ -36,12 +34,34 @@ export const findMatchingPosition = (
                 normalizeOutcomeLabel(String(event.outcome || ''))
     );
 
+export const buildConditionPositionSnapshot = (positions: PositionSnapshot[], conditionId: string): ConditionPositionSnapshot => {
+    const targetPositions = positions.filter((position) => position.conditionId === conditionId && position.size > epsilon);
+    const sizeByOutcome = new Map<string, number>();
+    const outcomeKeys: string[] = [];
+
+    for (const position of targetPositions) {
+        const outcomeKey = buildConditionOutcomeKey(position);
+        if (!outcomeKey) {
+            continue;
+        }
+
+        outcomeKeys.push(outcomeKey);
+        sizeByOutcome.set(outcomeKey, Math.max(Number(position.size) || 0, 0));
+    }
+
+    return {
+        conditionId,
+        positions: targetPositions,
+        mergeableSize: computeConditionMergeableSize(outcomeKeys, sizeByOutcome),
+    };
+};
+
 export const buildPortfolioSnapshot = (
     cashBalance: number,
     realizedPnl: number,
     positions: PositionSnapshot[]
 ): PortfolioSnapshot => {
-    const normalizedPositions = positions.filter((position) => position.size > EPSILON);
+    const normalizedPositions = positions.filter((position) => position.size > epsilon);
     const positionsMarketValue = normalizedPositions.reduce(
         (sum, position) => sum + Math.max(Number(position.marketValue) || 0, 0),
         0

@@ -3,37 +3,30 @@ import type { NodeResult } from '../../kernel/NodeResult';
 import type { CopyTradeWorkflowState } from '../../strategy/workflowState';
 import { CopyTradeNode } from './CopyTradeNode';
 
-export class ExecuteTradeNode extends CopyTradeNode {
+export class MergeExecuteNode extends CopyTradeNode {
     constructor() {
-        super('copytrade.trade.execute');
+        super('copytrade.merge.execute');
     }
 
     async doAction(ctx: NodeContext<CopyTradeWorkflowState>): Promise<NodeResult> {
         const event = ctx.state.sourceEvent;
         const decision = ctx.state.sizingDecision;
-        if (!event || !decision || decision.status !== 'ready') {
-            return this.skip('缺少执行所需上下文', 'copytrade.persist');
+        if (!event || !decision || decision.status !== 'ready' || !decision.requestedSize) {
+            return this.skip('缺少 merge 执行上下文', 'copytrade.persist');
         }
 
-        const result = await ctx.runtime.gateways.trading.executeTrade({
+        const result = await ctx.runtime.gateways.trading.executeMerge({
             sourceEvent: event,
-            requestedUsdc: decision.requestedUsdc,
             requestedSize: decision.requestedSize,
-            note: decision.note,
+            note: decision.reason,
         });
         ctx.state.executionResult = result;
-        if (decision.ticketTier) {
-            ctx.state.policyTrail = [...(ctx.state.policyTrail || []), `signal:${decision.ticketTier}`];
-        }
-
         if (result.status === 'confirmed') {
-            return this.success(result);
+            return this.success(result, 'copytrade.persist');
         }
-
         if (result.status === 'skipped') {
             return this.skip(result.reason, 'copytrade.persist');
         }
-
         if (result.status === 'retry') {
             return this.retry(result.reason, ctx.runtime.config.retryBackoffMs, 'copytrade.persist');
         }

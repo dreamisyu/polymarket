@@ -1,12 +1,11 @@
-import connectDB from '../../config/db';
-import createLogger from '../../utils/logger';
+import { connectDatabase } from '../infrastructure/db/connectDatabase';
+import { createLogger } from '../utils/logger';
 import { createRefactorRuntime } from '../infrastructure/runtime/createRuntime';
 import { createRefactorApp } from './createRefactorApp';
-
-type LoggerLike = ReturnType<typeof createLogger>;
+import { loadRuntimeConfig } from '../config/runtimeConfig';
 
 const startWorker = (
-    logger: LoggerLike,
+    logger: ReturnType<typeof createLogger>,
     name: string,
     run: () => Promise<void>
 ) => {
@@ -17,8 +16,9 @@ const startWorker = (
 };
 
 export const main = async () => {
-    await connectDB();
-    const runtime = await createRefactorRuntime();
+    const config = loadRuntimeConfig();
+    await connectDatabase(config);
+    const runtime = await createRefactorRuntime(config);
     const app = createRefactorApp(runtime);
 
     runtime.logger.info(

@@ -14,6 +14,11 @@ export class LoadTradingContextNode extends CopyTradeNode {
             return this.skip('缺少待执行源事件', null);
         }
 
+        ctx.state.conditionPositions = undefined;
+        ctx.state.sizingDecision = undefined;
+        ctx.state.executionResult = undefined;
+        ctx.state.policyTrail = [];
+
         const [portfolio, localPosition] = await Promise.all([
             ctx.runtime.gateways.trading.getPortfolioSnapshot(),
             ctx.runtime.gateways.trading.getPositionForEvent(event),
