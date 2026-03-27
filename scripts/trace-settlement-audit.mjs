@@ -1,55 +1,49 @@
-import axios from 'axios';
-import * as dotenv from 'dotenv';
-import { existsSync } from 'fs';
-import mongoose from 'mongoose';
-import { dirname, resolve } from 'path';
-import { fileURLToPath } from 'url';
+import {
+    ENV_FILE_PATH,
+    buildTimeRange,
+    buildTimeRangeFilter,
+    closeMongo,
+    connectMongo,
+    countBy,
+    fetchCollectionDocs,
+    formatPct,
+    formatTimestamp,
+    pct,
+    pushSuggestion,
+    readEnv,
+    takeTopEntries,
+    toSafeNumber,
+} from './lib/runtime.mjs';
+import {
+    buildDateRangeFilter,
+    formatRangeLabel,
+    getScopedCollectionNames,
+    resolveMongoUri,
+    resolveScopeRuntime,
+} from './lib/scopeRuntime.mjs';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const PROJECT_ROOT_DIR = resolve(__dirname, '..');
-const ENV_PATH_CANDIDATES = Array.from(
-    new Set([resolve(process.cwd(), '.env'), resolve(PROJECT_ROOT_DIR, '.env')])
-);
-const ENV_FILE_PATH =
-    ENV_PATH_CANDIDATES.find((candidate) => existsSync(candidate)) ||
-    resolve(PROJECT_ROOT_DIR, '.env');
-
-dotenv.config({ path: ENV_FILE_PATH });
-
-const NEW_YORK_TIME_ZONE = 'America/New_York';
-const TITLE_RE =
-    /^Bitcoin Up or Down - ([A-Za-z]+) (\d+), (\d{1,2}:\d{2}[AP]M)-(\d{1,2}:\d{2}[AP]M) ET$/;
-const MONTH_INDEX = {
-    January: 0,
-    February: 1,
-    March: 2,
-    April: 3,
-    May: 4,
-    June: 5,
-    July: 6,
-    August: 7,
-    September: 8,
-    October: 9,
-    November: 10,
-    December: 11,
-};
-const DEFAULT_TRACE_ID = process.env.TRACE_ID || 'default';
-const DEFAULT_USER_ADDRESS = process.env.USER_ADDRESS || '';
-const DEFAULT_MONGO_URI = process.env.MONGO_URI || '';
-const DEFAULT_TOP_CONDITIONS = 10;
-const DEFAULT_TOP_SKIP_REASONS = 5;
+const DEFAULT_TOP_CONDITIONS = 12;
+const DEFAULT_TOP_REASONS = 6;
+const DEFAULT_HOURS = 72;
+const REQUEST_TIMEOUT_MS = 10_000;
 
 const parseArgs = (argv) => {
     const parsed = {
-        traceId: DEFAULT_TRACE_ID,
-        userAddress: DEFAULT_USER_ADDRESS,
-        mongoUri: DEFAULT_MONGO_URI,
+        scopeKey: '',
+        sourceWallet: '',
+        targetWallet: '',
+        runMode: '',
+        strategyKind: '',
+        mongoUri: '',
+        conditionIds: [],
+        hours: DEFAULT_HOURS,
+        sinceTs: 0,
+        untilTs: 0,
+        topConditions: DEFAULT_TOP_CONDITIONS,
+        topReasons: DEFAULT_TOP_REASONS,
+        skipRemote: false,
         json: false,
         help: false,
-        conditionIds: [],
-        topConditions: DEFAULT_TOP_CONDITIONS,
-        topSkipReasons: DEFAULT_TOP_SKIP_REASONS,
     };
 
     for (let index = 0; index < argv.length; index += 1) {
@@ -65,19 +59,37 @@ const parseArgs = (argv) => {
             continue;
         }
 
-        if ((current === '--trace-id' || current === '-t') && argv[index + 1]) {
-            parsed.traceId = argv[index + 1];
+        if ((current === '--scope-key' || current === '-s') && argv[index + 1]) {
+            parsed.scopeKey = argv[index + 1];
             index += 1;
             continue;
         }
 
-        if ((current === '--user-address' || current === '-u') && argv[index + 1]) {
-            parsed.userAddress = argv[index + 1];
+        if (current === '--source-wallet' && argv[index + 1]) {
+            parsed.sourceWallet = argv[index + 1];
             index += 1;
             continue;
         }
 
-        if ((current === '--mongo-uri' || current === '-m') && argv[index + 1]) {
+        if (current === '--target-wallet' && argv[index + 1]) {
+            parsed.targetWallet = argv[index + 1];
+            index += 1;
+            continue;
+        }
+
+        if (current === '--run-mode' && argv[index + 1]) {
+            parsed.runMode = argv[index + 1];
+            index += 1;
+            continue;
+        }
+
+        if (current === '--strategy-kind' && argv[index + 1]) {
+            parsed.strategyKind = argv[index + 1];
+            index += 1;
+            continue;
+        }
+
+        if ((current === '--mongo-uri' || current === '-d') && argv[index + 1]) {
             parsed.mongoUri = argv[index + 1];
             index += 1;
             continue;
@@ -94,15 +106,38 @@ const parseArgs = (argv) => {
             continue;
         }
 
+        if (current === '--hours' && argv[index + 1]) {
+            parsed.hours = Math.max(toSafeNumber(argv[index + 1]), 0);
+            index += 1;
+            continue;
+        }
+
+        if (current === '--since-ts' && argv[index + 1]) {
+            parsed.sinceTs = Math.max(toSafeNumber(argv[index + 1]), 0);
+            index += 1;
+            continue;
+        }
+
+        if (current === '--until-ts' && argv[index + 1]) {
+            parsed.untilTs = Math.max(toSafeNumber(argv[index + 1]), 0);
+            index += 1;
+            continue;
+        }
+
         if (current === '--top-conditions' && argv[index + 1]) {
             parsed.topConditions = Math.max(Number.parseInt(argv[index + 1], 10) || 0, 1);
             index += 1;
             continue;
         }
 
-        if (current === '--top-skip-reasons' && argv[index + 1]) {
-            parsed.topSkipReasons = Math.max(Number.parseInt(argv[index + 1], 10) || 0, 1);
+        if (current === '--top-reasons' && argv[index + 1]) {
+            parsed.topReasons = Math.max(Number.parseInt(argv[index + 1], 10) || 0, 1);
             index += 1;
+            continue;
+        }
+
+        if (current === '--skip-remote') {
+            parsed.skipRemote = true;
         }
     }
 
@@ -114,188 +149,27 @@ const argv = parseArgs(process.argv.slice(2));
 
 if (argv.help) {
     console.log(`用法:
-  node scripts/trace-settlement-audit.mjs [--trace-id default] [--user-address 0x...] [--mongo-uri mongodb://...] [--condition-id 0x...,0x...] [--top-conditions 10] [--json]
+  node scripts/trace-settlement-audit.mjs [--scope-key key] [--hours 72] [--condition-id 0x...,0x...] [--json]
+  node scripts/trace-settlement-audit.mjs --source-wallet 0x... --target-wallet 0x... --run-mode live --strategy-kind signal
 
 说明:
-  1. 默认读取当前工作目录或项目根目录的 .env
-  2. 脚本会读取 trace 持仓/执行记录，并对照 Polymarket 官方 REST 市场接口的实际结算结果
-  3. 默认审计 trace 持仓、执行记录、源活动里出现过的全部 condition，可通过 --condition-id 限定范围
-  4. --json 可输出机器可读结果，便于后续接入告警或 CI
+  1. 审计数据来自 settlement_tasks / source_events / executions / positions（新集合结构）。
+  2. 默认审计最近 72 小时活动；settlement_tasks 与 positions 为全量读取。
+  3. 默认联查 CLOB/Gamma 解析 resolved 状态，可通过 --skip-remote 关闭。
 `);
     process.exit(0);
 }
 
-const requireArg = (value, name) => {
-    if (!value) {
-        throw new Error(`${name} 未定义（当前加载自 ${ENV_FILE_PATH}）`);
-    }
+const normalizeText = (value, fallback = '') => String(value || '').trim() || fallback;
 
-    return value;
-};
-
-const toSafeNumber = (value, fallback = 0) => {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : fallback;
-};
-
-const normalizeKey = (value) =>
-    String(value || '')
-        .replace(/[^a-zA-Z0-9]/g, '_')
-        .toLowerCase();
-
-const sumBy = (items, getter) => items.reduce((sum, item) => sum + toSafeNumber(getter(item)), 0);
-const formatUsd = (value) => `${toSafeNumber(value).toFixed(6)} USDC`;
-const formatNumber = (value) => toSafeNumber(value).toFixed(6);
-const unique = (items) => Array.from(new Set(items));
-const collectConditionIds = (...groups) =>
-    unique(
-        groups
-            .flatMap((items) => items)
-            .map((item) => String(item?.conditionId || '').trim())
-            .filter(Boolean)
-    );
-
-const getTraceCollectionNames = (walletAddress, traceId) => {
-    const suffix = `${normalizeKey(walletAddress)}_${normalizeKey(traceId)}`;
-    return {
-        execution: `trace_executions_${suffix}`,
-        position: `trace_positions_${suffix}`,
-        portfolio: `trace_portfolios_${suffix}`,
-        sourceActivity: `user_activities_${walletAddress}`,
-    };
-};
-
-const getCollectionIfExists = async (collectionName) => {
-    const collections = await mongoose.connection.db
-        .listCollections({ name: collectionName }, { nameOnly: true })
-        .toArray();
-
-    if (collections.length === 0) {
-        return null;
-    }
-
-    return mongoose.connection.db.collection(collectionName);
-};
-
-const fetchCollectionDocs = async (collectionName, filter = {}, options = {}) => {
-    const collection = await getCollectionIfExists(collectionName);
-    if (!collection) {
-        return [];
-    }
-
-    const { sort = {}, projection = {} } = options;
-    return collection.find(filter, { projection }).sort(sort).toArray();
-};
-
-const fetchSingleDoc = async (collectionName, filter = {}, options = {}) => {
-    const docs = await fetchCollectionDocs(collectionName, filter, options);
-    return docs[0] || null;
-};
-
-const groupBy = (items, keyGetter) => {
-    const result = new Map();
-    for (const item of items) {
-        const key = keyGetter(item);
-        if (!result.has(key)) {
-            result.set(key, []);
-        }
-
-        result.get(key).push(item);
-    }
-
-    return result;
-};
-
-const getOffsetMinutes = (date, timeZone) => {
-    const formatter = new Intl.DateTimeFormat('en-US', {
-        timeZone,
-        timeZoneName: 'shortOffset',
-        hour: '2-digit',
-    });
-    const timeZoneName =
-        formatter.formatToParts(date).find((part) => part.type === 'timeZoneName')?.value || 'GMT';
-    const matched = timeZoneName.match(/^GMT([+-])(\d{1,2})(?::?(\d{2}))?$/);
-    if (!matched) {
-        return 0;
-    }
-
-    const [, sign, hour, minute = '0'] = matched;
-    const minutes = Number.parseInt(hour, 10) * 60 + Number.parseInt(minute, 10);
-    return sign === '+' ? minutes : -minutes;
-};
-
-const parseTimeToHourMinute = (timePart) => {
-    const rawHour = Number.parseInt(timePart.slice(0, timePart.indexOf(':')), 10);
-    const minute = Number.parseInt(timePart.slice(timePart.indexOf(':') + 1, -2), 10);
-    const ampm = timePart.slice(-2);
-    let hour = rawHour;
-
-    if (ampm === 'AM') {
-        if (hour === 12) {
-            hour = 0;
-        }
-    } else if (hour !== 12) {
-        hour += 12;
-    }
-
-    return {
-        hour,
-        minute,
-    };
-};
-
-const buildSlugFromTitle = (title) => {
-    const matched = String(title || '').match(TITLE_RE);
-    if (!matched) {
-        return '';
-    }
-
-    const [, monthName, dayString, startPart, endPart] = matched;
-    const monthIndex = MONTH_INDEX[monthName];
-    if (monthIndex === undefined) {
-        return '';
-    }
-
-    const day = Number.parseInt(dayString, 10);
-    const startTime = parseTimeToHourMinute(startPart);
-    const endTime = parseTimeToHourMinute(endPart);
-    const year = new Date().getUTCFullYear();
-
-    const localStartAsUtc = new Date(
-        Date.UTC(year, monthIndex, day, startTime.hour, startTime.minute, 0)
-    );
-    const startOffsetMinutes = getOffsetMinutes(localStartAsUtc, NEW_YORK_TIME_ZONE);
-    const startUtc = new Date(localStartAsUtc.getTime() - startOffsetMinutes * 60_000);
-
-    const localEndAsUtc = new Date(
-        Date.UTC(year, monthIndex, day, endTime.hour, endTime.minute, 0)
-    );
-    const endOffsetMinutes = getOffsetMinutes(localEndAsUtc, NEW_YORK_TIME_ZONE);
-    const endUtc = new Date(localEndAsUtc.getTime() - endOffsetMinutes * 60_000);
-
-    const durationMinutes = Math.round((endUtc.getTime() - startUtc.getTime()) / 60_000);
-    if (durationMinutes <= 0) {
-        return '';
-    }
-
-    return `btc-updown-${durationMinutes}m-${Math.floor(startUtc.getTime() / 1000)}`;
-};
-
-const RESOLUTION_CACHE_RESOLVED_TTL_MS = 10 * 60 * 1000;
-const RESOLUTION_CACHE_UNRESOLVED_TTL_MS = 30 * 1000;
-const resolutionCache = new Map();
-
-const normalizeOutcomeLabel = (value) =>
-    String(value || '')
-        .trim()
-        .toLowerCase();
+const lowerText = (value, fallback = '') => normalizeText(value, fallback).toLowerCase();
 
 const parseArrayLike = (value) => {
     if (Array.isArray(value)) {
-        return value.map((item) => String(item || '').trim()).filter(Boolean);
+        return value.map((item) => normalizeText(item, '')).filter(Boolean);
     }
 
-    const normalized = String(value || '').trim();
+    const normalized = normalizeText(value, '');
     if (!normalized) {
         return [];
     }
@@ -303,25 +177,31 @@ const parseArrayLike = (value) => {
     try {
         const parsed = JSON.parse(normalized);
         if (Array.isArray(parsed)) {
-            return parsed.map((item) => String(item || '').trim()).filter(Boolean);
+            return parsed.map((item) => normalizeText(item, '')).filter(Boolean);
         }
     } catch {
         return normalized
             .split(',')
-            .map((item) => String(item || '').trim())
+            .map((item) => normalizeText(item, ''))
             .filter(Boolean);
     }
 
     return [];
 };
 
+const normalizeOutcomeLabel = (value) => lowerText(value, '').replace(/\s+/g, ' ');
+
 const inferWinnerFromTokens = (tokens = []) =>
-    normalizeOutcomeLabel(tokens.find((token) => token?.winner)?.outcome || '');
+    normalizeOutcomeLabel(tokens.find((token) => Boolean(token?.winner))?.outcome || '');
 
 const inferWinnerFromOutcomePrices = (outcomes, outcomePrices) => {
     const normalizedOutcomes = parseArrayLike(outcomes);
     const normalizedPrices = parseArrayLike(outcomePrices).map((value) => toSafeNumber(value, -1));
-    if (normalizedOutcomes.length === 0 || normalizedOutcomes.length !== normalizedPrices.length) {
+
+    if (
+        normalizedOutcomes.length === 0 ||
+        normalizedOutcomes.length !== normalizedPrices.length
+    ) {
         return '';
     }
 
@@ -340,19 +220,13 @@ const inferWinnerFromOutcomePrices = (outcomes, outcomePrices) => {
     return normalizeOutcomeLabel(normalizedOutcomes[winnerIndex]);
 };
 
-const deriveResolvedStatus = ({ winner, closed, acceptingOrders, umaResolutionStatus }) => {
-    const normalizedUmaStatus = String(umaResolutionStatus || '')
-        .trim()
-        .toLowerCase();
-    if (winner) {
+const deriveResolvedStatus = ({ winnerOutcome, closed, acceptingOrders, umaResolutionStatus }) => {
+    const uma = lowerText(umaResolutionStatus, '');
+    if (winnerOutcome) {
         return 'resolved';
     }
 
-    if (
-        normalizedUmaStatus.includes('resolved') ||
-        normalizedUmaStatus.includes('finalized') ||
-        normalizedUmaStatus.includes('settled')
-    ) {
+    if (uma.includes('resolved') || uma.includes('finalized') || uma.includes('settled')) {
         return 'resolved';
     }
 
@@ -363,728 +237,644 @@ const deriveResolvedStatus = ({ winner, closed, acceptingOrders, umaResolutionSt
     return 'open';
 };
 
-const mergeResolutionDescriptions = (...values) =>
-    [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))].join('；');
-
-const fetchPolymarketPositions = async (walletAddress) => {
-    if (!walletAddress) {
-        return {
-            walletAddress: '',
-            positions: [],
-            error: '未提供 USER_ADDRESS，无法读取源钱包持仓',
-        };
-    }
+const fetchJsonWithTimeout = async (url, userAgent) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
     try {
-        const response = await axios.get(
-            `https://data-api.polymarket.com/positions?user=${walletAddress}&sizeThreshold=0`,
-            {
-                timeout: 10_000,
-                headers: {
-                    'User-Agent': 'polymarket-copytrading-bot/trace-settlement-audit',
-                },
-            }
-        );
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: {
+                'User-Agent': userAgent || 'polymarket-copytrading-bot/trace-settlement-audit',
+            },
+            signal: controller.signal,
+        });
+
+        if (!response.ok) {
+            return {
+                data: null,
+                error: `HTTP ${response.status}`,
+            };
+        }
 
         return {
-            walletAddress,
-            positions: Array.isArray(response.data) ? response.data : [],
+            data: await response.json(),
             error: '',
         };
     } catch (error) {
         return {
-            walletAddress,
-            positions: [],
-            error: error?.response?.data?.error || error?.message || '获取源钱包持仓失败',
+            data: null,
+            error: error?.message || '请求失败',
         };
+    } finally {
+        clearTimeout(timeout);
     }
 };
 
-const fetchGammaMarketBySlug = async (marketSlug) => {
-    if (!marketSlug) {
-        return null;
-    }
+const fetchConditionResolution = async ({
+    conditionId,
+    marketSlug,
+    clobHttpUrl,
+    gammaApiUrl,
+    userAgent,
+}) => {
+    const normalizedConditionId = normalizeText(conditionId, '');
+    const normalizedSlug = normalizeText(marketSlug, '');
 
-    try {
-        const bySlugResponse = await axios.get(
-            `https://gamma-api.polymarket.com/markets/slug/${marketSlug}`,
-            {
-                timeout: 10_000,
-                headers: {
-                    'User-Agent': 'polymarket-copytrading-bot/trace-settlement-audit',
-                },
-            }
-        );
-
-        if (Array.isArray(bySlugResponse.data)) {
-            return bySlugResponse.data[0] || null;
-        }
-
-        if (bySlugResponse.data && typeof bySlugResponse.data === 'object') {
-            return bySlugResponse.data;
-        }
-    } catch {}
-
-    try {
-        const listResponse = await axios.get(
-            `https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(marketSlug)}`,
-            {
-                timeout: 10_000,
-                headers: {
-                    'User-Agent': 'polymarket-copytrading-bot/trace-settlement-audit',
-                },
-            }
-        );
-
-        return Array.isArray(listResponse.data) ? listResponse.data[0] || null : null;
-    } catch {
-        return null;
-    }
-};
-
-const fetchMarketResolution = async (conditionId, marketSlug, title) => {
-    const normalizedConditionId = String(conditionId || '').trim();
-    const normalizedMarketSlug = String(marketSlug || '').trim();
-    const cacheKey = normalizedConditionId || `slug:${normalizedMarketSlug}`;
-    const cached = resolutionCache.get(cacheKey);
-    if (cached) {
-        const ttl =
-            String(cached.resolvedStatus || '').toLowerCase() === 'resolved' &&
-            String(cached.winner || '').trim()
-                ? RESOLUTION_CACHE_RESOLVED_TTL_MS
-                : RESOLUTION_CACHE_UNRESOLVED_TTL_MS;
-        if (Date.now() - cached.checkedAt < ttl) {
-            return cached.value;
-        }
-    }
-
-    if (!normalizedConditionId && !normalizedMarketSlug) {
+    if (!normalizedConditionId && !normalizedSlug) {
         return {
-            marketSlug: '',
-            marketUrl: '',
-            resolvedStatus: '',
-            winner: '',
-            title: String(title || '').trim(),
-            updateDescription: '',
-            error: '缺少 conditionId 与市场 slug，无法查询官方 REST 市场接口',
+            conditionId: normalizedConditionId,
+            marketSlug: normalizedSlug,
+            status: 'unknown',
+            winnerOutcome: '',
+            source: 'none',
+            error: '缺少 conditionId/marketSlug',
         };
     }
 
-    try {
-        const clobResolution = normalizedConditionId
-            ? await axios.get(`https://clob.polymarket.com/markets/${normalizedConditionId}`, {
-                  timeout: 10_000,
-                  headers: {
-                      'User-Agent': 'polymarket-copytrading-bot/trace-settlement-audit',
-                  },
-              })
-            : null;
-        const clobMarket =
-            clobResolution?.data && typeof clobResolution.data === 'object'
-                ? clobResolution.data
-                : null;
-        const winner = inferWinnerFromTokens(clobMarket?.tokens || []);
-        const nextMarketSlug = String(clobMarket?.market_slug || '').trim() || normalizedMarketSlug;
-        const value = {
-            marketSlug: nextMarketSlug,
-            marketUrl: nextMarketSlug
-                ? `https://polymarket.com/event/${nextMarketSlug}/${nextMarketSlug}`
-                : '',
-            resolvedStatus: deriveResolvedStatus({
-                winner,
-                closed: Boolean(clobMarket?.closed),
-                acceptingOrders:
-                    typeof clobMarket?.accepting_orders === 'boolean'
-                        ? clobMarket.accepting_orders
-                        : null,
-            }),
-            winner,
-            title: String(clobMarket?.question || title || '').trim(),
-            updateDescription: winner
-                ? `source=clob winner=${winner}`
-                : `source=clob closed=${Boolean(clobMarket?.closed)}`,
-            error: '',
-        };
-        if (String(value.resolvedStatus || '').toLowerCase() === 'resolved' || !nextMarketSlug) {
-            resolutionCache.set(cacheKey, {
-                checkedAt: Date.now(),
-                resolvedStatus: value.resolvedStatus,
-                winner: value.winner,
-                value,
+    if (normalizedConditionId) {
+        const clobUrl = `${clobHttpUrl.replace(/\/+$/, '')}/markets/${normalizedConditionId}`;
+        const clob = await fetchJsonWithTimeout(clobUrl, userAgent);
+        if (clob.data) {
+            const winnerOutcome = inferWinnerFromTokens(clob.data?.tokens || []);
+            const acceptingOrders =
+                typeof clob.data?.accepting_orders === 'boolean'
+                    ? clob.data.accepting_orders
+                    : typeof clob.data?.acceptingOrders === 'boolean'
+                      ? clob.data.acceptingOrders
+                      : null;
+            const resolvedStatus = deriveResolvedStatus({
+                winnerOutcome,
+                closed: Boolean(clob.data?.closed),
+                acceptingOrders,
+                umaResolutionStatus: '',
             });
-            return value;
-        }
 
-        const gammaMarket = await fetchGammaMarketBySlug(nextMarketSlug);
-        if (gammaMarket) {
-            const gammaWinner =
-                inferWinnerFromTokens(gammaMarket.tokens || []) ||
-                inferWinnerFromOutcomePrices(gammaMarket.outcomes, gammaMarket.outcomePrices);
-            const mergedValue = {
-                ...value,
-                resolvedStatus: deriveResolvedStatus({
-                    winner: gammaWinner || value.winner,
-                    closed: Boolean(gammaMarket.closed || clobMarket?.closed),
-                    acceptingOrders:
-                        typeof gammaMarket.acceptingOrders === 'boolean'
-                            ? gammaMarket.acceptingOrders
-                            : typeof clobMarket?.accepting_orders === 'boolean'
-                              ? clobMarket.accepting_orders
-                              : null,
-                    umaResolutionStatus: gammaMarket.umaResolutionStatus,
-                }),
-                winner: gammaWinner || value.winner,
-                title: String(gammaMarket.question || value.title || title || '').trim(),
-                updateDescription: mergeResolutionDescriptions(
-                    value.updateDescription,
-                    `source=gamma umaResolutionStatus=${String(gammaMarket.umaResolutionStatus || '').trim()}`
-                ),
-            };
-            resolutionCache.set(cacheKey, {
-                checkedAt: Date.now(),
-                resolvedStatus: mergedValue.resolvedStatus,
-                winner: mergedValue.winner,
-                value: mergedValue,
-            });
-            return mergedValue;
-        }
-
-        resolutionCache.set(cacheKey, {
-            checkedAt: Date.now(),
-            resolvedStatus: value.resolvedStatus,
-            winner: value.winner,
-            value,
-        });
-        return value;
-    } catch (clobError) {
-        const gammaMarket = await fetchGammaMarketBySlug(normalizedMarketSlug);
-        if (gammaMarket) {
-            const winner =
-                inferWinnerFromTokens(gammaMarket.tokens || []) ||
-                inferWinnerFromOutcomePrices(gammaMarket.outcomes, gammaMarket.outcomePrices);
-            const value = {
-                marketSlug: normalizedMarketSlug,
-                marketUrl: normalizedMarketSlug
-                    ? `https://polymarket.com/event/${normalizedMarketSlug}/${normalizedMarketSlug}`
-                    : '',
-                resolvedStatus: deriveResolvedStatus({
-                    winner,
-                    closed: Boolean(gammaMarket.closed),
-                    acceptingOrders:
-                        typeof gammaMarket.acceptingOrders === 'boolean'
-                            ? gammaMarket.acceptingOrders
-                            : null,
-                    umaResolutionStatus: gammaMarket.umaResolutionStatus,
-                }),
-                winner,
-                title: String(gammaMarket.question || title || '').trim(),
-                updateDescription: `source=gamma umaResolutionStatus=${String(gammaMarket.umaResolutionStatus || '').trim()}`,
+            return {
+                conditionId: normalizeText(clob.data?.condition_id || clob.data?.conditionId, normalizedConditionId),
+                marketSlug: normalizeText(clob.data?.market_slug || clob.data?.marketSlug, normalizedSlug),
+                status: resolvedStatus,
+                winnerOutcome,
+                source: 'clob',
                 error: '',
             };
-            resolutionCache.set(cacheKey, {
-                checkedAt: Date.now(),
-                resolvedStatus: value.resolvedStatus,
-                winner: value.winner,
-                value,
+        }
+    }
+
+    if (normalizedSlug) {
+        const gammaUrl = `${gammaApiUrl.replace(/\/+$/, '')}/markets/slug/${encodeURIComponent(normalizedSlug)}`;
+        const gamma = await fetchJsonWithTimeout(gammaUrl, userAgent);
+        const gammaData = Array.isArray(gamma.data) ? gamma.data[0] : gamma.data;
+
+        if (gammaData) {
+            const winnerOutcome =
+                inferWinnerFromTokens(gammaData?.tokens || []) ||
+                inferWinnerFromOutcomePrices(gammaData?.outcomes, gammaData?.outcomePrices);
+            const acceptingOrders =
+                typeof gammaData?.acceptingOrders === 'boolean' ? gammaData.acceptingOrders : null;
+            const resolvedStatus = deriveResolvedStatus({
+                winnerOutcome,
+                closed: Boolean(gammaData?.closed),
+                acceptingOrders,
+                umaResolutionStatus: gammaData?.umaResolutionStatus,
             });
-            return value;
+
+            return {
+                conditionId: normalizeText(gammaData?.conditionId, normalizedConditionId),
+                marketSlug: normalizeText(gammaData?.slug, normalizedSlug),
+                status: resolvedStatus,
+                winnerOutcome,
+                source: 'gamma',
+                error: '',
+            };
         }
 
         return {
-            marketSlug: normalizedMarketSlug,
-            marketUrl: normalizedMarketSlug
-                ? `https://polymarket.com/event/${normalizedMarketSlug}/${normalizedMarketSlug}`
-                : '',
-            resolvedStatus: '',
-            winner: '',
-            title: String(title || '').trim(),
-            updateDescription: '',
-            error:
-                clobError?.response?.data?.error ||
-                clobError?.message ||
-                '读取官方 REST 市场接口失败',
+            conditionId: normalizedConditionId,
+            marketSlug: normalizedSlug,
+            status: 'unknown',
+            winnerOutcome: '',
+            source: 'gamma',
+            error: gamma.error || 'gamma 未返回数据',
         };
     }
-};
-
-const selectConditionMetadata = (activities, positions) => {
-    const sortedActivities = [...activities].sort(
-        (left, right) => toSafeNumber(right.timestamp) - toSafeNumber(left.timestamp)
-    );
-    const activityWithSlug = sortedActivities.find(
-        (item) => String(item.eventSlug || item.slug || '').trim() !== ''
-    );
-    const representative = activityWithSlug || sortedActivities[0] || positions[0] || {};
-    const marketSlug =
-        String(representative.eventSlug || representative.slug || '').trim() ||
-        buildSlugFromTitle(representative.title || positions[0]?.title || '');
 
     return {
-        title: representative.title || positions[0]?.title || '',
-        marketSlug,
+        conditionId: normalizedConditionId,
+        marketSlug: normalizedSlug,
+        status: 'unknown',
+        winnerOutcome: '',
+        source: 'clob',
+        error: 'clob 未返回数据',
     };
 };
 
-const buildSkipReasonSummary = (executions, limit) =>
-    [
-        ...groupBy(
-            executions.filter((item) => item.status === 'SKIPPED'),
-            (item) => item.reason
-        ).entries(),
-    ]
-        .map(([reason, items]) => ({
-            reason: String(reason || '').trim() || '未知原因',
-            count: items.length,
-        }))
-        .sort((left, right) => right.count - left.count)
-        .slice(0, limit);
+const ensureProfile = (map, conditionId) => {
+    const key = normalizeText(conditionId, '');
+    if (!key) {
+        return null;
+    }
 
-const buildExecutionConditionSummary = (executions) =>
-    [...groupBy(executions, (item) => item.executionCondition || 'unknown').entries()]
-        .map(([executionCondition, items]) => ({
-            executionCondition,
-            count: items.length,
-            filledCount: items.filter((item) => item.status === 'FILLED').length,
-            skippedCount: items.filter((item) => item.status === 'SKIPPED').length,
-            failedCount: items.filter((item) => item.status === 'FAILED').length,
-        }))
-        .sort((left, right) => right.count - left.count);
+    if (!map.has(key)) {
+        map.set(key, {
+            conditionId: key,
+            title: '',
+            marketSlug: '',
+            taskStatus: 'missing',
+            taskRetryCount: 0,
+            taskReason: '',
+            taskNextRetryAt: 0,
+            taskLastCheckedAt: 0,
+            taskWinnerOutcome: '',
+            sourceStatusCounts: new Map(),
+            sourcePendingCount: 0,
+            sourceFailedCount: 0,
+            sourceLatestTs: 0,
+            executionStatusCounts: new Map(),
+            executionFailedCount: 0,
+            executionRetryCount: 0,
+            executionLatestTs: 0,
+            openPositionSize: 0,
+            redeemableSize: 0,
+            openPositionCount: 0,
+            findings: [],
+            remote: null,
+            riskScore: 0,
+        });
+    }
 
-const buildSourceActivitySummary = (activities) =>
-    [
-        ...groupBy(
-            activities,
-            (item) =>
-                `${item.type || 'UNKNOWN'}|${item.executionIntent || 'UNKNOWN'}|${item.botStatus || 'UNKNOWN'}`
-        ).entries(),
-    ]
-        .map(([key, items]) => {
-            const [type, executionIntent, botStatus] = key.split('|');
-            return {
-                type,
-                executionIntent,
-                botStatus,
-                count: items.length,
-            };
-        })
-        .sort((left, right) => right.count - left.count);
+    return map.get(key);
+};
 
-const isResolved = (resolution) =>
-    String(resolution?.resolvedStatus || '').toLowerCase() === 'resolved';
+const buildRiskScore = (profile, now) => {
+    let score = 0;
 
-const main = async () => {
-    const traceId = requireArg(argv.traceId, 'TRACE_ID');
-    const userAddress = requireArg(argv.userAddress, 'USER_ADDRESS');
-    const mongoUri = requireArg(argv.mongoUri, 'MONGO_URI');
-    const collectionNames = getTraceCollectionNames(userAddress, traceId);
+    if (profile.taskStatus === 'missing') {
+        score += 20;
+    }
 
-    await mongoose.connect(mongoUri);
+    if (!['settled', 'closed', 'missing'].includes(profile.taskStatus)) {
+        score += 10;
+    }
+
+    if (
+        !['settled', 'closed'].includes(profile.taskStatus) &&
+        profile.taskNextRetryAt > 0 &&
+        profile.taskNextRetryAt <= now
+    ) {
+        score += 10;
+    }
+
+    score += profile.taskRetryCount * 2;
+    score += profile.sourcePendingCount * 1.5;
+    score += profile.executionRetryCount * 1.5;
+    score += profile.executionFailedCount * 1.5;
+    score += profile.openPositionCount > 0 ? 6 : 0;
+    score += profile.redeemableSize > 0 ? 8 : 0;
+
+    return score;
+};
+
+const addFinding = (profile, id, message) => {
+    profile.findings.push({ id, message });
+};
+
+const toSerializableCounts = (map, top) =>
+    takeTopEntries(map, top).map(([key, value]) => ({ key, value: toSafeNumber(value) }));
+
+const renderTopItems = (title, items, formatter) => {
+    const lines = [`- ${title}:`];
+    if (!Array.isArray(items) || items.length === 0) {
+        lines.push('  - 无');
+        return lines;
+    }
+
+    for (const item of items) {
+        lines.push(`  - ${formatter(item)}`);
+    }
+
+    return lines;
+};
+
+const renderText = (summary) => {
+    const lines = [];
+    lines.push('结算链路审计（trace-settlement-audit 新版）');
+    lines.push(`- scopeKey: ${summary.input.scopeKey}`);
+    lines.push(`- 时间范围: ${summary.input.rangeLabel}`);
+    lines.push(`- 条件总数: ${summary.overview.conditionUniverseCount}`);
+    lines.push(`- 重点审计条件数: ${summary.overview.selectedCount}`);
+    lines.push(`- 远程解析: ${summary.input.skipRemote ? '关闭' : '开启'}`);
+    lines.push(`- env 路径: ${summary.input.envFilePath}`);
+
+    lines.push('');
+    lines.push('总览');
+    lines.push(`- settlement 状态分布: ${summary.overview.taskStatusCounts.map((item) => `${item.key}=${item.value}`).join(', ') || '无'}`);
+    lines.push(`- 有开仓条件: ${summary.overview.openPositionConditionCount}`);
+    lines.push(`- 有 pending source 条件: ${summary.overview.pendingSourceConditionCount}`);
+    lines.push(`- 已 resolved 但未 settled: ${summary.overview.resolvedNotSettledCount}`);
+    lines.push(`- settled 但仍有残留: ${summary.overview.settledWithResidualCount}`);
+
+    lines.push('');
+    lines.push(...renderTopItems('问题分类 Top', summary.issueCounts, (item) => `${item.id}: ${item.count}`));
+    lines.push(...renderTopItems('任务原因 Top', summary.topTaskReasons, (item) => `${item.reason}: ${item.count}`));
+
+    lines.push('');
+    lines.push('重点条件');
+    if (summary.conditions.length === 0) {
+        lines.push('- 无可审计条件');
+    } else {
+        for (const condition of summary.conditions) {
+            const findingText =
+                condition.findings.length > 0
+                    ? condition.findings.map((item) => item.message).join('；')
+                    : '无明显异常';
+            lines.push(
+                `- ${condition.conditionId} | task=${condition.taskStatus} retry=${condition.taskRetryCount} pending=${condition.sourcePendingCount} openSize=${condition.openPositionSize.toFixed(6)} remote=${condition.remoteStatus} findings=${findingText}`
+            );
+        }
+    }
+
+    lines.push('');
+    lines.push('建议');
+    for (const suggestion of summary.suggestions) {
+        lines.push(`- ${suggestion}`);
+    }
+
+    return lines.join('\n');
+};
+
+const run = async () => {
+    const scope = resolveScopeRuntime({
+        scopeKey: argv.scopeKey,
+        sourceWallet: argv.sourceWallet,
+        targetWallet: argv.targetWallet,
+        runMode: argv.runMode,
+        strategyKind: argv.strategyKind,
+    });
+    const collections = getScopedCollectionNames(scope.scopeKey);
+    const mongoUri = resolveMongoUri(argv.mongoUri);
+    const range = buildTimeRange({
+        hours: argv.hours,
+        sinceTs: argv.sinceTs,
+        untilTs: argv.untilTs,
+    });
+
+    const clobHttpUrl = readEnv('CLOB_HTTP_URL') || 'https://clob.polymarket.com';
+    const gammaApiUrl = readEnv('GAMMA_API_URL') || 'https://gamma-api.polymarket.com';
+
+    await connectMongo(mongoUri);
 
     try {
-        const [positions, portfolio, executions, sourceActivities] = await Promise.all([
+        const conditionFilter =
+            argv.conditionIds.length > 0
+                ? { conditionId: { $in: argv.conditionIds } }
+                : {};
+
+        const [tasks, positions, sourceEvents, executions] = await Promise.all([
+            fetchCollectionDocs(collections.settlementTasks, conditionFilter, {
+                projection: {
+                    conditionId: 1,
+                    title: 1,
+                    marketSlug: 1,
+                    status: 1,
+                    reason: 1,
+                    retryCount: 1,
+                    nextRetryAt: 1,
+                    lastCheckedAt: 1,
+                    winnerOutcome: 1,
+                },
+            }),
+            fetchCollectionDocs(collections.positions, conditionFilter, {
+                projection: {
+                    conditionId: 1,
+                    size: 1,
+                    redeemable: 1,
+                },
+            }),
             fetchCollectionDocs(
-                collectionNames.position,
-                argv.conditionIds.length > 0 ? { conditionId: { $in: argv.conditionIds } } : {},
+                collections.sourceEvents,
                 {
-                    sort: { lastTradedAt: -1, updatedAt: -1 },
+                    ...conditionFilter,
+                    ...buildTimeRangeFilter('timestamp', range),
+                },
+                {
                     projection: {
-                        _id: 0,
                         conditionId: 1,
-                        asset: 1,
                         title: 1,
-                        outcome: 1,
-                        size: 1,
-                        costBasis: 1,
-                        marketPrice: 1,
-                        marketValue: 1,
-                        unrealizedPnl: 1,
-                        realizedPnl: 1,
-                        closedAt: 1,
-                        lastTradedAt: 1,
+                        slug: 1,
+                        status: 1,
+                        timestamp: 1,
                     },
                 }
             ),
-            fetchSingleDoc(collectionNames.portfolio, {}, { sort: { updatedAt: -1 } }),
             fetchCollectionDocs(
-                collectionNames.execution,
-                argv.conditionIds.length > 0 ? { conditionId: { $in: argv.conditionIds } } : {},
+                collections.executions,
                 {
-                    sort: { sourceTimestamp: -1 },
+                    ...conditionFilter,
+                    ...buildDateRangeFilter('createdAt', range),
+                },
+                {
                     projection: {
-                        _id: 0,
                         conditionId: 1,
-                        executionCondition: 1,
                         status: 1,
                         reason: 1,
-                        sourceTimestamp: 1,
-                    },
-                }
-            ),
-            fetchCollectionDocs(
-                collectionNames.sourceActivity,
-                argv.conditionIds.length > 0 ? { conditionId: { $in: argv.conditionIds } } : {},
-                {
-                    sort: { timestamp: -1 },
-                    projection: {
-                        _id: 0,
-                        conditionId: 1,
-                        type: 1,
-                        title: 1,
-                        outcome: 1,
-                        slug: 1,
-                        eventSlug: 1,
-                        timestamp: 1,
-                        executionIntent: 1,
-                        botStatus: 1,
+                        createdAt: 1,
                     },
                 }
             ),
         ]);
 
-        const effectiveConditionIds =
+        const profileMap = new Map();
+
+        for (const task of tasks) {
+            const profile = ensureProfile(profileMap, task?.conditionId);
+            if (!profile) {
+                continue;
+            }
+
+            profile.title = normalizeText(task?.title, profile.title);
+            profile.marketSlug = normalizeText(task?.marketSlug, profile.marketSlug);
+            profile.taskStatus = lowerText(task?.status, 'pending');
+            profile.taskRetryCount = toSafeNumber(task?.retryCount);
+            profile.taskReason = normalizeText(task?.reason, '');
+            profile.taskNextRetryAt = toSafeNumber(task?.nextRetryAt);
+            profile.taskLastCheckedAt = toSafeNumber(task?.lastCheckedAt);
+            profile.taskWinnerOutcome = normalizeText(task?.winnerOutcome, '');
+        }
+
+        for (const position of positions) {
+            const profile = ensureProfile(profileMap, position?.conditionId);
+            if (!profile) {
+                continue;
+            }
+
+            const size = Math.max(toSafeNumber(position?.size), 0);
+            if (size <= 0) {
+                continue;
+            }
+
+            profile.openPositionCount += 1;
+            profile.openPositionSize += size;
+            if (position?.redeemable) {
+                profile.redeemableSize += size;
+            }
+        }
+
+        for (const event of sourceEvents) {
+            const profile = ensureProfile(profileMap, event?.conditionId);
+            if (!profile) {
+                continue;
+            }
+
+            profile.title = normalizeText(event?.title, profile.title);
+            profile.marketSlug = normalizeText(event?.slug, profile.marketSlug);
+
+            const status = lowerText(event?.status, 'pending');
+            profile.sourceStatusCounts.set(status, (profile.sourceStatusCounts.get(status) || 0) + 1);
+            if (status === 'pending' || status === 'processing' || status === 'retry') {
+                profile.sourcePendingCount += 1;
+            }
+            if (status === 'failed') {
+                profile.sourceFailedCount += 1;
+            }
+
+            profile.sourceLatestTs = Math.max(profile.sourceLatestTs, toSafeNumber(event?.timestamp));
+        }
+
+        for (const execution of executions) {
+            const profile = ensureProfile(profileMap, execution?.conditionId);
+            if (!profile) {
+                continue;
+            }
+
+            const status = lowerText(execution?.status, 'unknown');
+            profile.executionStatusCounts.set(status, (profile.executionStatusCounts.get(status) || 0) + 1);
+            if (status === 'failed') {
+                profile.executionFailedCount += 1;
+            }
+            if (status === 'retry') {
+                profile.executionRetryCount += 1;
+            }
+
+            const createdAt = toSafeNumber(new Date(execution?.createdAt || 0).getTime());
+            profile.executionLatestTs = Math.max(profile.executionLatestTs, createdAt);
+        }
+
+        const now = Date.now();
+        let profiles = [...profileMap.values()];
+
+        if (argv.conditionIds.length === 0) {
+            profiles = profiles.filter((profile) => {
+                return (
+                    profile.taskStatus !== 'missing' ||
+                    profile.openPositionCount > 0 ||
+                    profile.sourcePendingCount > 0 ||
+                    profile.executionRetryCount > 0 ||
+                    profile.executionFailedCount > 0
+                );
+            });
+        }
+
+        for (const profile of profiles) {
+            profile.riskScore = buildRiskScore(profile, now);
+        }
+
+        profiles.sort((left, right) => right.riskScore - left.riskScore);
+
+        const selectedProfiles =
             argv.conditionIds.length > 0
-                ? argv.conditionIds
-                : collectConditionIds(positions, executions, sourceActivities);
+                ? profiles
+                : profiles.slice(0, argv.topConditions);
 
-        const filteredPositions = positions.filter((item) =>
-            effectiveConditionIds.includes(String(item.conditionId || '').trim())
-        );
-        const filteredExecutions = executions.filter((item) =>
-            effectiveConditionIds.includes(String(item.conditionId || '').trim())
-        );
-        const filteredActivities = sourceActivities.filter((item) =>
-            effectiveConditionIds.includes(String(item.conditionId || '').trim())
-        );
-        const positionsByCondition = groupBy(filteredPositions, (item) => item.conditionId);
-        const activitiesByCondition = groupBy(filteredActivities, (item) => item.conditionId);
-        const sourcePositionsResponse = await fetchPolymarketPositions(userAddress);
-        const currentSourcePositions = sourcePositionsResponse.positions.filter((item) =>
-            effectiveConditionIds.includes(String(item.conditionId || '').trim())
-        );
-        const currentSourcePositionsByCondition = groupBy(
-            currentSourcePositions,
-            (item) => item.conditionId
-        );
+        if (!argv.skipRemote) {
+            for (const profile of selectedProfiles) {
+                profile.remote = await fetchConditionResolution({
+                    conditionId: profile.conditionId,
+                    marketSlug: profile.marketSlug,
+                    clobHttpUrl,
+                    gammaApiUrl,
+                    userAgent: 'polymarket-copytrading-bot/trace-settlement-audit',
+                });
+            }
+        }
 
-        const conditions = effectiveConditionIds
-            .map((conditionId) => ({
-                conditionId,
-                positions: positionsByCondition.get(conditionId) || [],
-                activities: activitiesByCondition.get(conditionId) || [],
-            }))
-            .filter((item) => item.positions.length > 0 || item.activities.length > 0);
+        const issueCounts = new Map();
+        const countIssue = (id) => issueCounts.set(id, (issueCounts.get(id) || 0) + 1);
 
-        const conditionDetails = await Promise.all(
-            conditions.map(async ({ conditionId, positions: localPositions, activities }) => {
-                const metadata = selectConditionMetadata(activities, localPositions);
-                const resolution = await fetchMarketResolution(
-                    conditionId,
-                    metadata.marketSlug,
-                    metadata.title
+        for (const profile of selectedProfiles) {
+            const hasTask = profile.taskStatus !== 'missing';
+            const hasResidual = profile.openPositionCount > 0 || profile.sourcePendingCount > 0;
+            const taskOverdue =
+                hasTask &&
+                !['settled', 'closed'].includes(profile.taskStatus) &&
+                profile.taskNextRetryAt > 0 &&
+                profile.taskNextRetryAt <= now;
+            const remoteResolved = lowerText(profile.remote?.status, '') === 'resolved';
+
+            if (!hasTask && hasResidual) {
+                addFinding(profile, 'missing_task', '存在残留事件/仓位但缺少 settlement task');
+                countIssue('missing_task');
+            }
+
+            if (remoteResolved && !['settled', 'closed'].includes(profile.taskStatus)) {
+                addFinding(profile, 'resolved_not_settled', '远程已 resolved，但本地任务未 settled');
+                countIssue('resolved_not_settled');
+            }
+
+            if (profile.taskStatus === 'settled' && hasResidual) {
+                addFinding(profile, 'settled_with_residual', '任务已 settled，但仍有残留 source/position');
+                countIssue('settled_with_residual');
+            }
+
+            if (taskOverdue) {
+                addFinding(profile, 'task_overdue', '任务已到 nextRetryAt 但仍未完成');
+                countIssue('task_overdue');
+            }
+
+            if (profile.taskRetryCount >= 3) {
+                addFinding(profile, 'high_retry', `任务重试次数偏高（${profile.taskRetryCount}）`);
+                countIssue('high_retry');
+            }
+
+            if (profile.executionFailedCount + profile.executionRetryCount > 0) {
+                addFinding(
+                    profile,
+                    'execution_failures',
+                    `execution failed/retry=${profile.executionFailedCount + profile.executionRetryCount}`
                 );
-                const winnerPosition = localPositions.find(
-                    (item) =>
-                        String(item.outcome || '')
-                            .trim()
-                            .toLowerCase() ===
-                        String(resolution.winner || '')
-                            .trim()
-                            .toLowerCase()
-                );
-                const currentValue = sumBy(localPositions, (item) => item.marketValue);
-                const totalCost = sumBy(localPositions, (item) => item.costBasis);
-                const priceSum = sumBy(localPositions, (item) => item.marketPrice);
-                const samePrice =
-                    localPositions.length === 2 &&
-                    Math.abs(
-                        toSafeNumber(localPositions[0]?.marketPrice) -
-                            toSafeNumber(localPositions[1]?.marketPrice)
-                    ) < 1e-9;
-                const impossibleBinaryPrice =
-                    localPositions.length === 2 &&
-                    (samePrice || priceSum < 0.99 || priceSum > 1.01);
-                const expectedValue = isResolved(resolution)
-                    ? toSafeNumber(winnerPosition?.size)
-                    : currentValue;
-                const localSettleExecutions = filteredExecutions.filter(
-                    (item) =>
-                        item.conditionId === conditionId &&
-                        item.executionCondition === 'settle' &&
-                        item.status === 'FILLED'
-                ).length;
-                const sourceTypeCounts = buildSourceActivitySummary(activities);
-                const sourceCurrentPositionsForCondition =
-                    currentSourcePositionsByCondition.get(conditionId) || [];
+                countIssue('execution_failures');
+            }
+        }
 
-                return {
-                    conditionId,
-                    title: metadata.title || resolution.title || localPositions[0]?.title || '',
-                    marketSlug: metadata.marketSlug,
-                    marketUrl: resolution.marketUrl,
-                    resolvedStatus: resolution.resolvedStatus,
-                    winner: resolution.winner,
-                    updateDescription: resolution.updateDescription,
-                    resolutionError: resolution.error,
-                    local: {
-                        positionCount: localPositions.length,
-                        openOutcomeCount: localPositions.filter(
-                            (item) => toSafeNumber(item.size) > 0
-                        ).length,
-                        currentValue,
-                        totalCost,
-                        expectedValue,
-                        mispricingDelta: currentValue - expectedValue,
-                        winningSize: toSafeNumber(winnerPosition?.size),
-                        impossibleBinaryPrice,
-                        priceSum,
-                        samePrice,
-                        outcomes: localPositions
-                            .map((item) => ({
-                                outcome: item.outcome,
-                                asset: item.asset,
-                                size: toSafeNumber(item.size),
-                                costBasis: toSafeNumber(item.costBasis),
-                                marketPrice: toSafeNumber(item.marketPrice),
-                                marketValue: toSafeNumber(item.marketValue),
-                            }))
-                            .sort((left, right) =>
-                                String(left.outcome || '').localeCompare(
-                                    String(right.outcome || '')
-                                )
-                            ),
-                        settleExecutionCount: localSettleExecutions,
-                    },
-                    source: {
-                        activitySummary: sourceTypeCounts,
-                        currentPositionsMatched: sourceCurrentPositionsForCondition.length,
-                        currentPositions: sourceCurrentPositionsForCondition.map((item) => ({
-                            outcome: item.outcome,
-                            asset: item.asset,
-                            size: toSafeNumber(item.size),
-                            curPrice: toSafeNumber(item.curPrice),
-                            currentValue: toSafeNumber(item.currentValue),
-                            redeemable: Boolean(item.redeemable),
-                            mergeable: Boolean(item.mergeable),
-                        })),
-                    },
-                };
-            })
-        );
+        const taskReasonCounts = new Map();
+        for (const profile of selectedProfiles) {
+            const reason = normalizeText(profile.taskReason, 'UNKNOWN');
+            if (reason === 'UNKNOWN') {
+                continue;
+            }
 
-        const hasExplicitConditionFilter = argv.conditionIds.length > 0;
-        const resolvedWithWinner = conditionDetails.filter(
-            (item) => isResolved(item) && String(item.winner || '').trim() !== ''
-        );
-        const expectedPositionValue = sumBy(conditionDetails, (item) => item.local.expectedValue);
-        const currentPositionValue = sumBy(conditionDetails, (item) => item.local.currentValue);
-        const cashBalance = toSafeNumber(portfolio?.cashBalance);
-        const globalCurrentTotalEquity =
-            portfolio?.totalEquity !== undefined
-                ? toSafeNumber(portfolio.totalEquity)
-                : cashBalance + currentPositionValue;
-        const globalCurrentNetPnl =
-            portfolio?.netPnl !== undefined
-                ? toSafeNumber(portfolio.netPnl)
-                : globalCurrentTotalEquity - toSafeNumber(portfolio?.initialBalance);
-        const expectedTotalEquity = hasExplicitConditionFilter
-            ? null
-            : cashBalance + expectedPositionValue;
-        const impossibleBinaryConditions = conditionDetails.filter(
-            (item) => item.local.impossibleBinaryPrice
-        );
-        const sourcePositionMatchedConditions = unique(
-            currentSourcePositions
-                .map((item) => String(item.conditionId || '').trim())
-                .filter(Boolean)
+            taskReasonCounts.set(reason, (taskReasonCounts.get(reason) || 0) + 1);
+        }
+
+        const taskStatusCounts = toSerializableCounts(
+            countBy(selectedProfiles, (profile) => normalizeText(profile.taskStatus, 'missing')),
+            10
         );
 
         const summary = {
-            generatedAt: new Date().toISOString(),
-            envPath: ENV_FILE_PATH,
-            traceId,
-            userAddress,
-            mongoUri,
-            scope: {
-                conditionIds: effectiveConditionIds,
-                conditionCount: effectiveConditionIds.length,
-                hasExplicitConditionFilter,
-                derivedFrom: hasExplicitConditionFilter
-                    ? 'cli'
-                    : 'positions+executions+sourceActivities',
+            input: {
+                scopeKey: scope.scopeKey,
+                scopeSource: scope.scopeSource,
+                range,
+                rangeLabel: formatRangeLabel(range),
+                skipRemote: argv.skipRemote,
+                envFilePath: ENV_FILE_PATH,
+                mongoUriLoadedFrom: argv.mongoUri ? '--mongo-uri' : 'MONGO_URI',
+                filterConditionIds: argv.conditionIds,
             },
-            collections: collectionNames,
-            portfolio: {
-                scope: 'global',
-                initialBalance: toSafeNumber(portfolio?.initialBalance),
-                cashBalance,
-                currentPositionsMarketValue:
-                    portfolio?.positionsMarketValue !== undefined
-                        ? toSafeNumber(portfolio.positionsMarketValue)
-                        : currentPositionValue,
-                currentTotalEquity: globalCurrentTotalEquity,
-                currentNetPnl: globalCurrentNetPnl,
-            },
-            scoped: {
-                scope: hasExplicitConditionFilter ? 'condition-filtered' : 'all-conditions',
-                currentPositionValue,
-                expectedPositionValue,
-                positionValueDelta: currentPositionValue - expectedPositionValue,
-            },
-            expected: {
-                expectedTotalEquity,
-                expectedNetPnl:
-                    expectedTotalEquity === null
-                        ? null
-                        : expectedTotalEquity - toSafeNumber(portfolio?.initialBalance),
-                equityDeltaVsCurrent:
-                    expectedTotalEquity === null
-                        ? null
-                        : globalCurrentTotalEquity - expectedTotalEquity,
-            },
-            localExecutionSummary: {
-                totalExecutions: filteredExecutions.length,
-                filledCount: filteredExecutions.filter((item) => item.status === 'FILLED').length,
-                skippedCount: filteredExecutions.filter((item) => item.status === 'SKIPPED').length,
-                failedCount: filteredExecutions.filter((item) => item.status === 'FAILED').length,
-                settleFilledCount: filteredExecutions.filter(
-                    (item) => item.executionCondition === 'settle' && item.status === 'FILLED'
+            collections,
+            overview: {
+                conditionUniverseCount: profiles.length,
+                selectedCount: selectedProfiles.length,
+                openPositionConditionCount: selectedProfiles.filter((profile) => profile.openPositionCount > 0).length,
+                pendingSourceConditionCount: selectedProfiles.filter((profile) => profile.sourcePendingCount > 0).length,
+                taskStatusCounts,
+                resolvedNotSettledCount: selectedProfiles.filter((profile) =>
+                    lowerText(profile.remote?.status, '') === 'resolved' &&
+                    !['settled', 'closed'].includes(profile.taskStatus)
                 ).length,
-                executionConditionSummary: buildExecutionConditionSummary(filteredExecutions),
-                topSkippedReasons: buildSkipReasonSummary(filteredExecutions, argv.topSkipReasons),
+                settledWithResidualCount: selectedProfiles.filter(
+                    (profile) =>
+                        profile.taskStatus === 'settled' &&
+                        (profile.sourcePendingCount > 0 || profile.openPositionCount > 0)
+                ).length,
             },
-            sourceSummary: {
-                currentPositionsApiError: sourcePositionsResponse.error,
-                currentPositionsMatchedConditionCount: sourcePositionMatchedConditions.length,
-                currentPositionsMatchedRowCount: currentSourcePositions.length,
-                redeemableCount: currentSourcePositions.filter((item) => Boolean(item.redeemable))
-                    .length,
-                mergeableCount: currentSourcePositions.filter((item) => Boolean(item.mergeable))
-                    .length,
-                activitySummary: buildSourceActivitySummary(filteredActivities),
-            },
-            conditionSummary: {
-                totalConditions: conditionDetails.length,
-                resolvedCount: conditionDetails.filter((item) => isResolved(item)).length,
-                resolvedWithWinnerCount: resolvedWithWinner.length,
-                impossibleBinaryPriceCount: impossibleBinaryConditions.length,
-                unresolvedCount: conditionDetails.filter((item) => !isResolved(item)).length,
-                resolutionErrorCount: conditionDetails.filter((item) => item.resolutionError)
-                    .length,
-            },
-            topMismatches: [...conditionDetails]
-                .sort(
-                    (left, right) =>
-                        Math.abs(right.local.mispricingDelta) - Math.abs(left.local.mispricingDelta)
-                )
-                .slice(0, argv.topConditions),
-            allConditions: [...conditionDetails].sort((left, right) =>
-                String(left.title || '').localeCompare(String(right.title || ''))
-            ),
-            warnings: [
-                filteredExecutions.filter(
-                    (item) => item.executionCondition === 'settle' && item.status === 'FILLED'
-                ).length === 0 && resolvedWithWinner.length > 0
-                    ? '本地 trace 执行记录中没有 settle 成交，但已检测到多个市场实际已 resolved。'
-                    : '',
-                sourcePositionMatchedConditions.length === 0 && resolvedWithWinner.length > 0
-                    ? '源钱包当前持仓接口已无法返回这些已结算 condition，说明仅依赖 current positions/redeemable 无法完成补结算。'
-                    : '',
-                impossibleBinaryConditions.length > 0
-                    ? `检测到 ${impossibleBinaryConditions.length} 个二元市场价格违反 sum≈1 约束，存在 outcome 错配或标价串边风险。`
-                    : '',
-                hasExplicitConditionFilter
-                    ? '当前启用了 --condition-id，portfolio/cash 仍代表全局组合，请优先关注 scoped 持仓价值偏差。'
-                    : '',
-            ].filter(Boolean),
+            issueCounts: takeTopEntries(issueCounts, 10).map(([id, count]) => ({ id, count })),
+            topTaskReasons: takeTopEntries(taskReasonCounts, argv.topReasons).map(([reason, count]) => ({
+                reason,
+                count,
+            })),
+            conditions: selectedProfiles.map((profile) => ({
+                conditionId: profile.conditionId,
+                title: profile.title,
+                marketSlug: profile.marketSlug,
+                taskStatus: profile.taskStatus,
+                taskRetryCount: profile.taskRetryCount,
+                taskReason: profile.taskReason,
+                taskNextRetryAt: profile.taskNextRetryAt,
+                taskLastCheckedAt: profile.taskLastCheckedAt,
+                taskWinnerOutcome: profile.taskWinnerOutcome,
+                sourcePendingCount: profile.sourcePendingCount,
+                sourceFailedCount: profile.sourceFailedCount,
+                sourceStatusCounts: toSerializableCounts(profile.sourceStatusCounts, 10),
+                sourceLatestTs: profile.sourceLatestTs,
+                executionFailedCount: profile.executionFailedCount,
+                executionRetryCount: profile.executionRetryCount,
+                executionStatusCounts: toSerializableCounts(profile.executionStatusCounts, 10),
+                executionLatestTs: profile.executionLatestTs,
+                openPositionCount: profile.openPositionCount,
+                openPositionSize: profile.openPositionSize,
+                redeemableSize: profile.redeemableSize,
+                remoteStatus: normalizeText(profile.remote?.status, argv.skipRemote ? 'skipped' : 'unknown'),
+                remoteWinnerOutcome: normalizeText(profile.remote?.winnerOutcome, ''),
+                remoteSource: normalizeText(profile.remote?.source, argv.skipRemote ? 'skipped' : 'unknown'),
+                remoteError: normalizeText(profile.remote?.error, ''),
+                findings: profile.findings,
+                riskScore: profile.riskScore,
+            })),
+            suggestions: [],
         };
+
+        pushSuggestion(
+            summary.suggestions,
+            summary.overview.resolvedNotSettledCount > 0,
+            `存在 ${summary.overview.resolvedNotSettledCount} 个 condition 远程已 resolved 但本地未 settled，建议优先排查 settlement 调度。`
+        );
+        pushSuggestion(
+            summary.suggestions,
+            summary.overview.settledWithResidualCount > 0,
+            `存在 ${summary.overview.settledWithResidualCount} 个 condition 已 settled 但仍有残留，建议复核回收和事件清理逻辑。`
+        );
+
+        const overdueIssue = summary.issueCounts.find((item) => item.id === 'task_overdue')?.count || 0;
+        pushSuggestion(
+            summary.suggestions,
+            overdueIssue > 0,
+            `存在 ${overdueIssue} 个 task_overdue，建议检查 nextRetryAt 计算与 worker 轮询频率。`
+        );
+
+        const highRetryIssue = summary.issueCounts.find((item) => item.id === 'high_retry')?.count || 0;
+        pushSuggestion(
+            summary.suggestions,
+            highRetryIssue > 0,
+            `存在 ${highRetryIssue} 个高重试任务，建议按 reason 维度做熔断或退避分级。`
+        );
+
+        if (!argv.skipRemote) {
+            const remoteErrorCount = summary.conditions.filter((item) => item.remoteError).length;
+            pushSuggestion(
+                summary.suggestions,
+                remoteErrorCount > 0,
+                `远程解析有 ${remoteErrorCount} 条失败记录，建议检查 API 可用性或加重试缓存。`
+            );
+        }
+
+        if (summary.suggestions.length === 0) {
+            summary.suggestions.push('当前审计窗口未发现明显结算异常，建议持续采样并观察问题分类趋势。');
+        }
 
         if (argv.json) {
             console.log(JSON.stringify(summary, null, 2));
             return;
         }
 
-        const lines = [];
-        lines.push('Trace 结算审计');
-        lines.push(`统计时间: ${summary.generatedAt}`);
-        lines.push(`Trace ID: ${traceId}`);
-        lines.push(`源钱包: ${userAddress}`);
-        lines.push('');
-        lines.push('全局组合:');
-        lines.push(`- 现金余额: ${formatUsd(summary.portfolio.cashBalance)}`);
-        lines.push(`- 当前持仓市值: ${formatUsd(summary.portfolio.currentPositionsMarketValue)}`);
-        lines.push(`- 当前总权益: ${formatUsd(summary.portfolio.currentTotalEquity)}`);
-        lines.push(`- 当前净收益: ${formatUsd(summary.portfolio.currentNetPnl)}`);
-        lines.push('');
-        lines.push('当前审计范围:');
-        lines.push(`- 当前持仓价值: ${formatUsd(summary.scoped.currentPositionValue)}`);
-        lines.push(`- 预期持仓价值: ${formatUsd(summary.scoped.expectedPositionValue)}`);
-        lines.push(`- 持仓价值偏差: ${formatUsd(summary.scoped.positionValueDelta)}`);
-        if (summary.expected.expectedTotalEquity !== null) {
-            lines.push('');
-            lines.push('按实际结算重算:');
-            lines.push(`- 预期总权益: ${formatUsd(summary.expected.expectedTotalEquity)}`);
-            lines.push(`- 相对当前账本偏差: ${formatUsd(summary.expected.equityDeltaVsCurrent)}`);
-        }
-        lines.push('');
-        lines.push('执行概览:');
-        lines.push(`- 总执行数: ${summary.localExecutionSummary.totalExecutions}`);
-        lines.push(`- FILLED: ${summary.localExecutionSummary.filledCount}`);
-        lines.push(`- SKIPPED: ${summary.localExecutionSummary.skippedCount}`);
-        lines.push(`- FAILED: ${summary.localExecutionSummary.failedCount}`);
-        lines.push(`- settle 成交数: ${summary.localExecutionSummary.settleFilledCount}`);
-        lines.push('');
-        lines.push('源侧概览:');
-        lines.push(
-            `- 当前 positions API 匹配 condition 数: ${summary.sourceSummary.currentPositionsMatchedConditionCount}`
-        );
-        lines.push(
-            `- 当前 positions API 匹配持仓行数: ${summary.sourceSummary.currentPositionsMatchedRowCount}`
-        );
-        lines.push(`- redeemable 行数: ${summary.sourceSummary.redeemableCount}`);
-        lines.push(`- mergeable 行数: ${summary.sourceSummary.mergeableCount}`);
-        if (summary.sourceSummary.currentPositionsApiError) {
-            lines.push(`- positions API 错误: ${summary.sourceSummary.currentPositionsApiError}`);
-        }
-        lines.push('');
-        lines.push('主要跳过原因:');
-        summary.localExecutionSummary.topSkippedReasons.forEach((item) => {
-            lines.push(`- ${item.count} 次: ${item.reason}`);
-        });
-        lines.push('');
-        lines.push('源活动分布:');
-        summary.sourceSummary.activitySummary.forEach((item) => {
-            lines.push(
-                `- ${item.type} / ${item.executionIntent} / ${item.botStatus}: ${item.count}`
-            );
-        });
-        lines.push('');
-        lines.push('偏差最大的市场:');
-        summary.topMismatches
-            .filter(item=>formatNumber(item.local.mispricingDelta)>0).forEach((item) => {
-            lines.push(
-                `- ${item.title} | winner=${item.winner || '未知'} | 当前=${formatNumber(
-                    item.local.currentValue
-                )} | 预期=${formatNumber(item.local.expectedValue)} | 偏差=${formatNumber(
-                    item.local.mispricingDelta
-                )} | ${item.marketUrl || '无市场链接'}`
-            );
-        });
-
-        if (summary.warnings.length > 0) {
-            lines.push('');
-            lines.push('警告:');
-            summary.warnings.forEach((item) => {
-                lines.push(`- ${item}`);
-            });
-        }
-
-        console.log(lines.join('\n'));
+        console.log(renderText(summary));
     } finally {
-        await mongoose.disconnect();
+        await closeMongo();
     }
 };
 
-main().catch((error) => {
-    console.error(`trace 审计失败: ${error.message}`);
+run().catch((error) => {
+    console.error(`trace-settlement-audit 执行失败: ${error?.message || error}`);
     process.exit(1);
 });

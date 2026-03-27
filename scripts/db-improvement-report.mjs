@@ -1,6 +1,5 @@
 import {
     ENV_FILE_PATH,
-    averageBy,
     buildTimeRange,
     buildTimeRangeFilter,
     closeMongo,
@@ -8,62 +7,38 @@ import {
     countBy,
     fetchCollectionDocs,
     fetchSingleDoc,
-    formatAgeMinutes,
     formatCount,
     formatPct,
     formatTimestamp,
     formatUsd,
-    getCopyExecutionBatchCollectionName,
-    getCopyIntentBufferCollectionName,
-    getTraceCollectionNames,
-    getTraceRuntimeNamespace,
-    getUserActivityCollectionName,
-    normalizeReason,
+    getCollectionIfExists,
     pct,
     pushSuggestion,
     quantile,
-    readEnv,
-    requireEnvValue,
     sumBy,
     takeTopEntries,
     toSafeNumber,
 } from './lib/runtime.mjs';
+import {
+    buildDateRangeFilter,
+    formatRangeLabel,
+    getScopedCollectionNames,
+    resolveMongoUri,
+    resolveScopeRuntime,
+} from './lib/scopeRuntime.mjs';
 
-const DEFAULT_MODE = readEnv('EXECUTION_MODE') === 'trace' ? 'trace' : 'live';
-const DEFAULT_TRACE_ID = readEnv('TRACE_ID') || 'default';
-const DEFAULT_USER_ADDRESS = readEnv('USER_ADDRESS') || '';
-const DEFAULT_MONGO_URI = readEnv('MONGO_URI') || '';
 const DEFAULT_TOP = 8;
-const BUY_MIN_TOP_UP_TRIGGER_USDC = Number.parseFloat(
-    readEnv('BUY_MIN_TOP_UP_TRIGGER_USDC') || '0.7'
-);
-const BOOTSTRAP_POLICY_IDS = new Set(['first-entry-ticket', 'buffer-min-top-up']);
-const SIGNAL_WEAK_POLICY_IDS = new Set(['signal-weak-ticket']);
-const SIGNAL_NORMAL_POLICY_IDS = new Set(['signal-fixed-ticket']);
-const SIGNAL_STRONG_POLICY_IDS = new Set(['signal-strong-ticket']);
-const SIGNAL_TICKET_POLICY_IDS = new Set([
-    ...SIGNAL_WEAK_POLICY_IDS,
-    ...SIGNAL_NORMAL_POLICY_IDS,
-    ...SIGNAL_STRONG_POLICY_IDS,
-]);
-const SIGNAL_SECOND_TICKET_POLICY_IDS = new Set(['signal-second-ticket']);
-const CONDITION_PAIR_LEADER_POLICY_IDS = new Set([
-    'condition-leader-entry',
-    'condition-strong-leader-entry',
-]);
-const CONDITION_PAIR_STRONG_LEADER_POLICY_IDS = new Set(['condition-strong-leader-entry']);
-const CONDITION_PAIR_HEDGE_POLICY_IDS = new Set(['condition-hedge-overlay']);
-const CONDITION_PAIR_POLICY_IDS = new Set([
-    ...CONDITION_PAIR_LEADER_POLICY_IDS,
-    ...CONDITION_PAIR_HEDGE_POLICY_IDS,
-]);
+const SOURCE_QUEUE_STATUSES = new Set(['pending', 'processing', 'retry']);
+const SOURCE_TERMINAL_STATUSES = new Set(['confirmed', 'skipped', 'failed']);
 
 const parseArgs = (argv) => {
     const parsed = {
-        mode: DEFAULT_MODE,
-        traceId: DEFAULT_TRACE_ID,
-        userAddress: DEFAULT_USER_ADDRESS,
-        mongoUri: DEFAULT_MONGO_URI,
+        scopeKey: '',
+        sourceWallet: '',
+        targetWallet: '',
+        runMode: '',
+        strategyKind: '',
+        mongoUri: '',
         hours: 24,
         sinceTs: 0,
         untilTs: 0,
@@ -85,20 +60,32 @@ const parseArgs = (argv) => {
             continue;
         }
 
-        if ((current === '--mode' || current === '-m') && argv[index + 1]) {
-            parsed.mode = argv[index + 1] === 'trace' ? 'trace' : 'live';
+        if ((current === '--scope-key' || current === '-s') && argv[index + 1]) {
+            parsed.scopeKey = argv[index + 1];
             index += 1;
             continue;
         }
 
-        if ((current === '--trace-id' || current === '-t') && argv[index + 1]) {
-            parsed.traceId = argv[index + 1];
+        if (current === '--source-wallet' && argv[index + 1]) {
+            parsed.sourceWallet = argv[index + 1];
             index += 1;
             continue;
         }
 
-        if ((current === '--user-address' || current === '-u') && argv[index + 1]) {
-            parsed.userAddress = argv[index + 1];
+        if (current === '--target-wallet' && argv[index + 1]) {
+            parsed.targetWallet = argv[index + 1];
+            index += 1;
+            continue;
+        }
+
+        if (current === '--run-mode' && argv[index + 1]) {
+            parsed.runMode = argv[index + 1];
+            index += 1;
+            continue;
+        }
+
+        if (current === '--strategy-kind' && argv[index + 1]) {
+            parsed.strategyKind = argv[index + 1];
             index += 1;
             continue;
         }
@@ -110,19 +97,19 @@ const parseArgs = (argv) => {
         }
 
         if (current === '--hours' && argv[index + 1]) {
-            parsed.hours = Math.max(Number(argv[index + 1]) || 0, 0);
+            parsed.hours = Math.max(toSafeNumber(argv[index + 1]), 0);
             index += 1;
             continue;
         }
 
         if (current === '--since-ts' && argv[index + 1]) {
-            parsed.sinceTs = Math.max(Number(argv[index + 1]) || 0, 0);
+            parsed.sinceTs = Math.max(toSafeNumber(argv[index + 1]), 0);
             index += 1;
             continue;
         }
 
         if (current === '--until-ts' && argv[index + 1]) {
-            parsed.untilTs = Math.max(Number(argv[index + 1]) || 0, 0);
+            parsed.untilTs = Math.max(toSafeNumber(argv[index + 1]), 0);
             index += 1;
             continue;
         }
@@ -140,28 +127,23 @@ const argv = parseArgs(process.argv.slice(2));
 
 if (argv.help) {
     console.log(`用法:
-  node scripts/db-improvement-report.mjs [--mode live|trace] [--trace-id default] [--user-address 0x...] [--hours 24] [--json]
+  node scripts/db-improvement-report.mjs [--scope-key key] [--hours 24] [--top 8] [--json]
+  node scripts/db-improvement-report.mjs --source-wallet 0x... --target-wallet 0x... --run-mode paper --strategy-kind signal
 
 说明:
-  1. 默认读取当前工作目录或项目根目录的 .env
-  2. 聚合 user_activities、copy_execution_batches、trace_executions 等集合，定位系统瓶颈
-  3. 默认统计最近 24 小时，可通过 --hours / --since-ts / --until-ts 覆盖
-  4. 输出会给出漏斗、主要原因与建议优化点
+  1. 基于新仓库结构读取 source_events / executions / settlement_tasks / positions / portfolios。
+  2. 默认统计最近 24 小时数据，可通过 --hours / --since-ts / --until-ts 覆盖。
+  3. scope 优先级：--scope-key > SCOPE_KEY > SOURCE_WALLET+TARGET_WALLET+RUN_MODE+STRATEGY_KIND。
 `);
     process.exit(0);
 }
 
-const getSourceTradeCount = (item) => Math.max(toSafeNumber(item?.sourceTradeCount, 1), 1);
-const hasPolicyId = (policyTrail, policyIds) =>
-    Array.isArray(policyTrail) &&
-    policyTrail.some((entry) => policyIds.has(String(entry?.policyId || '').trim()));
-const buildSignalConditionOutcomeKey = (item) =>
-    `${String(item?.conditionId || '').trim()}|${String(item?.asset || '').trim()}`;
+const normalizeText = (value, fallback = 'UNKNOWN') => String(value || '').trim() || fallback;
 
-const buildReasonSummary = (items, getter, top) => {
+const buildTopReasonItems = (items, valueGetter, top) => {
     const counts = new Map();
     for (const item of items) {
-        const reason = normalizeReason(getter(item));
+        const reason = normalizeText(valueGetter(item), 'UNKNOWN');
         if (reason === 'UNKNOWN') {
             continue;
         }
@@ -172,404 +154,34 @@ const buildReasonSummary = (items, getter, top) => {
     return takeTopEntries(counts, top).map(([reason, count]) => ({ reason, count }));
 };
 
-const buildKeyCountItems = (items, keyGetter, valueGetter, top) => {
+const buildTopConditionItems = (items, top) => {
     const counts = new Map();
     for (const item of items) {
-        const key = String(keyGetter(item) || '').trim() || 'UNKNOWN';
-        const nextValue = (counts.get(key) || 0) + toSafeNumber(valueGetter(item), 1);
-        counts.set(key, nextValue);
+        const conditionId = normalizeText(item?.conditionId, 'UNKNOWN');
+        if (conditionId === 'UNKNOWN') {
+            continue;
+        }
+
+        const snapshot = counts.get(conditionId) || { count: 0, usdc: 0 };
+        snapshot.count += 1;
+        snapshot.usdc += toSafeNumber(item?.usdcSize);
+        counts.set(conditionId, snapshot);
     }
 
-    return takeTopEntries(counts, top).map(([key, value]) => ({ key, value }));
-};
+    return [...counts.entries()]
+        .sort((left, right) => {
+            if (right[1].count !== left[1].count) {
+                return right[1].count - left[1].count;
+            }
 
-const summarizeSourceActivities = (activities, top) => {
-    const tradeActivities = activities.filter(
-        (item) => String(item.type || '').toUpperCase() === 'TRADE'
-    );
-    const buyTrades = tradeActivities.filter(
-        (item) => String(item.side || '').toUpperCase() === 'BUY'
-    );
-    const smallBuyTrades = buyTrades.filter((item) => toSafeNumber(item.usdcSize) < 1);
-    const mergedActivities = activities.filter((item) => getSourceTradeCount(item) > 1);
-    const totalRawTrades = sumBy(activities, (item) => getSourceTradeCount(item));
-    const totalRawBuyTrades = sumBy(buyTrades, (item) => getSourceTradeCount(item));
-    const totalMergedTradeSavings = Math.max(totalRawTrades - activities.length, 0);
-    const totalMergedBuySavings = Math.max(totalRawBuyTrades - buyTrades.length, 0);
-    const pendingStatuses = activities.filter(
-        (item) =>
-            !String(item.botStatus || '').trim() ||
-            String(item.botStatus || '').trim() === 'PENDING'
-    );
-
-    return {
-        totalDocs: activities.length,
-        totalRawTrades,
-        mergedActivityDocs: mergedActivities.length,
-        mergedTradeSavings: totalMergedTradeSavings,
-        mergeCompressionPct: pct(totalMergedTradeSavings, totalRawTrades),
-        byType: takeTopEntries(
-            countBy(activities, (item) => item.type || 'UNKNOWN'),
-            top
-        ).map(([key, value]) => ({ key, value })),
-        byExecutionIntent: takeTopEntries(
-            countBy(activities, (item) => item.executionIntent || 'UNSET'),
-            top
-        ).map(([key, value]) => ({ key, value })),
-        byBotStatus: takeTopEntries(
-            countBy(activities, (item) => item.botStatus || 'PENDING'),
-            top
-        ).map(([key, value]) => ({ key, value })),
-        bySnapshotStatus: takeTopEntries(
-            countBy(activities, (item) => item.snapshotStatus || 'UNKNOWN'),
-            top
-        ).map(([key, value]) => ({ key, value })),
-        topBotLastErrors: buildReasonSummary(activities, (item) => item.botLastError, top),
-        buyTradeSummary: {
-            totalDocs: buyTrades.length,
-            totalRawTrades: totalRawBuyTrades,
-            mergedDocs: buyTrades.filter((item) => getSourceTradeCount(item) > 1).length,
-            mergedTradeSavings: totalMergedBuySavings,
-            smallBuyDocs: smallBuyTrades.length,
-            smallBuyDocPct: pct(smallBuyTrades.length, buyTrades.length),
-            smallBuyRawTrades: sumBy(smallBuyTrades, (item) => getSourceTradeCount(item)),
-            requestedUsdcP25: quantile(
-                buyTrades.map((item) => item.usdcSize),
-                0.25
-            ),
-            requestedUsdcP50: quantile(
-                buyTrades.map((item) => item.usdcSize),
-                0.5
-            ),
-            requestedUsdcP75: quantile(
-                buyTrades.map((item) => item.usdcSize),
-                0.75
-            ),
-            requestedUsdcTotal: sumBy(buyTrades, (item) => item.usdcSize),
-        },
-        pendingCount: pendingStatuses.length,
-        topConditions: buildKeyCountItems(
-            activities,
-            (item) => item.title || item.conditionId || 'UNKNOWN',
-            (item) => getSourceTradeCount(item),
-            top
-        ).map((item) => ({
-            title: item.key,
-            rawTradeCount: item.value,
-        })),
-    };
-};
-
-const summarizeBatches = (batches, top) => {
-    const activeBatches = batches.filter((item) =>
-        ['READY', 'PROCESSING', 'SUBMITTED'].includes(String(item.status || '').toUpperCase())
-    );
-    const completedBatches = batches.filter((item) =>
-        ['CONFIRMED', 'SKIPPED', 'FAILED'].includes(String(item.status || '').toUpperCase())
-    );
-    const buyBatches = batches.filter(
-        (item) => String(item.condition || '').toLowerCase() === 'buy'
-    );
-    const signalBuyBatches = buyBatches.filter((item) =>
-        hasPolicyId(item.policyTrail, SIGNAL_TICKET_POLICY_IDS)
-    );
-    const signalTicketCountsByCondition = new Map();
-    for (const batch of signalBuyBatches) {
-        if (['SKIPPED', 'FAILED'].includes(String(batch.status || '').toUpperCase())) {
-            continue;
-        }
-
-        const key = buildSignalConditionOutcomeKey(batch);
-        signalTicketCountsByCondition.set(key, (signalTicketCountsByCondition.get(key) || 0) + 1);
-    }
-    const conditionPairBuyBatches = buyBatches.filter((item) =>
-        hasPolicyId(item.policyTrail, CONDITION_PAIR_POLICY_IDS)
-    );
-    const conditionPairActionCountsByCondition = new Map();
-    for (const batch of conditionPairBuyBatches) {
-        if (['SKIPPED', 'FAILED'].includes(String(batch.status || '').toUpperCase())) {
-            continue;
-        }
-
-        const conditionId = String(batch.conditionId || '').trim();
-        if (!conditionId) {
-            continue;
-        }
-
-        conditionPairActionCountsByCondition.set(
+            return right[1].usdc - left[1].usdc;
+        })
+        .slice(0, top)
+        .map(([conditionId, value]) => ({
             conditionId,
-            (conditionPairActionCountsByCondition.get(conditionId) || 0) + 1
-        );
-    }
-    const pairedConditionIds = new Set();
-    const leaderOnlyConditionIds = new Set();
-    for (const [conditionId, count] of conditionPairActionCountsByCondition.entries()) {
-        if (count >= 2) {
-            pairedConditionIds.add(conditionId);
-            continue;
-        }
-        leaderOnlyConditionIds.add(conditionId);
-    }
-    const buyConfirmedCount = buyBatches.filter(
-        (item) => String(item.status || '').toUpperCase() === 'CONFIRMED'
-    ).length;
-    const buySkippedCount = buyBatches.filter(
-        (item) => String(item.status || '').toUpperCase() === 'SKIPPED'
-    ).length;
-
-    return {
-        totalDocs: batches.length,
-        statusCounts: takeTopEntries(
-            countBy(batches, (item) => item.status || 'UNKNOWN'),
-            top
-        ).map(([key, value]) => ({ key, value })),
-        totalRequestedUsdc: sumBy(batches, (item) => item.requestedUsdc),
-        totalRequestedSize: sumBy(batches, (item) => item.requestedSize),
-        totalSourceTrades: sumBy(batches, (item) => getSourceTradeCount(item)),
-        avgSourceTradesPerBatch: averageBy(batches, (item) => getSourceTradeCount(item)),
-        retryingCount: batches.filter((item) => toSafeNumber(item.retryCount) > 0).length,
-        activeCount: activeBatches.length,
-        completedCount: completedBatches.length,
-        bootstrapBatchCount: buyBatches.filter((item) =>
-            hasPolicyId(item.policyTrail, BOOTSTRAP_POLICY_IDS)
-        ).length,
-        weakBatchCount: signalBuyBatches.filter((item) =>
-            hasPolicyId(item.policyTrail, SIGNAL_WEAK_POLICY_IDS)
-        ).length,
-        normalBatchCount: signalBuyBatches.filter((item) =>
-            hasPolicyId(item.policyTrail, SIGNAL_NORMAL_POLICY_IDS)
-        ).length,
-        strongBatchCount: signalBuyBatches.filter((item) =>
-            hasPolicyId(item.policyTrail, SIGNAL_STRONG_POLICY_IDS)
-        ).length,
-        secondTicketBatchCount: signalBuyBatches.filter((item) =>
-            hasPolicyId(item.policyTrail, SIGNAL_SECOND_TICKET_POLICY_IDS)
-        ).length,
-        maxTicketsPerConditionObserved:
-            signalTicketCountsByCondition.size > 0
-                ? Math.max(...signalTicketCountsByCondition.values())
-                : 0,
-        leaderEntryCount: conditionPairBuyBatches.filter((item) =>
-            hasPolicyId(item.policyTrail, CONDITION_PAIR_LEADER_POLICY_IDS)
-        ).length,
-        strongLeaderEntryCount: conditionPairBuyBatches.filter((item) =>
-            hasPolicyId(item.policyTrail, CONDITION_PAIR_STRONG_LEADER_POLICY_IDS)
-        ).length,
-        hedgeOverlayCount: conditionPairBuyBatches.filter((item) =>
-            hasPolicyId(item.policyTrail, CONDITION_PAIR_HEDGE_POLICY_IDS)
-        ).length,
-        pairedConditionCount: pairedConditionIds.size,
-        leaderOnlyConditionCount: leaderOnlyConditionIds.size,
-        maxActionsPerConditionObserved:
-            conditionPairActionCountsByCondition.size > 0
-                ? Math.max(...conditionPairActionCountsByCondition.values())
-                : 0,
-        buySlippageSkipCount: buyBatches.filter(
-            (item) =>
-                String(item.status || '').toUpperCase() === 'SKIPPED' &&
-                String(item.reason || '').includes('当前买价超出允许滑点')
-        ).length,
-        buyParticipationPct:
-            buyConfirmedCount + buySkippedCount > 0
-                ? pct(buyConfirmedCount, buyConfirmedCount + buySkippedCount)
-                : 0,
-        topReasons: buildReasonSummary(batches, (item) => item.reason, top),
-        submissionStatusCounts: takeTopEntries(
-            countBy(batches, (item) => item.submissionStatus || 'UNSET'),
-            top
-        ).map(([key, value]) => ({ key, value })),
-    };
-};
-
-const summarizeBuffers = (buffers, top) => {
-    const nearThresholdBuffers = buffers.filter((item) => {
-        const requestedUsdc = toSafeNumber(item.requestedUsdc);
-        return requestedUsdc >= BUY_MIN_TOP_UP_TRIGGER_USDC && requestedUsdc < 1;
-    });
-
-    return {
-        totalDocs: buffers.length,
-        stateCounts: takeTopEntries(
-            countBy(buffers, (item) => item.state || 'UNKNOWN'),
-            top
-        ).map(([key, value]) => ({ key, value })),
-        totalSourceTrades: sumBy(buffers, (item) => getSourceTradeCount(item)),
-        nearThresholdSkipCount: nearThresholdBuffers.filter(
-            (item) => String(item.state || '').toUpperCase() === 'SKIPPED'
-        ).length,
-        bufferTopUpConvertedCount: buffers.filter(
-            (item) =>
-                String(item.state || '').toUpperCase() === 'CLOSED' &&
-                hasPolicyId(item.policyTrail, new Set(['buffer-min-top-up']))
-        ).length,
-        topReasons: buildReasonSummary(buffers, (item) => item.reason, top),
-    };
-};
-
-const summarizeTraceExecutions = (executions, top) => {
-    const filled = executions.filter(
-        (item) => String(item.status || '').toUpperCase() === 'FILLED'
-    );
-    const skipped = executions.filter(
-        (item) => String(item.status || '').toUpperCase() === 'SKIPPED'
-    );
-    const failed = executions.filter(
-        (item) => String(item.status || '').toUpperCase() === 'FAILED'
-    );
-
-    return {
-        totalDocs: executions.length,
-        statusCounts: takeTopEntries(
-            countBy(executions, (item) => item.status || 'UNKNOWN'),
-            top
-        ).map(([key, value]) => ({ key, value })),
-        executionConditionCounts: takeTopEntries(
-            countBy(executions, (item) => item.executionCondition || 'UNKNOWN'),
-            top
-        ).map(([key, value]) => ({ key, value })),
-        totalRequestedUsdc: sumBy(executions, (item) => item.requestedUsdc),
-        totalExecutedUsdc: sumBy(executions, (item) => item.executedUsdc),
-        totalSourceTrades: sumBy(executions, (item) => getSourceTradeCount(item)),
-        filledCount: filled.length,
-        skippedCount: skipped.length,
-        failedCount: failed.length,
-        settleFilledCount: filled.filter(
-            (item) => String(item.executionCondition || '').toLowerCase() === 'settle'
-        ).length,
-        topReasons: buildReasonSummary([...skipped, ...failed], (item) => item.reason, top),
-    };
-};
-
-const summarizeTracePositions = (positions) => {
-    const openPositions = positions.filter((item) => toSafeNumber(item.size) > 0);
-    const bootstrapPositions = openPositions.filter(
-        (item) => toSafeNumber(item.bootstrapEntryUsdc) > 0
-    );
-
-    return {
-        totalDocs: positions.length,
-        openCount: openPositions.length,
-        activeBootstrapPositionCount: bootstrapPositions.length,
-        activeBootstrapExposureUsdc: sumBy(bootstrapPositions, (item) => item.bootstrapEntryUsdc),
-    };
-};
-
-const summarizeSettlementTasks = (tasks, top) => {
-    const now = Date.now();
-    const openTasks = tasks.filter((item) =>
-        ['PENDING', 'PROCESSING'].includes(String(item.status || '').toUpperCase())
-    );
-
-    const overdueTasks = openTasks.filter(
-        (item) => toSafeNumber(item.nextRetryAt) > 0 && toSafeNumber(item.nextRetryAt) <= now
-    );
-    const oldestOpenTaskTs = openTasks.reduce((minTs, item) => {
-        const candidate = toSafeNumber(item.sourceTimestamp || item.createdAt);
-        if (candidate <= 0) {
-            return minTs;
-        }
-
-        if (minTs <= 0) {
-            return candidate;
-        }
-
-        return Math.min(minTs, candidate);
-    }, 0);
-
-    return {
-        totalDocs: tasks.length,
-        statusCounts: takeTopEntries(
-            countBy(tasks, (item) => item.status || 'UNKNOWN'),
-            top
-        ).map(([key, value]) => ({ key, value })),
-        overdueCount: overdueTasks.length,
-        openCount: openTasks.length,
-        oldestOpenTaskAt: oldestOpenTaskTs,
-        oldestOpenAgeMinutes:
-            oldestOpenTaskTs > 0 ? (Date.now() - oldestOpenTaskTs) / (60 * 1000) : 0,
-        topReasons: buildReasonSummary(tasks, (item) => item.reason, top),
-    };
-};
-
-const buildSuggestions = ({
-    mode,
-    sourceActivitySummary,
-    batchSummary,
-    bufferSummary,
-    traceExecutionSummary,
-    settlementSummary,
-}) => {
-    const suggestions = [];
-    const smallBuyPct = toSafeNumber(sourceActivitySummary?.buyTradeSummary?.smallBuyDocPct);
-    const mergeCompressionPct = toSafeNumber(sourceActivitySummary?.mergeCompressionPct);
-    const staleOrPartialSnapshots =
-        sumBy(sourceActivitySummary?.bySnapshotStatus || [], (item) =>
-            ['PARTIAL', 'STALE'].includes(String(item.key || '').toUpperCase()) ? item.value : 0
-        ) || 0;
-    const snapshotTotal = sumBy(
-        sourceActivitySummary?.bySnapshotStatus || [],
-        (item) => item.value
-    );
-    const retryRate = pct(batchSummary?.retryingCount, batchSummary?.totalDocs);
-
-    pushSuggestion(
-        suggestions,
-        smallBuyPct >= 25 && mergeCompressionPct <= 10,
-        '小额买单占比仍高且监视器压缩收益有限，优先继续优化监视器合并键或扩大相邻合并窗口。'
-    );
-    pushSuggestion(
-        suggestions,
-        pct(staleOrPartialSnapshots, snapshotTotal) >= 20,
-        '源账户快照中 PARTIAL/STALE 占比偏高，建议继续补快照质量告警，并优先修复快照缺口导致的定额失真。'
-    );
-    pushSuggestion(
-        suggestions,
-        retryRate >= 20,
-        '执行批次重试率偏高，建议结合运行日志继续拆分确认异常、滑点失败、余额读取失败等原因。'
-    );
-    pushSuggestion(
-        suggestions,
-        toSafeNumber(bufferSummary?.nearThresholdSkipCount) > 0,
-        '仍有接近 1 USDC 门槛的累计缓冲被放弃，优先检查 buffer 补齐策略是否生效，以及 flush 时是否仍被并发批次占住。'
-    );
-    pushSuggestion(
-        suggestions,
-        toSafeNumber(batchSummary?.buyParticipationPct) < 50 &&
-            toSafeNumber(batchSummary?.totalDocs) > 0,
-        'buy 批次参与率仍偏低，建议同时观察近门槛 buffer 损耗和滑点跳过批次，优先减少延迟造成的错失。'
-    );
-    pushSuggestion(
-        suggestions,
-        toSafeNumber(bufferSummary?.totalDocs) > 0,
-        '库中仍存在 legacy copy_intent_buffers，建议清理旧集合或确认没有残余旧链路在回写。'
-    );
-
-    if (mode === 'trace') {
-        pushSuggestion(
-            suggestions,
-            toSafeNumber(settlementSummary?.overdueCount) > 0,
-            'trace 结算任务存在逾期未处理 condition，建议检查结算 worker 调度、市场解析缓存和重试退避。'
-        );
-        pushSuggestion(
-            suggestions,
-            pct(traceExecutionSummary?.skippedCount, traceExecutionSummary?.totalDocs) >= 40,
-            'trace 跳过率仍高，建议把 top skip reason 与目标账户交易画像一起看，确认是否还需要更激进的监视器合并或补齐策略。'
-        );
-    } else {
-        pushSuggestion(
-            suggestions,
-            pct(sourceActivitySummary?.pendingCount, sourceActivitySummary?.totalDocs) >= 20,
-            '源活动里待处理记录占比偏高，建议继续收紧执行器主循环里的积压监控和批次老化告警。'
-        );
-    }
-
-    if (suggestions.length === 0) {
-        suggestions.push(
-            '当前库内指标未出现明显单点瓶颈，下一步建议结合运行日志脚本进一步查看异常聚类。'
-        );
-    }
-
-    return suggestions;
+            count: value.count,
+            usdc: value.usdc,
+        }));
 };
 
 const renderTopItems = (title, items, formatter) => {
@@ -586,189 +198,89 @@ const renderTopItems = (title, items, formatter) => {
     return lines;
 };
 
-const renderTextSummary = (summary) => {
+const serializeIndexKey = (keySpec) =>
+    Object.entries(keySpec || {})
+        .map(([key, value]) => `${key}:${value}`)
+        .join(',');
+
+const checkExpectedIndexes = (indexes, expected) => {
+    const missing = [];
+
+    for (const item of expected) {
+        const expectedSignature = serializeIndexKey(item.key);
+        const matched = indexes.some((index) => {
+            const sameKey = serializeIndexKey(index.key) === expectedSignature;
+            if (!sameKey) {
+                return false;
+            }
+
+            if (item.unique === undefined) {
+                return true;
+            }
+
+            return Boolean(index.unique) === Boolean(item.unique);
+        });
+
+        if (!matched) {
+            missing.push(item.label);
+        }
+    }
+
+    return missing;
+};
+
+const formatLatencyMinutes = (minutes) => {
+    if (minutes <= 0) {
+        return '-';
+    }
+
+    return `${minutes.toFixed(1)} 分钟`;
+};
+
+const renderSummaryText = (summary) => {
     const lines = [];
-    lines.push('DB 改进点分析');
-    lines.push(`- 模式: ${summary.input.mode}`);
+
+    lines.push('DB 改进报告（新集合版）');
+    lines.push(`- scopeKey: ${summary.input.scopeKey}`);
+    lines.push(`- scope 来源: ${summary.input.scopeSource}`);
     lines.push(`- 时间范围: ${summary.input.rangeLabel}`);
-    lines.push(`- 用户地址: ${summary.input.userAddress}`);
+    lines.push(`- env 路径: ${summary.input.envFilePath}`);
 
     lines.push('');
-    lines.push('源活动概览');
-    lines.push(`- 文档数: ${formatCount(summary.sourceActivities.totalDocs)}`);
-    lines.push(`- 折算原始交易数: ${formatCount(summary.sourceActivities.totalRawTrades)}`);
-    lines.push(
-        `- 已压缩交易数: ${formatCount(summary.sourceActivities.mergedTradeSavings)} (${formatPct(summary.sourceActivities.mergeCompressionPct)})`
-    );
-    lines.push(`- BUY 文档数: ${formatCount(summary.sourceActivities.buyTradeSummary.totalDocs)}`);
-    lines.push(
-        `- BUY 中 <1u 占比: ${formatPct(summary.sourceActivities.buyTradeSummary.smallBuyDocPct)}`
-    );
-    lines.push(
-        `- BUY usdc 分位: P25=${formatUsd(summary.sourceActivities.buyTradeSummary.requestedUsdcP25)} P50=${formatUsd(summary.sourceActivities.buyTradeSummary.requestedUsdcP50)} P75=${formatUsd(summary.sourceActivities.buyTradeSummary.requestedUsdcP75)}`
-    );
-    lines.push(
-        ...renderTopItems(
-            '活动类型',
-            summary.sourceActivities.byType,
-            (item) => `${item.key}: ${item.value}`
-        )
-    );
-    lines.push(
-        ...renderTopItems(
-            '执行状态',
-            summary.sourceActivities.byBotStatus,
-            (item) => `${item.key}: ${item.value}`
-        )
-    );
-    lines.push(
-        ...renderTopItems(
-            '快照状态',
-            summary.sourceActivities.bySnapshotStatus,
-            (item) => `${item.key}: ${item.value}`
-        )
-    );
-    lines.push(
-        ...renderTopItems(
-            '主要 botLastError',
-            summary.sourceActivities.topBotLastErrors,
-            (item) => `${item.reason}: ${item.count}`
-        )
-    );
+    lines.push('入口队列');
+    lines.push(`- source_events 文档: ${formatCount(summary.source.total)}`);
+    lines.push(`- 队列积压(pending+processing+retry): ${formatCount(summary.source.queueCount)} (${formatPct(summary.source.queuePct)})`);
+    lines.push(`- 队列年龄 P50 / P90: ${formatLatencyMinutes(summary.source.queueAgeP50Minutes)} / ${formatLatencyMinutes(summary.source.queueAgeP90Minutes)}`);
+    lines.push(`- EXECUTE 终态无 execution 记录: ${formatCount(summary.source.terminalWithoutExecutionCount)}`);
+    lines.push(...renderTopItems('Source 状态分布', summary.source.statusCounts, (item) => `${item.key}: ${item.value}`));
+    lines.push(...renderTopItems('Source 失败原因', summary.source.topErrors, (item) => `${item.reason}: ${item.count}`));
+    lines.push(...renderTopItems('队列热点条件', summary.source.queueTopConditions, (item) => `${item.conditionId}: ${item.count} 条，${formatUsd(item.usdc)}`));
 
     lines.push('');
-    lines.push('执行批次概览');
-    lines.push(`- 批次数: ${formatCount(summary.batches.totalDocs)}`);
-    lines.push(`- 批次覆盖源交易数: ${formatCount(summary.batches.totalSourceTrades)}`);
-    lines.push(
-        `- 平均每批覆盖源交易: ${toSafeNumber(summary.batches.avgSourceTradesPerBatch).toFixed(2)}`
-    );
-    lines.push(`- 重试批次数: ${formatCount(summary.batches.retryingCount)}`);
-    lines.push(`- Buy 批次参与率: ${formatPct(summary.batches.buyParticipationPct)}`);
-    lines.push(`- Bootstrap 批次数: ${formatCount(summary.batches.bootstrapBatchCount)}`);
-    lines.push(
-        `- 信号批次 弱/普通/强/第二枪: ` +
-            `${formatCount(summary.batches.weakBatchCount)}/` +
-            `${formatCount(summary.batches.normalBatchCount)}/` +
-            `${formatCount(summary.batches.strongBatchCount)}/` +
-            `${formatCount(summary.batches.secondTicketBatchCount)}`
-    );
-    lines.push(
-        `- 同 condition 最大跟单次数观测值: ${formatCount(summary.batches.maxTicketsPerConditionObserved)}`
-    );
-    lines.push(
-        `- 配对覆盖批次 leader/strong leader/hedge: ` +
-            `${formatCount(summary.batches.leaderEntryCount)}/` +
-            `${formatCount(summary.batches.strongLeaderEntryCount)}/` +
-            `${formatCount(summary.batches.hedgeOverlayCount)}`
-    );
-    lines.push(
-        `- 配对覆盖 condition 仅 leader/已配对: ` +
-            `${formatCount(summary.batches.leaderOnlyConditionCount)}/` +
-            `${formatCount(summary.batches.pairedConditionCount)}`
-    );
-    lines.push(
-        `- 同 condition 最大动作次数观测值: ${formatCount(summary.batches.maxActionsPerConditionObserved)}`
-    );
-    lines.push(`- Buy 滑点跳过批次: ${formatCount(summary.batches.buySlippageSkipCount)}`);
-    lines.push(
-        ...renderTopItems(
-            '批次状态',
-            summary.batches.statusCounts,
-            (item) => `${item.key}: ${item.value}`
-        )
-    );
-    lines.push(
-        ...renderTopItems(
-            '批次原因',
-            summary.batches.topReasons,
-            (item) => `${item.reason}: ${item.count}`
-        )
-    );
+    lines.push('执行漏斗');
+    lines.push(`- executions 文档: ${formatCount(summary.execution.total)}`);
+    lines.push(`- 请求 / 实际成交: ${formatUsd(summary.execution.requestedUsdc)} / ${formatUsd(summary.execution.executedUsdc)}`);
+    lines.push(`- 成交兑现率: ${formatPct(summary.execution.fulfillmentPct)}`);
+    lines.push(`- 失败+重试占比: ${formatPct(summary.execution.failRetryPct)}`);
+    lines.push(...renderTopItems('Execution 状态分布', summary.execution.statusCounts, (item) => `${item.key}: ${item.value}`));
+    lines.push(...renderTopItems('Execution 原因 Top', summary.execution.topReasons, (item) => `${item.reason}: ${item.count}`));
+    lines.push(...renderTopItems('策略轨迹 Top', summary.execution.policyTrailCounts, (item) => `${item.key}: ${item.value}`));
 
     lines.push('');
-    lines.push('遗留缓冲区');
-    lines.push(`- 文档数: ${formatCount(summary.buffers.totalDocs)}`);
-    lines.push(`- 近门槛 buffer 跳过数: ${formatCount(summary.buffers.nearThresholdSkipCount)}`);
-    lines.push(`- buffer 补齐成批次数: ${formatCount(summary.buffers.bufferTopUpConvertedCount)}`);
-    lines.push(
-        ...renderTopItems(
-            '缓冲状态',
-            summary.buffers.stateCounts,
-            (item) => `${item.key}: ${item.value}`
-        )
-    );
+    lines.push('结算与持仓');
+    lines.push(`- settlement_tasks 文档: ${formatCount(summary.settlement.total)}`);
+    lines.push(`- 到期未处理任务: ${formatCount(summary.settlement.overdueCount)}`);
+    lines.push(`- 平均重试次数: ${summary.settlement.avgRetryCount.toFixed(2)}`);
+    lines.push(`- 当前 open positions: ${formatCount(summary.positions.openCount)}（redeemable: ${formatCount(summary.positions.redeemableCount)}）`);
+    lines.push(`- 最新组合权益 / 现金: ${formatUsd(summary.portfolio.totalEquity)} / ${formatUsd(summary.portfolio.cashBalance)}`);
+    lines.push(...renderTopItems('Settlement 状态分布', summary.settlement.statusCounts, (item) => `${item.key}: ${item.value}`));
+    lines.push(...renderTopItems('Settlement 原因 Top', summary.settlement.topReasons, (item) => `${item.reason}: ${item.count}`));
 
-    if (summary.tracePositions) {
-        lines.push('');
-        lines.push('Trace 仓位概览');
-        lines.push(`- 未平仓位数: ${formatCount(summary.tracePositions.openCount)}`);
-        lines.push(
-            `- 活跃 bootstrap 仓位数: ${formatCount(summary.tracePositions.activeBootstrapPositionCount)}`
-        );
-        lines.push(
-            `- 活跃 bootstrap 暴露: ${formatUsd(summary.tracePositions.activeBootstrapExposureUsdc)}`
-        );
-    }
-
-    if (summary.traceExecutions) {
-        lines.push('');
-        lines.push('Trace 执行概览');
-        lines.push(`- 执行记录数: ${formatCount(summary.traceExecutions.totalDocs)}`);
-        lines.push(
-            `- FILLED / SKIPPED / FAILED: ${formatCount(summary.traceExecutions.filledCount)} / ${formatCount(summary.traceExecutions.skippedCount)} / ${formatCount(summary.traceExecutions.failedCount)}`
-        );
-        lines.push(`- settle FILLED 数: ${formatCount(summary.traceExecutions.settleFilledCount)}`);
-        lines.push(
-            ...renderTopItems(
-                '执行条件',
-                summary.traceExecutions.executionConditionCounts,
-                (item) => `${item.key}: ${item.value}`
-            )
-        );
-        lines.push(
-            ...renderTopItems(
-                'Trace 主要原因',
-                summary.traceExecutions.topReasons,
-                (item) => `${item.reason}: ${item.count}`
-            )
-        );
-    }
-
-    if (summary.settlementTasks) {
-        lines.push('');
-        lines.push('Trace 结算任务');
-        lines.push(`- 任务数: ${formatCount(summary.settlementTasks.totalDocs)}`);
-        lines.push(
-            `- Open / Overdue: ${formatCount(summary.settlementTasks.openCount)} / ${formatCount(summary.settlementTasks.overdueCount)}`
-        );
-        lines.push(
-            `- 最老 open 任务: ${summary.settlementTasks.oldestOpenTaskAt ? `${formatTimestamp(summary.settlementTasks.oldestOpenTaskAt)} (${formatAgeMinutes(summary.settlementTasks.oldestOpenAgeMinutes)})` : '-'}`
-        );
-        lines.push(
-            ...renderTopItems(
-                '结算任务状态',
-                summary.settlementTasks.statusCounts,
-                (item) => `${item.key}: ${item.value}`
-            )
-        );
-        lines.push(
-            ...renderTopItems(
-                '结算任务原因',
-                summary.settlementTasks.topReasons,
-                (item) => `${item.reason}: ${item.count}`
-            )
-        );
-    }
-
-    if (summary.tracePortfolio) {
-        lines.push('');
-        lines.push('Trace 资产');
-        lines.push(`- cashBalance: ${formatUsd(summary.tracePortfolio.cashBalance)}`);
-        lines.push(`- totalEquity: ${formatUsd(summary.tracePortfolio.totalEquity)}`);
-        lines.push(`- netPnl: ${formatUsd(summary.tracePortfolio.netPnl)}`);
-        lines.push(`- lastUpdatedAt: ${formatTimestamp(summary.tracePortfolio.lastUpdatedAt)}`);
-    }
+    lines.push('');
+    lines.push('索引检查');
+    lines.push(`- source_events 缺失索引: ${summary.indexHealth.sourceMissing.length > 0 ? summary.indexHealth.sourceMissing.join('；') : '无'}`);
+    lines.push(`- executions 缺失索引: ${summary.indexHealth.executionMissing.length > 0 ? summary.indexHealth.executionMissing.join('；') : '无'}`);
+    lines.push(`- settlement_tasks 缺失索引: ${summary.indexHealth.settlementMissing.length > 0 ? summary.indexHealth.settlementMissing.join('；') : '无'}`);
 
     lines.push('');
     lines.push('建议');
@@ -779,10 +291,16 @@ const renderTextSummary = (summary) => {
     return lines.join('\n');
 };
 
-const main = async () => {
-    const mode = argv.mode === 'trace' ? 'trace' : 'live';
-    const mongoUri = requireEnvValue(argv.mongoUri, 'MONGO_URI');
-    const userAddress = requireEnvValue(argv.userAddress, 'USER_ADDRESS');
+const run = async () => {
+    const scope = resolveScopeRuntime({
+        scopeKey: argv.scopeKey,
+        sourceWallet: argv.sourceWallet,
+        targetWallet: argv.targetWallet,
+        runMode: argv.runMode,
+        strategyKind: argv.strategyKind,
+    });
+    const collections = getScopedCollectionNames(scope.scopeKey);
+    const mongoUri = resolveMongoUri(argv.mongoUri);
     const range = buildTimeRange({
         hours: argv.hours,
         sinceTs: argv.sinceTs,
@@ -792,99 +310,328 @@ const main = async () => {
     await connectMongo(mongoUri);
 
     try {
-        const sourceActivityCollection = getUserActivityCollectionName(userAddress);
-        const sourceActivities = await fetchCollectionDocs(
-            sourceActivityCollection,
-            buildTimeRangeFilter('timestamp', range),
-            { sort: { timestamp: 1 } }
+        const sourceFilter = buildTimeRangeFilter('timestamp', range);
+        const executionFilter = buildDateRangeFilter('createdAt', range);
+        const settlementFilter = buildDateRangeFilter('updatedAt', range);
+
+        const [
+            sourceEvents,
+            executions,
+            settlementTasks,
+            positions,
+            portfolio,
+            sourceIndexDocs,
+            executionIndexDocs,
+            settlementIndexDocs,
+        ] = await Promise.all([
+            fetchCollectionDocs(collections.sourceEvents, sourceFilter, {
+                projection: {
+                    timestamp: 1,
+                    status: 1,
+                    executionIntent: 1,
+                    conditionId: 1,
+                    usdcSize: 1,
+                    snapshotStatus: 1,
+                    attemptCount: 1,
+                    lastError: 1,
+                    nextRetryAt: 1,
+                },
+            }),
+            fetchCollectionDocs(collections.executions, executionFilter, {
+                projection: {
+                    sourceEventId: 1,
+                    status: 1,
+                    action: 1,
+                    conditionId: 1,
+                    requestedUsdc: 1,
+                    executedUsdc: 1,
+                    reason: 1,
+                    policyTrail: 1,
+                },
+            }),
+            fetchCollectionDocs(collections.settlementTasks, settlementFilter, {
+                projection: {
+                    conditionId: 1,
+                    status: 1,
+                    retryCount: 1,
+                    reason: 1,
+                    nextRetryAt: 1,
+                    winnerOutcome: 1,
+                },
+            }),
+            fetchCollectionDocs(collections.positions, {}, {
+                projection: {
+                    asset: 1,
+                    conditionId: 1,
+                    size: 1,
+                    marketValue: 1,
+                    costBasis: 1,
+                    redeemable: 1,
+                    lastUpdatedAt: 1,
+                },
+            }),
+            fetchSingleDoc(collections.portfolios, {}, {
+                sort: { updatedAt: -1 },
+                projection: {
+                    cashBalance: 1,
+                    totalEquity: 1,
+                    activeExposureUsdc: 1,
+                    openPositionCount: 1,
+                    positionsMarketValue: 1,
+                    realizedPnl: 1,
+                },
+            }),
+            (async () => {
+                const collection = await getCollectionIfExists(collections.sourceEvents);
+                return collection ? collection.indexes() : [];
+            })(),
+            (async () => {
+                const collection = await getCollectionIfExists(collections.executions);
+                return collection ? collection.indexes() : [];
+            })(),
+            (async () => {
+                const collection = await getCollectionIfExists(collections.settlementTasks);
+                return collection ? collection.indexes() : [];
+            })(),
+        ]);
+
+        const now = Date.now();
+
+        const sourceStatusMap = countBy(sourceEvents, (item) => normalizeText(item?.status, 'pending'));
+        const sourceQueueEvents = sourceEvents.filter((item) =>
+            SOURCE_QUEUE_STATUSES.has(normalizeText(item?.status, 'pending').toLowerCase())
+        );
+        const sourceQueueAgesMinutes = sourceQueueEvents
+            .map((item) => (now - toSafeNumber(item?.timestamp)) / 60_000)
+            .filter((value) => Number.isFinite(value) && value > 0);
+
+        const executionBySourceEventId = new Set(
+            executions
+                .map((item) => normalizeText(item?.sourceEventId, ''))
+                .filter(Boolean)
         );
 
-        const namespace = mode === 'trace' ? getTraceRuntimeNamespace(argv.traceId) : '';
-        const batchCollection = getCopyExecutionBatchCollectionName(userAddress, namespace);
-        const bufferCollection = getCopyIntentBufferCollectionName(userAddress, namespace);
-        const batches = await fetchCollectionDocs(batchCollection, {}, { sort: { createdAt: 1 } });
-        const buffers = await fetchCollectionDocs(bufferCollection, {}, { sort: { createdAt: 1 } });
+        const terminalExecuteWithoutExecution = sourceEvents.filter((item) => {
+            const status = normalizeText(item?.status, 'pending').toLowerCase();
+            if (!SOURCE_TERMINAL_STATUSES.has(status)) {
+                return false;
+            }
 
-        const traceCollections =
-            mode === 'trace' ? getTraceCollectionNames(userAddress, argv.traceId) : null;
-        const traceExecutions = traceCollections
-            ? await fetchCollectionDocs(
-                  traceCollections.execution,
-                  buildTimeRangeFilter('sourceTimestamp', range),
-                  { sort: { sourceTimestamp: 1 } }
-              )
-            : [];
-        const tracePositions = traceCollections
-            ? await fetchCollectionDocs(
-                  traceCollections.position,
-                  {},
-                  { sort: { lastTradedAt: 1 } }
-              )
-            : [];
-        const settlementTasks = traceCollections
-            ? await fetchCollectionDocs(
-                  traceCollections.settlementTask,
-                  {},
-                  { sort: { createdAt: 1 } }
-              )
-            : [];
-        const tracePortfolio = traceCollections
-            ? await fetchSingleDoc(traceCollections.portfolio, {}, { sort: { updatedAt: -1 } })
-            : null;
+            if (normalizeText(item?.executionIntent, 'EXECUTE') !== 'EXECUTE') {
+                return false;
+            }
 
-        const sourceActivitySummary = summarizeSourceActivities(sourceActivities, argv.top);
-        const batchSummary = summarizeBatches(batches, argv.top);
-        const bufferSummary = summarizeBuffers(buffers, argv.top);
-        const traceExecutionSummary =
-            mode === 'trace' ? summarizeTraceExecutions(traceExecutions, argv.top) : null;
-        const tracePositionSummary =
-            mode === 'trace' ? summarizeTracePositions(tracePositions) : null;
-        const settlementSummary =
-            mode === 'trace' ? summarizeSettlementTasks(settlementTasks, argv.top) : null;
+            const sourceEventId = normalizeText(item?._id, '');
+            if (!sourceEventId) {
+                return false;
+            }
+
+            return !executionBySourceEventId.has(sourceEventId);
+        });
+
+        const executionStatusMap = countBy(executions, (item) => normalizeText(item?.status, 'unknown'));
+        const executionFailRetryCount = executions.filter((item) => {
+            const status = normalizeText(item?.status, 'unknown').toLowerCase();
+            return status === 'failed' || status === 'retry';
+        }).length;
+        const executionRequestedUsdc = sumBy(executions, (item) => item?.requestedUsdc);
+        const executionExecutedUsdc = sumBy(executions, (item) => item?.executedUsdc);
+
+        const settlementStatusMap = countBy(settlementTasks, (item) => normalizeText(item?.status, 'pending'));
+        const settlementOverdueCount = settlementTasks.filter((item) => {
+            const status = normalizeText(item?.status, 'pending').toLowerCase();
+            if (status === 'settled' || status === 'closed') {
+                return false;
+            }
+
+            const nextRetryAt = toSafeNumber(item?.nextRetryAt);
+            return nextRetryAt <= 0 || nextRetryAt <= now;
+        }).length;
+
+        const openPositions = positions.filter((item) => toSafeNumber(item?.size) > 0);
+        const redeemablePositions = openPositions.filter((item) => Boolean(item?.redeemable));
+
+        const sourceMissingIndexes = checkExpectedIndexes(sourceIndexDocs, [
+            {
+                label: 'activityKey 唯一索引',
+                key: { activityKey: 1 },
+                unique: true,
+            },
+            {
+                label: 'status+nextRetryAt+timestamp 索引',
+                key: { status: 1, nextRetryAt: 1, timestamp: 1 },
+            },
+        ]);
+
+        const executionMissingIndexes = checkExpectedIndexes(executionIndexDocs, [
+            {
+                label: 'sourceEventId 唯一索引',
+                key: { sourceEventId: 1 },
+                unique: true,
+            },
+        ]);
+
+        const settlementMissingIndexes = checkExpectedIndexes(settlementIndexDocs, [
+            {
+                label: 'conditionId 唯一索引',
+                key: { conditionId: 1 },
+                unique: true,
+            },
+            {
+                label: 'status+nextRetryAt 索引',
+                key: { status: 1, nextRetryAt: 1 },
+            },
+        ]);
 
         const summary = {
-            generatedAt: new Date().toISOString(),
             input: {
-                mode,
-                traceId: argv.traceId,
-                userAddress,
-                mongoUriLoadedFrom: ENV_FILE_PATH,
+                scopeKey: scope.scopeKey,
+                scopeSource: scope.scopeSource,
                 range,
-                rangeLabel: `${range.sinceTs ? formatTimestamp(range.sinceTs) : '-∞'} ~ ${
-                    range.untilTs ? formatTimestamp(range.untilTs) : '+∞'
-                }`,
+                rangeLabel: formatRangeLabel(range),
+                envFilePath: ENV_FILE_PATH,
+                mongoUriLoadedFrom: argv.mongoUri ? '--mongo-uri' : 'MONGO_URI',
             },
-            sourceActivities: sourceActivitySummary,
-            batches: batchSummary,
-            buffers: bufferSummary,
-            traceExecutions: traceExecutionSummary,
-            tracePositions: tracePositionSummary,
-            settlementTasks: settlementSummary,
-            tracePortfolio,
+            collections,
+            source: {
+                total: sourceEvents.length,
+                queueCount: sourceQueueEvents.length,
+                queuePct: pct(sourceQueueEvents.length, sourceEvents.length),
+                queueAgeP50Minutes: quantile(sourceQueueAgesMinutes, 0.5),
+                queueAgeP90Minutes: quantile(sourceQueueAgesMinutes, 0.9),
+                terminalWithoutExecutionCount: terminalExecuteWithoutExecution.length,
+                statusCounts: takeTopEntries(sourceStatusMap, argv.top).map(([key, value]) => ({
+                    key,
+                    value,
+                })),
+                executionIntentCounts: takeTopEntries(
+                    countBy(sourceEvents, (item) => normalizeText(item?.executionIntent, 'UNSET')),
+                    argv.top
+                ).map(([key, value]) => ({ key, value })),
+                snapshotStatusCounts: takeTopEntries(
+                    countBy(sourceEvents, (item) => normalizeText(item?.snapshotStatus, 'UNKNOWN')),
+                    argv.top
+                ).map(([key, value]) => ({ key, value })),
+                topErrors: buildTopReasonItems(sourceEvents, (item) => item?.lastError, argv.top),
+                queueTopConditions: buildTopConditionItems(sourceQueueEvents, argv.top),
+            },
+            execution: {
+                total: executions.length,
+                requestedUsdc: executionRequestedUsdc,
+                executedUsdc: executionExecutedUsdc,
+                fulfillmentPct: pct(executionExecutedUsdc, executionRequestedUsdc),
+                failRetryPct: pct(executionFailRetryCount, executions.length),
+                statusCounts: takeTopEntries(executionStatusMap, argv.top).map(([key, value]) => ({
+                    key,
+                    value,
+                })),
+                actionCounts: takeTopEntries(
+                    countBy(executions, (item) => normalizeText(item?.action, 'unknown')),
+                    argv.top
+                ).map(([key, value]) => ({ key, value })),
+                topReasons: buildTopReasonItems(executions, (item) => item?.reason, argv.top),
+                policyTrailCounts: takeTopEntries(
+                    executions.reduce((counts, item) => {
+                        const trails = Array.isArray(item?.policyTrail) ? item.policyTrail : [];
+                        for (const trail of trails) {
+                            const key = normalizeText(trail, 'UNKNOWN');
+                            if (key === 'UNKNOWN') {
+                                continue;
+                            }
+                            counts.set(key, (counts.get(key) || 0) + 1);
+                        }
+
+                        return counts;
+                    }, new Map()),
+                    argv.top
+                ).map(([key, value]) => ({ key, value })),
+            },
+            settlement: {
+                total: settlementTasks.length,
+                overdueCount: settlementOverdueCount,
+                avgRetryCount:
+                    settlementTasks.length > 0
+                        ? sumBy(settlementTasks, (item) => item?.retryCount) / settlementTasks.length
+                        : 0,
+                statusCounts: takeTopEntries(settlementStatusMap, argv.top).map(([key, value]) => ({
+                    key,
+                    value,
+                })),
+                topReasons: buildTopReasonItems(settlementTasks, (item) => item?.reason, argv.top),
+                winnerKnownCount: settlementTasks.filter((item) => normalizeText(item?.winnerOutcome, '')).length,
+            },
+            positions: {
+                total: positions.length,
+                openCount: openPositions.length,
+                redeemableCount: redeemablePositions.length,
+                totalSize: sumBy(openPositions, (item) => item?.size),
+                totalMarketValue: sumBy(openPositions, (item) => item?.marketValue),
+            },
+            portfolio: {
+                totalEquity: toSafeNumber(portfolio?.totalEquity),
+                cashBalance: toSafeNumber(portfolio?.cashBalance),
+                activeExposureUsdc: toSafeNumber(portfolio?.activeExposureUsdc),
+                openPositionCount: toSafeNumber(portfolio?.openPositionCount),
+                positionsMarketValue: toSafeNumber(portfolio?.positionsMarketValue),
+                realizedPnl: toSafeNumber(portfolio?.realizedPnl),
+            },
+            indexHealth: {
+                sourceMissing: sourceMissingIndexes,
+                executionMissing: executionMissingIndexes,
+                settlementMissing: settlementMissingIndexes,
+            },
+            suggestions: [],
         };
 
-        summary.suggestions = buildSuggestions({
-            mode,
-            sourceActivitySummary,
-            batchSummary,
-            bufferSummary,
-            traceExecutionSummary,
-            settlementSummary,
-        });
+        pushSuggestion(
+            summary.suggestions,
+            summary.source.total > 0 && summary.source.queuePct >= 20,
+            'source_events 队列积压超过 20%，建议优先检查 monitor 拉取抖动与执行节点吞吐。'
+        );
+        pushSuggestion(
+            summary.suggestions,
+            summary.execution.total > 0 && summary.execution.failRetryPct >= 15,
+            'execution 的 failed+retry 占比偏高，建议按 submit/confirm/reconcile 三阶段拆分失败预算。'
+        );
+        pushSuggestion(
+            summary.suggestions,
+            summary.execution.total > 0 && summary.execution.fulfillmentPct < 85,
+            '请求金额与实际成交金额偏离较大，建议针对 BUY/SELL 分别检查滑点与盘口深度阈值。'
+        );
+        pushSuggestion(
+            summary.suggestions,
+            summary.settlement.overdueCount > 0,
+            '存在到期未处理的 settlement task，建议优先排查 resolved 判定与下一次重试调度。'
+        );
+        pushSuggestion(
+            summary.suggestions,
+            summary.source.terminalWithoutExecutionCount > 0,
+            '存在 EXECUTE 终态事件缺少 execution 记录，建议抽样核查是否由结算跳过导致的预期行为。'
+        );
+        pushSuggestion(
+            summary.suggestions,
+            sourceMissingIndexes.length + executionMissingIndexes.length + settlementMissingIndexes.length > 0,
+            '检测到缺失索引，建议先补齐索引再继续压测，否则会放大队列积压与重试成本。'
+        );
+
+        if (summary.suggestions.length === 0) {
+            summary.suggestions.push(
+                '当前窗口未发现明显数据库瓶颈，建议继续按小时采样并和日志脚本联合观测趋势。'
+            );
+        }
 
         if (argv.json) {
             console.log(JSON.stringify(summary, null, 2));
             return;
         }
 
-        console.log(renderTextSummary(summary));
+        console.log(renderSummaryText(summary));
     } finally {
         await closeMongo();
     }
 };
 
-main().catch(async (error) => {
-    console.error(`生成 DB 改进点报告失败: ${error.message}`);
-    await closeMongo();
+run().catch((error) => {
+    console.error(`db-improvement-report 执行失败: ${error?.message || error}`);
     process.exit(1);
 });

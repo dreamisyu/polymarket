@@ -9,30 +9,36 @@ import {
     formatPct,
     formatTimestamp,
     formatUsd,
-    getUserActivityCollectionName,
     pct,
     pushSuggestion,
     quantile,
-    readEnv,
-    requireEnvValue,
     sumBy,
     takeTopEntries,
     toSafeNumber,
 } from './lib/runtime.mjs';
 import { fetchPolymarketPositions } from './lib/polymarketApi.mjs';
+import {
+    formatRangeLabel,
+    getScopedCollectionNames,
+    resolveMongoUri,
+    resolveScopeRuntime,
+} from './lib/scopeRuntime.mjs';
 
-const DEFAULT_USER_ADDRESS = readEnv('USER_ADDRESS') || '';
-const DEFAULT_MONGO_URI = readEnv('MONGO_URI') || '';
 const DEFAULT_TOP = 8;
+const DEFAULT_MERGE_WINDOW_MS = 3000;
 
 const parseArgs = (argv) => {
     const parsed = {
-        userAddress: DEFAULT_USER_ADDRESS,
-        mongoUri: DEFAULT_MONGO_URI,
+        scopeKey: '',
+        sourceWallet: '',
+        targetWallet: '',
+        runMode: '',
+        strategyKind: '',
+        mongoUri: '',
         hours: 24,
         sinceTs: 0,
         untilTs: 0,
-        mergeWindowMs: 15000,
+        mergeWindowMs: DEFAULT_MERGE_WINDOW_MS,
         fetchPositions: true,
         top: DEFAULT_TOP,
         json: false,
@@ -52,8 +58,32 @@ const parseArgs = (argv) => {
             continue;
         }
 
-        if ((current === '--user-address' || current === '-u') && argv[index + 1]) {
-            parsed.userAddress = argv[index + 1];
+        if ((current === '--scope-key' || current === '-s') && argv[index + 1]) {
+            parsed.scopeKey = argv[index + 1];
+            index += 1;
+            continue;
+        }
+
+        if (current === '--source-wallet' && argv[index + 1]) {
+            parsed.sourceWallet = argv[index + 1];
+            index += 1;
+            continue;
+        }
+
+        if (current === '--target-wallet' && argv[index + 1]) {
+            parsed.targetWallet = argv[index + 1];
+            index += 1;
+            continue;
+        }
+
+        if (current === '--run-mode' && argv[index + 1]) {
+            parsed.runMode = argv[index + 1];
+            index += 1;
+            continue;
+        }
+
+        if (current === '--strategy-kind' && argv[index + 1]) {
+            parsed.strategyKind = argv[index + 1];
             index += 1;
             continue;
         }
@@ -65,19 +95,19 @@ const parseArgs = (argv) => {
         }
 
         if (current === '--hours' && argv[index + 1]) {
-            parsed.hours = Math.max(Number(argv[index + 1]) || 0, 0);
+            parsed.hours = Math.max(toSafeNumber(argv[index + 1]), 0);
             index += 1;
             continue;
         }
 
         if (current === '--since-ts' && argv[index + 1]) {
-            parsed.sinceTs = Math.max(Number(argv[index + 1]) || 0, 0);
+            parsed.sinceTs = Math.max(toSafeNumber(argv[index + 1]), 0);
             index += 1;
             continue;
         }
 
         if (current === '--until-ts' && argv[index + 1]) {
-            parsed.untilTs = Math.max(Number(argv[index + 1]) || 0, 0);
+            parsed.untilTs = Math.max(toSafeNumber(argv[index + 1]), 0);
             index += 1;
             continue;
         }
@@ -106,98 +136,106 @@ const argv = parseArgs(process.argv.slice(2));
 
 if (argv.help) {
     console.log(`用法:
-  node scripts/target-wallet-profile.mjs [--user-address 0x...] [--hours 24] [--merge-window-ms 15000] [--json]
+  node scripts/target-wallet-profile.mjs [--scope-key key] [--hours 24] [--merge-window-ms 3000] [--json]
+  node scripts/target-wallet-profile.mjs --source-wallet 0x... --target-wallet 0x... --run-mode paper --strategy-kind fixed_amount
 
 说明:
-  1. 基于 Mongo 中的目标账户活动，分析交易风格、小单占比、相邻合并机会和市场集中度
-  2. 默认会额外拉取 Polymarket 官方持仓接口，补充当前 open/redeemable/mergeable 曝光
-  3. 如仅需本地 DB 分析，可追加 --without-positions
+  1. 画像数据来源于 source_events_* 集合，适配 src 迁移后的新库结构。
+  2. 默认会补充调用 Polymarket positions 接口，可通过 --without-positions 关闭。
 `);
     process.exit(0);
 }
 
-const getSourceTradeCount = (item) => Math.max(toSafeNumber(item?.sourceTradeCount, 1), 1);
+const normalizeText = (value, fallback = '') => String(value || '').trim() || fallback;
 
-const getTitleKey = (item) =>
-    String(item?.title || item?.slug || item?.conditionId || 'UNKNOWN').trim();
+const normalizeUpper = (value, fallback = 'UNKNOWN') => normalizeText(value, fallback).toUpperCase();
 
-const buildAdjacentBuyClusters = (activities, mergeWindowMs, top) => {
-    const orderedTrades = activities
-        .filter(
-            (item) =>
-                String(item.type || '').toUpperCase() === 'TRADE' &&
-                String(item.side || '').toUpperCase() === 'BUY'
-        )
-        .sort((left, right) => toSafeNumber(left.timestamp) - toSafeNumber(right.timestamp));
+const inferAction = (item) => {
+    const action = normalizeText(item?.action, '').toLowerCase();
+    if (action) {
+        return action.toUpperCase();
+    }
+
+    const type = normalizeUpper(item?.type, 'UNKNOWN');
+    if (type === 'TRADE') {
+        const side = normalizeUpper(item?.side, 'UNKNOWN');
+        if (side === 'BUY' || side === 'SELL') {
+            return side;
+        }
+    }
+
+    return type;
+};
+
+const isTradeBuy = (item) => {
+    const action = inferAction(item);
+    return action === 'BUY';
+};
+
+const isTradeSell = (item) => {
+    const action = inferAction(item);
+    return action === 'SELL';
+};
+
+const toTimestamp = (item) => toSafeNumber(item?.timestamp);
+
+const buildAdjacentBuyClusters = (buyEvents, mergeWindowMs, top) => {
+    const ordered = [...buyEvents]
+        .filter((item) => toTimestamp(item) > 0)
+        .sort((left, right) => toTimestamp(left) - toTimestamp(right));
 
     const clusters = [];
 
-    for (const trade of orderedTrades) {
+    for (const event of ordered) {
+        const key = `${normalizeText(event?.conditionId, 'UNKNOWN')}|${normalizeText(event?.asset, 'UNKNOWN')}|${normalizeText(event?.outcome, String(toSafeNumber(event?.outcomeIndex)))}`;
+        const timestamp = toTimestamp(event);
+        const usdcSize = toSafeNumber(event?.usdcSize);
         const lastCluster = clusters[clusters.length - 1];
-        const timestamp = toSafeNumber(trade.timestamp);
 
-        if (!lastCluster) {
-            clusters.push({
-                key: `${trade.conditionId || ''}:${trade.outcome || ''}:${trade.side || ''}`,
-                conditionId: trade.conditionId || '',
-                outcome: trade.outcome || '',
-                side: trade.side || '',
-                title: trade.title || '',
-                startedAt: timestamp,
-                endedAt: timestamp,
-                docs: [trade],
-                totalUsdc: toSafeNumber(trade.usdcSize),
-            });
-            continue;
-        }
-
-        const nextKey = `${trade.conditionId || ''}:${trade.outcome || ''}:${trade.side || ''}`;
-        const canMerge =
-            lastCluster.key === nextKey &&
-            timestamp > 0 &&
-            lastCluster.endedAt > 0 &&
-            timestamp - lastCluster.endedAt <= mergeWindowMs;
-
-        if (canMerge) {
-            lastCluster.docs.push(trade);
+        if (
+            lastCluster &&
+            lastCluster.key === key &&
+            timestamp - lastCluster.endedAt <= mergeWindowMs
+        ) {
+            lastCluster.docs.push(event);
             lastCluster.endedAt = timestamp;
-            lastCluster.totalUsdc += toSafeNumber(trade.usdcSize);
+            lastCluster.totalUsdc += usdcSize;
             continue;
         }
 
         clusters.push({
-            key: nextKey,
-            conditionId: trade.conditionId || '',
-            outcome: trade.outcome || '',
-            side: trade.side || '',
-            title: trade.title || '',
+            key,
+            conditionId: normalizeText(event?.conditionId, 'UNKNOWN'),
+            title: normalizeText(event?.title, normalizeText(event?.slug, 'UNKNOWN')),
+            asset: normalizeText(event?.asset, 'UNKNOWN'),
+            outcome: normalizeText(event?.outcome, String(toSafeNumber(event?.outcomeIndex))),
             startedAt: timestamp,
             endedAt: timestamp,
-            docs: [trade],
-            totalUsdc: toSafeNumber(trade.usdcSize),
+            docs: [event],
+            totalUsdc: usdcSize,
         });
     }
 
     const multiDocClusters = clusters.filter((cluster) => cluster.docs.length > 1);
     const rescuedClusters = multiDocClusters.filter(
         (cluster) =>
-            cluster.totalUsdc >= 1 && cluster.docs.every((item) => toSafeNumber(item.usdcSize) < 1)
+            cluster.totalUsdc >= 1 &&
+            cluster.docs.every((event) => toSafeNumber(event?.usdcSize) > 0 && toSafeNumber(event?.usdcSize) < 1)
     );
 
     return {
-        inputDocs: orderedTrades.length,
+        inputCount: ordered.length,
         clusterCount: clusters.length,
-        savedDocs: Math.max(orderedTrades.length - clusters.length, 0),
+        mergedSavings: Math.max(ordered.length - clusters.length, 0),
         multiDocClusterCount: multiDocClusters.length,
         rescuedClusterCount: rescuedClusters.length,
-        rescuedUsdc: sumBy(rescuedClusters, (cluster) => cluster.totalUsdc),
+        rescuedUsdc: sumBy(rescuedClusters, (item) => item.totalUsdc),
         topCandidates: multiDocClusters
             .sort((left, right) => right.totalUsdc - left.totalUsdc)
             .slice(0, top)
             .map((cluster) => ({
-                title: cluster.title,
                 conditionId: cluster.conditionId,
-                outcome: cluster.outcome,
+                title: cluster.title,
                 docCount: cluster.docs.length,
                 totalUsdc: cluster.totalUsdc,
                 startedAt: cluster.startedAt,
@@ -207,69 +245,41 @@ const buildAdjacentBuyClusters = (activities, mergeWindowMs, top) => {
 };
 
 const summarizePositions = (positions, top) => {
-    const openPositions = positions.filter((position) => toSafeNumber(position.size) > 0);
-    const topPositions = [...openPositions]
-        .sort((left, right) => toSafeNumber(right.currentValue) - toSafeNumber(left.currentValue))
-        .slice(0, top)
-        .map((position) => ({
-            title: position.title || position.slug || position.conditionId || 'UNKNOWN',
-            outcome: position.outcome || '',
-            currentValue: toSafeNumber(position.currentValue),
-            size: toSafeNumber(position.size),
-            redeemable: Boolean(position.redeemable),
-            mergeable: Boolean(position.mergeable),
-        }));
+    const normalized = Array.isArray(positions)
+        ? positions.map((position) => ({
+              conditionId: normalizeText(position?.conditionId, ''),
+              title: normalizeText(position?.title, normalizeText(position?.slug, normalizeText(position?.question, 'UNKNOWN'))),
+              outcome: normalizeText(position?.outcome, ''),
+              size: toSafeNumber(position?.size),
+              currentValue: toSafeNumber(position?.currentValue, toSafeNumber(position?.current_value)),
+              initialValue: toSafeNumber(position?.initialValue, toSafeNumber(position?.initial_value)),
+              redeemable: Boolean(position?.redeemable),
+              mergeable: Boolean(position?.mergeable),
+          }))
+        : [];
+
+    const open = normalized.filter((position) => position.size > 0);
 
     return {
-        openCount: openPositions.length,
-        redeemableCount: openPositions.filter((position) => Boolean(position.redeemable)).length,
-        mergeableCount: openPositions.filter((position) => Boolean(position.mergeable)).length,
-        totalCurrentValue: sumBy(openPositions, (position) => position.currentValue),
-        totalInitialValue: sumBy(openPositions, (position) => position.initialValue),
-        topPositions,
+        totalCount: normalized.length,
+        openCount: open.length,
+        redeemableCount: open.filter((position) => position.redeemable).length,
+        mergeableCount: open.filter((position) => position.mergeable).length,
+        totalCurrentValue: sumBy(open, (position) => position.currentValue),
+        totalInitialValue: sumBy(open, (position) => position.initialValue),
+        topPositions: [...open]
+            .sort((left, right) => right.currentValue - left.currentValue)
+            .slice(0, top)
+            .map((position) => ({
+                title: position.title,
+                conditionId: position.conditionId,
+                outcome: position.outcome,
+                currentValue: position.currentValue,
+                size: position.size,
+                redeemable: position.redeemable,
+                mergeable: position.mergeable,
+            })),
     };
-};
-
-const buildSuggestions = ({ activitySummary, adjacentBuyClusters, positionSummary }) => {
-    const suggestions = [];
-
-    pushSuggestion(
-        suggestions,
-        pct(activitySummary.smallBuyDocs, activitySummary.buyTrades) >= 25,
-        '目标账户 BUY 中小额碎单占比偏高，跟单改进应优先围绕监视器合并和最小下单策略展开。'
-    );
-    pushSuggestion(
-        suggestions,
-        adjacentBuyClusters.rescuedClusterCount > 0,
-        '按当前脚本窗口模拟，已有相邻 BUY 可以被合并后跨过 1u 门槛，说明监视器仍有继续前移聚合的空间。'
-    );
-    pushSuggestion(
-        suggestions,
-        pct(activitySummary.mergeRedeemActivities, activitySummary.totalActivities) >= 10,
-        '目标账户 MERGE/REDEEM 占比较高，结算 worker 与 condition 净额模型仍应保持优先级。'
-    );
-
-    if (positionSummary) {
-        pushSuggestion(
-            suggestions,
-            positionSummary.redeemableCount > 0 || positionSummary.mergeableCount > 0,
-            '目标账户当前仍有 redeemable/mergeable 持仓，建议把这些 condition 加入常驻监控样本，持续验证结算回收链路。'
-        );
-        pushSuggestion(
-            suggestions,
-            pct(positionSummary.topPositions[0]?.currentValue, positionSummary.totalCurrentValue) >=
-                30,
-            '当前持仓价值集中在少数市场，建议增加按市场类型拆分的执行统计，避免高频市场掩盖大额市场的真实效果。'
-        );
-    }
-
-    if (suggestions.length === 0) {
-        suggestions.push(
-            '目标账户画像暂未暴露新的单点问题，建议结合 DB 漏斗与日志脚本一起看，确认瓶颈位于入口、执行还是结算。'
-        );
-    }
-
-    return suggestions;
 };
 
 const renderTopItems = (title, items, formatter) => {
@@ -286,77 +296,45 @@ const renderTopItems = (title, items, formatter) => {
     return lines;
 };
 
-const renderTextSummary = (summary) => {
+const renderText = (summary) => {
     const lines = [];
-    lines.push('目标账户画像');
-    lines.push(`- 账户: ${summary.input.userAddress}`);
+    lines.push('目标账户画像（新集合版）');
+    lines.push(`- 目标地址: ${summary.input.targetWallet || '-'}`);
+    lines.push(`- scopeKey: ${summary.input.scopeKey}`);
     lines.push(`- 时间范围: ${summary.input.rangeLabel}`);
-    lines.push(`- Mongo 配置来源: ${summary.input.mongoUriLoadedFrom}`);
-    lines.push(`- 相邻 BUY 分析窗口: ${summary.input.mergeWindowMs}ms`);
+    lines.push(`- env 路径: ${summary.input.envFilePath}`);
+    lines.push(`- 相邻 BUY 合并窗口: ${summary.input.mergeWindowMs}ms`);
 
     lines.push('');
-    lines.push('活动画像');
-    lines.push(`- 活动文档数: ${summary.activities.totalActivities}`);
-    lines.push(`- 折算原始交易数: ${summary.activities.totalRawTrades}`);
-    lines.push(
-        `- TRADE / BUY / SELL: ${summary.activities.tradeActivities} / ${summary.activities.buyTrades} / ${summary.activities.sellTrades}`
-    );
-    lines.push(`- BUY 中 <1u 占比: ${formatPct(summary.activities.smallBuyDocPct)}`);
-    lines.push(`- MERGE + REDEEM 占比: ${formatPct(summary.activities.mergeRedeemPct)}`);
-    lines.push(
-        `- BUY usdc 分位: P25=${formatUsd(summary.activities.buyUsdcP25)} P50=${formatUsd(summary.activities.buyUsdcP50)} P75=${formatUsd(summary.activities.buyUsdcP75)}`
-    );
-    lines.push(
-        ...renderTopItems(
-            '活动类型',
-            summary.activities.byType,
-            (item) => `${item.key}: ${item.value}`
-        )
-    );
-    lines.push(
-        ...renderTopItems(
-            '热点市场',
-            summary.activities.topTitles,
-            (item) => `${item.title}: ${item.rawTradeCount}`
-        )
-    );
+    lines.push('活动概览');
+    lines.push(`- 活动总数: ${summary.activities.total}`);
+    lines.push(`- TRADE BUY / SELL: ${summary.activities.buyCount} / ${summary.activities.sellCount}`);
+    lines.push(`- MERGE + REDEEM: ${summary.activities.mergeRedeemCount}`);
+    lines.push(`- BUY 中 <1u 占比: ${formatPct(summary.activities.smallBuyPct)}`);
+    lines.push(`- pending+retry+processing 占比: ${formatPct(summary.activities.pendingRetryPct)}`);
+    lines.push(`- BUY usdc 分位 P25/P50/P75: ${formatUsd(summary.activities.buyUsdcP25)} / ${formatUsd(summary.activities.buyUsdcP50)} / ${formatUsd(summary.activities.buyUsdcP75)}`);
+    lines.push(`- 交易频率: ${summary.activities.tradesPerHour.toFixed(2)} 次/小时`);
+    lines.push(`- BUY 相邻间隔 P50: ${(summary.activities.buyIntervalP50Ms / 1000).toFixed(2)} 秒`);
+    lines.push(...renderTopItems('动作分布', summary.activities.actionCounts, (item) => `${item.key}: ${item.value}`));
+    lines.push(...renderTopItems('活动状态分布', summary.activities.statusCounts, (item) => `${item.key}: ${item.value}`));
+    lines.push(...renderTopItems('快照状态分布', summary.activities.snapshotCounts, (item) => `${item.key}: ${item.value}`));
+    lines.push(...renderTopItems('热点市场（按成交额）', summary.activities.topConditionsByUsdc, (item) => `${item.title}: ${formatUsd(item.usdc)} (${item.count} 笔)`));
 
     lines.push('');
-    lines.push('相邻 BUY 合并机会');
-    lines.push(`- 输入 BUY 文档数: ${summary.adjacentBuyClusters.inputDocs}`);
-    lines.push(`- 合并后 cluster 数: ${summary.adjacentBuyClusters.clusterCount}`);
-    lines.push(`- 可减少文档数: ${summary.adjacentBuyClusters.savedDocs}`);
-    lines.push(
-        `- 可被 1u 门槛“救回”的 cluster 数: ${summary.adjacentBuyClusters.rescuedClusterCount}`
-    );
-    lines.push(`- 可救回名义 USDC: ${formatUsd(summary.adjacentBuyClusters.rescuedUsdc)}`);
-    lines.push(
-        ...renderTopItems(
-            '主要合并候选',
-            summary.adjacentBuyClusters.topCandidates,
-            (item) =>
-                `${item.title || item.conditionId} | ${item.outcome} | docs=${item.docCount} | usdc=${formatUsd(item.totalUsdc)} | ${formatTimestamp(item.startedAt)} ~ ${formatTimestamp(item.endedAt)}`
-        )
-    );
+    lines.push('相邻 BUY 聚类');
+    lines.push(`- BUY 输入数: ${summary.adjacentBuy.inputCount}`);
+    lines.push(`- 聚类后簇数: ${summary.adjacentBuy.clusterCount}`);
+    lines.push(`- 可节省文档写入: ${summary.adjacentBuy.mergedSavings}`);
+    lines.push(`- 多笔簇数量: ${summary.adjacentBuy.multiDocClusterCount}`);
+    lines.push(`- 可跨 1u 门槛簇: ${summary.adjacentBuy.rescuedClusterCount}（${formatUsd(summary.adjacentBuy.rescuedUsdc)}）`);
+    lines.push(...renderTopItems('候选簇 Top', summary.adjacentBuy.topCandidates, (item) => `${item.title}: ${item.docCount} 笔, ${formatUsd(item.totalUsdc)} (${formatTimestamp(item.startedAt)} ~ ${formatTimestamp(item.endedAt)})`));
 
     if (summary.positions) {
         lines.push('');
-        lines.push('当前持仓');
-        lines.push(`- openCount: ${summary.positions.openCount}`);
-        lines.push(`- redeemableCount: ${summary.positions.redeemableCount}`);
-        lines.push(`- mergeableCount: ${summary.positions.mergeableCount}`);
-        lines.push(`- totalCurrentValue: ${formatUsd(summary.positions.totalCurrentValue)}`);
-        lines.push(
-            ...renderTopItems(
-                '持仓集中度',
-                summary.positions.topPositions,
-                (item) =>
-                    `${item.title} | ${item.outcome} | value=${formatUsd(item.currentValue)} | size=${toSafeNumber(item.size).toFixed(4)}`
-            )
-        );
-    } else if (summary.positionFetchError) {
-        lines.push('');
-        lines.push(`当前持仓: 获取失败，reason=${summary.positionFetchError}`);
+        lines.push('官方持仓补充');
+        lines.push(`- open / redeemable / mergeable: ${summary.positions.openCount} / ${summary.positions.redeemableCount} / ${summary.positions.mergeableCount}`);
+        lines.push(`- 当前价值 / 初始价值: ${formatUsd(summary.positions.totalCurrentValue)} / ${formatUsd(summary.positions.totalInitialValue)}`);
+        lines.push(...renderTopItems('持仓 Top', summary.positions.topPositions, (item) => `${item.title} [${item.outcome}] ${formatUsd(item.currentValue)} size=${item.size.toFixed(6)} redeemable=${item.redeemable} mergeable=${item.mergeable}`));
     }
 
     lines.push('');
@@ -368,9 +346,16 @@ const renderTextSummary = (summary) => {
     return lines.join('\n');
 };
 
-const main = async () => {
-    const userAddress = requireEnvValue(argv.userAddress, 'USER_ADDRESS');
-    const mongoUri = requireEnvValue(argv.mongoUri, 'MONGO_URI');
+const run = async () => {
+    const scope = resolveScopeRuntime({
+        scopeKey: argv.scopeKey,
+        sourceWallet: argv.sourceWallet,
+        targetWallet: argv.targetWallet,
+        runMode: argv.runMode,
+        strategyKind: argv.strategyKind,
+    });
+    const collections = getScopedCollectionNames(scope.scopeKey);
+    const mongoUri = resolveMongoUri(argv.mongoUri);
     const range = buildTimeRange({
         hours: argv.hours,
         sinceTs: argv.sinceTs,
@@ -380,113 +365,214 @@ const main = async () => {
     await connectMongo(mongoUri);
 
     try {
-        const activities = await fetchCollectionDocs(
-            getUserActivityCollectionName(userAddress),
+        const sourceEvents = await fetchCollectionDocs(
+            collections.sourceEvents,
             buildTimeRangeFilter('timestamp', range),
-            { sort: { timestamp: 1 } }
+            {
+                sort: { timestamp: 1 },
+                projection: {
+                    timestamp: 1,
+                    type: 1,
+                    side: 1,
+                    action: 1,
+                    conditionId: 1,
+                    asset: 1,
+                    outcome: 1,
+                    outcomeIndex: 1,
+                    title: 1,
+                    slug: 1,
+                    usdcSize: 1,
+                    size: 1,
+                    status: 1,
+                    executionIntent: 1,
+                    snapshotStatus: 1,
+                },
+            }
         );
 
-        const tradeActivities = activities.filter(
-            (item) => String(item.type || '').toUpperCase() === 'TRADE'
-        );
-        const buyTrades = tradeActivities.filter(
-            (item) => String(item.side || '').toUpperCase() === 'BUY'
-        );
-        const smallBuyDocs = buyTrades.filter((item) => toSafeNumber(item.usdcSize) < 1).length;
-        const mergeRedeemActivities = activities.filter((item) =>
-            ['MERGE', 'REDEEM'].includes(String(item.type || '').toUpperCase())
-        ).length;
-        const positionsResponse = argv.fetchPositions
-            ? await fetchPolymarketPositions(
-                  userAddress,
-                  'polymarket-copytrading-bot/target-profile'
-              )
-            : { positions: null, error: '', walletAddress: userAddress };
+        const buyEvents = sourceEvents.filter((item) => isTradeBuy(item));
+        const sellEvents = sourceEvents.filter((item) => isTradeSell(item));
+        const mergeRedeemEvents = sourceEvents.filter((item) => {
+            const action = inferAction(item);
+            return action === 'MERGE' || action === 'REDEEM';
+        });
 
-        const activitySummary = {
-            totalActivities: activities.length,
-            totalRawTrades: sumBy(activities, (item) => getSourceTradeCount(item)),
-            tradeActivities: tradeActivities.length,
-            buyTrades: buyTrades.length,
-            sellTrades: tradeActivities.filter(
-                (item) => String(item.side || '').toUpperCase() === 'SELL'
-            ).length,
-            mergeRedeemActivities,
-            mergeRedeemPct: pct(mergeRedeemActivities, activities.length),
-            smallBuyDocs,
-            smallBuyDocPct: pct(smallBuyDocs, buyTrades.length),
-            buyUsdcP25: quantile(
-                buyTrades.map((item) => item.usdcSize),
-                0.25
-            ),
-            buyUsdcP50: quantile(
-                buyTrades.map((item) => item.usdcSize),
-                0.5
-            ),
-            buyUsdcP75: quantile(
-                buyTrades.map((item) => item.usdcSize),
-                0.75
-            ),
-            byType: takeTopEntries(
-                countBy(activities, (item) => item.type || 'UNKNOWN'),
-                argv.top
-            ).map(([key, value]) => ({ key, value })),
-            topTitles: takeTopEntries(
-                activities.reduce((result, item) => {
-                    const key = getTitleKey(item);
-                    result.set(key, (result.get(key) || 0) + getSourceTradeCount(item));
-                    return result;
-                }, new Map()),
-                argv.top
-            ).map(([title, rawTradeCount]) => ({ title, rawTradeCount })),
-        };
+        const pendingRetryEvents = sourceEvents.filter((item) => {
+            const status = normalizeText(item?.status, 'pending').toLowerCase();
+            return status === 'pending' || status === 'retry' || status === 'processing';
+        });
 
-        const adjacentBuyClusters = buildAdjacentBuyClusters(
-            activities,
-            argv.mergeWindowMs,
-            argv.top
-        );
-        const positionSummary =
-            Array.isArray(positionsResponse.positions) && !positionsResponse.error
-                ? summarizePositions(positionsResponse.positions, argv.top)
-                : null;
+        const buyUsdcSamples = buyEvents.map((item) => toSafeNumber(item?.usdcSize)).filter((value) => value > 0);
+        const smallBuyEvents = buyEvents.filter((item) => {
+            const usdc = toSafeNumber(item?.usdcSize);
+            return usdc > 0 && usdc < 1;
+        });
+
+        const tradeEvents = sourceEvents.filter((item) => {
+            const action = inferAction(item);
+            return action === 'BUY' || action === 'SELL';
+        });
+
+        const eventTimestamps = tradeEvents.map(toTimestamp).filter((timestamp) => timestamp > 0);
+        const timeSpanMs =
+            eventTimestamps.length >= 2
+                ? Math.max(eventTimestamps[eventTimestamps.length - 1] - eventTimestamps[0], 1)
+                : 0;
+        const tradesPerHour =
+            timeSpanMs > 0
+                ? (tradeEvents.length * 3_600_000) / timeSpanMs
+                : tradeEvents.length;
+
+        const buyIntervals = [];
+        for (let index = 1; index < buyEvents.length; index += 1) {
+            const current = toTimestamp(buyEvents[index]);
+            const previous = toTimestamp(buyEvents[index - 1]);
+            if (current > previous && previous > 0) {
+                buyIntervals.push(current - previous);
+            }
+        }
+
+        const topConditionsByUsdc = (() => {
+            const aggregates = new Map();
+            for (const event of tradeEvents) {
+                const conditionId = normalizeText(event?.conditionId, 'UNKNOWN');
+                const title = normalizeText(event?.title, normalizeText(event?.slug, conditionId));
+                const key = `${conditionId}::${title}`;
+                const snapshot = aggregates.get(key) || {
+                    conditionId,
+                    title,
+                    usdc: 0,
+                    count: 0,
+                };
+                snapshot.usdc += toSafeNumber(event?.usdcSize);
+                snapshot.count += 1;
+                aggregates.set(key, snapshot);
+            }
+
+            return [...aggregates.values()]
+                .sort((left, right) => {
+                    if (right.usdc !== left.usdc) {
+                        return right.usdc - left.usdc;
+                    }
+
+                    return right.count - left.count;
+                })
+                .slice(0, argv.top);
+        })();
+
+        const adjacentBuy = buildAdjacentBuyClusters(buyEvents, argv.mergeWindowMs, argv.top);
+
+        let positions = null;
+        let positionsError = '';
+        if (argv.fetchPositions && scope.targetWallet) {
+            const fetched = await fetchPolymarketPositions(
+                scope.targetWallet,
+                'polymarket-copytrading-bot/target-wallet-profile'
+            );
+            positionsError = normalizeText(fetched.error, '');
+            positions = summarizePositions(fetched.positions || [], argv.top);
+        }
 
         const summary = {
-            generatedAt: new Date().toISOString(),
             input: {
-                userAddress,
-                mergeWindowMs: argv.mergeWindowMs,
+                scopeKey: scope.scopeKey,
+                scopeSource: scope.scopeSource,
+                sourceWallet: scope.sourceWallet,
+                targetWallet: scope.targetWallet,
                 range,
-                rangeLabel: `${range.sinceTs ? formatTimestamp(range.sinceTs) : '-∞'} ~ ${
-                    range.untilTs ? formatTimestamp(range.untilTs) : '+∞'
-                }`,
-                mongoUriLoadedFrom: ENV_FILE_PATH,
+                rangeLabel: formatRangeLabel(range),
+                mergeWindowMs: argv.mergeWindowMs,
+                envFilePath: ENV_FILE_PATH,
+                mongoUriLoadedFrom: argv.mongoUri ? '--mongo-uri' : 'MONGO_URI',
             },
-            activities: activitySummary,
-            adjacentBuyClusters,
-            positions: positionSummary,
-            positionFetchError: positionsResponse.error || '',
+            collections,
+            activities: {
+                total: sourceEvents.length,
+                tradeCount: tradeEvents.length,
+                buyCount: buyEvents.length,
+                sellCount: sellEvents.length,
+                mergeRedeemCount: mergeRedeemEvents.length,
+                smallBuyCount: smallBuyEvents.length,
+                smallBuyPct: pct(smallBuyEvents.length, buyEvents.length),
+                pendingRetryCount: pendingRetryEvents.length,
+                pendingRetryPct: pct(pendingRetryEvents.length, sourceEvents.length),
+                buyUsdcP25: quantile(buyUsdcSamples, 0.25),
+                buyUsdcP50: quantile(buyUsdcSamples, 0.5),
+                buyUsdcP75: quantile(buyUsdcSamples, 0.75),
+                tradesPerHour,
+                buyIntervalP50Ms: quantile(buyIntervals, 0.5),
+                actionCounts: takeTopEntries(
+                    countBy(sourceEvents, (item) => inferAction(item)),
+                    argv.top
+                ).map(([key, value]) => ({ key, value })),
+                statusCounts: takeTopEntries(
+                    countBy(sourceEvents, (item) => normalizeText(item?.status, 'pending')),
+                    argv.top
+                ).map(([key, value]) => ({ key, value })),
+                snapshotCounts: takeTopEntries(
+                    countBy(sourceEvents, (item) => normalizeText(item?.snapshotStatus, 'UNKNOWN')),
+                    argv.top
+                ).map(([key, value]) => ({ key, value })),
+                topConditionsByUsdc,
+            },
+            adjacentBuy,
+            positions,
+            positionsError,
+            suggestions: [],
         };
 
-        summary.suggestions = buildSuggestions({
-            activitySummary,
-            adjacentBuyClusters,
-            positionSummary,
-        });
+        pushSuggestion(
+            summary.suggestions,
+            summary.activities.smallBuyPct >= 30,
+            '目标账户 BUY 小额碎单占比较高，建议继续前移相邻合并并配合最小下单策略。'
+        );
+        pushSuggestion(
+            summary.suggestions,
+            adjacentBuy.rescuedClusterCount > 0,
+            '存在可聚合后跨过 1u 的 BUY 簇，说明监控入口仍有显著合并收益。'
+        );
+        pushSuggestion(
+            summary.suggestions,
+            summary.activities.pendingRetryPct >= 20,
+            'source_events 中 pending/retry 占比偏高，建议排查执行吞吐和重试退避参数。'
+        );
+
+        const staleOrPartialCount =
+            summary.activities.snapshotCounts.find((item) =>
+                ['PARTIAL', 'STALE'].includes(item.key)
+            )?.value || 0;
+        pushSuggestion(
+            summary.suggestions,
+            pct(staleOrPartialCount, summary.activities.total) >= 10,
+            '快照 PARTIAL/STALE 占比偏高，建议优先提高快照可用性与缓存命中率。'
+        );
+
+        pushSuggestion(
+            summary.suggestions,
+            summary.positions && (summary.positions.redeemableCount > 0 || summary.positions.mergeableCount > 0),
+            '目标账户当前存在 redeemable/mergeable 持仓，可纳入结算链路回归样本。'
+        );
+
+        if (summary.positionsError) {
+            summary.suggestions.push(`持仓接口补充失败：${summary.positionsError}`);
+        }
+
+        if (summary.suggestions.length === 0) {
+            summary.suggestions.push('当前窗口画像较平稳，建议结合 DB 与日志报告继续观察连续时段变化。');
+        }
 
         if (argv.json) {
             console.log(JSON.stringify(summary, null, 2));
             return;
         }
 
-        console.log(renderTextSummary(summary));
+        console.log(renderText(summary));
     } finally {
         await closeMongo();
     }
 };
 
-main().catch(async (error) => {
-    console.error(`生成目标账户画像失败: ${error.message}`);
-    await closeMongo();
+run().catch((error) => {
+    console.error(`target-wallet-profile 执行失败: ${error?.message || error}`);
     process.exit(1);
 });
