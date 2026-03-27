@@ -1,5 +1,5 @@
-import type { NodeContext } from '../../kernel/NodeContext';
-import type { NodeResult } from '../../kernel/NodeResult';
+import type { NodeContext } from '../kernel/NodeContext';
+import type { NodeResult } from '../kernel/NodeResult';
 import type { MonitorWorkflowState } from './workflowState';
 import { MonitorNode } from './MonitorNode';
 

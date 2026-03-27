@@ -1,7 +1,7 @@
 import { loadRuntimeConfig } from '../../config/runtimeConfig';
 import { createLogger } from '../../utils/logger';
-import type { RefactorRuntime } from './contracts';
-import { createRefactorStores } from '../db/repositories';
+import type { Runtime } from './contracts';
+import { createStores } from '../db/repositories';
 import { PolymarketMonitorGateway } from '../monitor/polymarketMonitorGateway';
 import { LiveSettlementGateway } from '../settlement/liveSettlementGateway';
 import { PaperSettlementGateway } from '../settlement/paperSettlementGateway';
@@ -9,11 +9,11 @@ import { createLiveClobClient, createPublicClobClient } from '../polymarket/clob
 import { LiveTradingGateway } from '../trading/liveTradingGateway';
 import { PaperTradingGateway } from '../trading/paperTradingGateway';
 
-export const createRefactorRuntime = async (
+export const createRuntime = async (
     config = loadRuntimeConfig()
-): Promise<RefactorRuntime> => {
+): Promise<Runtime> => {
     const logger = createLogger(`${config.runMode}:${config.strategyKind}`);
-    const stores = createRefactorStores(config);
+    const stores = createStores(config);
     const monitor = new PolymarketMonitorGateway({ config, logger });
 
     if (config.runMode === 'paper') {

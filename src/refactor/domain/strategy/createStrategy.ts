@@ -1,4 +1,4 @@
-import type { StrategyKind } from '../domain';
+import type { StrategyKind } from '..';
 import { FixedAmountCopyTradeStrategy } from './FixedAmountCopyTradeStrategy';
 import { ProportionalCopyTradeStrategy } from './ProportionalCopyTradeStrategy';
 import { SignalCopyTradeStrategy } from './SignalCopyTradeStrategy';

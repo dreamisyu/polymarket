@@ -1,6 +1,6 @@
 import type { SourceActivityRecord } from '../infrastructure/polymarket/dto';
 
-const traceExecutionTypes = new Set(['TRADE', 'MERGE', 'REDEEM']);
+const paperExecutionTypes = new Set(['TRADE', 'MERGE', 'REDEEM']);
 const liveExecutionTypes = new Set(['TRADE', 'MERGE']);
 
 export const resolveTradeAction = (trade: Pick<SourceActivityRecord, 'side' | 'type'>) =>
@@ -11,6 +11,6 @@ export const resolveExecutionIntent = (
     mode: 'live' | 'paper'
 ) => {
     const type = String(trade.type || '').trim().toUpperCase();
-    const executableTypes = mode === 'paper' ? traceExecutionTypes : liveExecutionTypes;
+    const executableTypes = mode === 'paper' ? paperExecutionTypes : liveExecutionTypes;
     return executableTypes.has(type) ? 'EXECUTE' : 'SYNC_ONLY';
 };

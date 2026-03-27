@@ -5,7 +5,7 @@ import type {
     SourceTradeEvent,
     StrategySizingDecision,
     TradeExecutionResult,
-} from '../domain';
+} from '..';
 
 export interface CopyTradeWorkflowState extends Record<string, unknown> {
     sourceEvent?: SourceTradeEvent | null;

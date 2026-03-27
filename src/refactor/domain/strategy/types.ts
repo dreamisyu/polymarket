@@ -1,6 +1,6 @@
-import type { NodeChainBuilder, NodeWorkflowDefinition } from '../kernel/NodeChainBuilder';
-import type { NodeRegistry } from '../kernel/NodeRegistry';
-import type { StrategyKind } from '../domain';
+import type { NodeChainBuilder, NodeWorkflowDefinition } from '../nodes/kernel/NodeChainBuilder';
+import type { NodeRegistry } from '../nodes/kernel/NodeRegistry';
+import type { StrategyKind } from '..';
 
 export interface StrategyBuildResult {
     strategyKind: StrategyKind;

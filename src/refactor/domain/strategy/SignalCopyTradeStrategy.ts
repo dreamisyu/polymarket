@@ -1,4 +1,4 @@
-import type { NodeRegistry } from '../kernel/NodeRegistry';
+import type { NodeRegistry } from '../nodes/kernel/NodeRegistry';
 import { SignalSizingNode } from '../nodes/copytrade/SizingNodes';
 import { BaseCopyTradeStrategy } from './BaseCopyTradeStrategy';
 import type { StrategyExtensionDefinition } from './types';

@@ -63,22 +63,22 @@ export interface SettlementGateway {
     runDue(): Promise<void>;
 }
 
-export interface RefactorStores {
+export interface RuntimeStores {
     sourceEvents: SourceEventStore;
     executions: ExecutionStore;
     ledger?: LedgerStore;
     settlementTasks: SettlementTaskStore;
 }
 
-export interface RefactorGateways {
+export interface RuntimeGateways {
     monitor: MonitorGateway;
     trading: TradingGateway;
     settlement: SettlementGateway;
 }
 
-export interface RefactorRuntime {
+export interface Runtime {
     config: RuntimeConfig;
     logger: LoggerLike;
-    stores: RefactorStores;
-    gateways: RefactorGateways;
+    stores: RuntimeStores;
+    gateways: RuntimeGateways;
 }

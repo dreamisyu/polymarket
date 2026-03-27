@@ -1,5 +1,5 @@
-import type { RefactorRuntime } from '../infrastructure/runtime/contracts';
-import type { RunMode, StrategyKind, WorkflowKind } from '../domain';
+import type { Runtime } from '../../../infrastructure/runtime/contracts';
+import type { RunMode, StrategyKind, WorkflowKind } from '../..';
 
 export interface NodeContext<TState extends Record<string, unknown> = Record<string, unknown>> {
     workflowId: string;
@@ -9,7 +9,7 @@ export interface NodeContext<TState extends Record<string, unknown> = Record<str
     parentWorkflowId?: string;
     dispatchReason?: string;
     dispatchId?: string;
-    runtime: RefactorRuntime;
+    runtime: Runtime;
     state: TState;
     startedAt: number;
     now: () => number;

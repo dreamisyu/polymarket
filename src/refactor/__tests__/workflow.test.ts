@@ -1,11 +1,11 @@
 import { describe, expect, it, jest } from '@jest/globals';
-import { BaseNode } from '../kernel/BaseNode';
-import { NodeChainBuilder } from '../kernel/NodeChainBuilder';
-import type { NodeContext } from '../kernel/NodeContext';
-import type { NodeResult } from '../kernel/NodeResult';
-import { NodeRegistry } from '../kernel/NodeRegistry';
-import { NodeWorkflowEngine } from '../kernel/NodeWorkflowEngine';
-import { DispatchCopyTradeNode } from '../nodes/monitor/DispatchCopyTradeNode';
+import { BaseNode } from '../domain/nodes/kernel/BaseNode';
+import { NodeChainBuilder } from '../domain/nodes/kernel/NodeChainBuilder';
+import type { NodeContext } from '../domain/nodes/kernel/NodeContext';
+import type { NodeResult } from '../domain/nodes/kernel/NodeResult';
+import { NodeRegistry } from '../domain/nodes/kernel/NodeRegistry';
+import { NodeWorkflowEngine } from '../domain/nodes/kernel/NodeWorkflowEngine';
+import { DispatchCopyTradeNode } from '../domain/nodes/monitor/DispatchCopyTradeNode';
 
 class TestNode extends BaseNode {
     private readonly handler: (ctx: NodeContext) => Promise<NodeResult>;
@@ -77,7 +77,7 @@ const buildTestContext = (): NodeContext => ({
             autoRedeemEnabled: false,
             autoRedeemIntervalMs: 1000,
             autoRedeemMaxConditionsPerRun: 1,
-            traceInitialBalance: 1000,
+            paperInitialBalance: 1000,
         },
         logger: {
             debug: jest.fn(),

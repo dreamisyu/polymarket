@@ -1,31 +1,31 @@
 import { sleep } from '../utils/sleep';
-import { NodeChainBuilder } from '../kernel/NodeChainBuilder';
-import { NodeRegistry } from '../kernel/NodeRegistry';
-import { NodeWorkflowEngine } from '../kernel/NodeWorkflowEngine';
-import type { NodeContext } from '../kernel/NodeContext';
-import { FetchMonitorEventsNode } from '../nodes/monitor/FetchMonitorEventsNode';
-import { PersistMonitorEventsNode } from '../nodes/monitor/PersistMonitorEventsNode';
-import { DispatchCopyTradeNode } from '../nodes/monitor/DispatchCopyTradeNode';
-import type { MonitorWorkflowState } from '../nodes/monitor/workflowState';
-import { SettlementSweepNode } from '../nodes/settlement/SettlementSweepNode';
+import { NodeChainBuilder } from '../domain/nodes/kernel/NodeChainBuilder';
+import { NodeRegistry } from '../domain/nodes/kernel/NodeRegistry';
+import { NodeWorkflowEngine } from '../domain/nodes/kernel/NodeWorkflowEngine';
+import type { NodeContext } from '../domain/nodes/kernel/NodeContext';
+import { FetchMonitorEventsNode } from '../domain/nodes/monitor/FetchMonitorEventsNode';
+import { PersistMonitorEventsNode } from '../domain/nodes/monitor/PersistMonitorEventsNode';
+import { DispatchCopyTradeNode } from '../domain/nodes/monitor/DispatchCopyTradeNode';
+import type { MonitorWorkflowState } from '../domain/nodes/monitor/workflowState';
+import { SettlementSweepNode } from '../domain/nodes/settlement/SettlementSweepNode';
 import type { SourceTradeEvent } from '../domain';
-import { createStrategy } from '../strategy/createStrategy';
-import type { CopyTradeWorkflowState } from '../strategy/workflowState';
-import type { StrategyBuildResult } from '../strategy/types';
-import type { RefactorRuntime } from '../infrastructure/runtime/contracts';
+import { createStrategy } from '../domain/strategy/createStrategy';
+import type { CopyTradeWorkflowState } from '../domain/strategy/workflowState';
+import type { StrategyBuildResult } from '../domain/strategy/types';
+import type { Runtime } from '../infrastructure/runtime/contracts';
 
 export interface WorkflowWorker {
     name: string;
     run: () => Promise<void>;
 }
 
-export interface RefactorApp {
+export interface App {
     workers: WorkflowWorker[];
     strategy: StrategyBuildResult;
 }
 
 const buildContext = <TState extends Record<string, unknown>>(
-    runtime: RefactorRuntime,
+    runtime: Runtime,
     workflowKind: 'monitor' | 'copytrade' | 'settlement',
     state: TState,
     options: {
@@ -62,7 +62,7 @@ const createLoopWorker = (params: {
     },
 });
 
-export const createRefactorApp = (runtime: RefactorRuntime): RefactorApp => {
+export const createApp = (runtime: Runtime): App => {
     const registry = new NodeRegistry();
     const engine = new NodeWorkflowEngine(registry);
     const strategy = createStrategy(runtime.config.strategyKind).build(registry);

@@ -46,7 +46,7 @@ export class PaperTradingGateway implements TradingGateway {
     }
 
     async getPortfolioSnapshot(): Promise<PortfolioSnapshot> {
-        await this.ledgerStore.ensurePortfolio(this.config.traceInitialBalance);
+        await this.ledgerStore.ensurePortfolio(this.config.paperInitialBalance);
         return this.ledgerStore.getPortfolio();
     }
 
@@ -65,7 +65,7 @@ export class PaperTradingGateway implements TradingGateway {
             return emptyResult('当前节点仅处理 BUY/SELL', request, event);
         }
 
-        await this.ledgerStore.ensurePortfolio(this.config.traceInitialBalance);
+        await this.ledgerStore.ensurePortfolio(this.config.paperInitialBalance);
         const [portfolio, localPosition, orderBook] = await Promise.all([
             this.ledgerStore.getPortfolio(),
             this.ledgerStore.findPositionByAsset(event.asset),
@@ -116,7 +116,7 @@ export class PaperTradingGateway implements TradingGateway {
 
     async executeMerge(request: MergeExecutionRequest): Promise<TradeExecutionResult> {
         const event = request.sourceEvent;
-        await this.ledgerStore.ensurePortfolio(this.config.traceInitialBalance);
+        await this.ledgerStore.ensurePortfolio(this.config.paperInitialBalance);
         const [portfolio, positions] = await Promise.all([
             this.ledgerStore.getPortfolio(),
             this.ledgerStore.listPositions(),

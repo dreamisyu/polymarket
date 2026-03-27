@@ -1,5 +1,5 @@
-import { NodeChainBuilder } from '../kernel/NodeChainBuilder';
-import type { NodeRegistry } from '../kernel/NodeRegistry';
+import { NodeChainBuilder } from '../nodes/kernel/NodeChainBuilder';
+import type { NodeRegistry } from '../nodes/kernel/NodeRegistry';
 import { ActionRouterNode } from '../nodes/copytrade/ActionRouterNode';
 import { ExecuteTradeNode } from '../nodes/copytrade/ExecuteTradeNode';
 import { LoadTradingContextNode } from '../nodes/copytrade/LoadTradingContextNode';

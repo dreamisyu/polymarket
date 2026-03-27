@@ -1,7 +1,7 @@
 import { connectDatabase } from '../infrastructure/db/connectDatabase';
 import { createLogger } from '../utils/logger';
-import { createRefactorRuntime } from '../infrastructure/runtime/createRuntime';
-import { createRefactorApp } from './createRefactorApp';
+import { createRuntime } from '../infrastructure/runtime/createRuntime';
+import { createApp } from './createApp';
 import { loadRuntimeConfig } from '../config/runtimeConfig';
 
 const startWorker = (
@@ -18,8 +18,8 @@ const startWorker = (
 export const main = async () => {
     const config = loadRuntimeConfig();
     await connectDatabase(config);
-    const runtime = await createRefactorRuntime(config);
-    const app = createRefactorApp(runtime);
+    const runtime = await createRuntime(config);
+    const app = createApp(runtime);
 
     runtime.logger.info(
         `启动完成 mode=${runtime.config.runMode} strategy=${runtime.config.strategyKind} source=${runtime.config.sourceWallet} target=${runtime.config.targetWallet}`

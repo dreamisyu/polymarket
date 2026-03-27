@@ -27,7 +27,7 @@ export interface RuntimeConfig {
     signalWeakTicketUsdc: number;
     signalNormalTicketUsdc: number;
     signalStrongTicketUsdc: number;
-    traceInitialBalance: number;
+    paperInitialBalance: number;
     clobHttpUrl: string;
     dataApiUrl: string;
     gammaApiUrl: string;
@@ -71,6 +71,16 @@ const defaultRelayerUrl = 'https://relayer-v2.polymarket.com';
 const normalizeStrategyKind = (): StrategyKind =>
     env.toChoice('STRATEGY_KIND', ['signal', 'fixed_amount', 'proportional'] as const, 'fixed_amount');
 
+const resolvePaperInitialBalance = () => {
+    // 优先使用新语义 PAPER_INITIAL_BALANCE，兼容历史 TRACE_INITIAL_BALANCE。
+    const paperBalance = env.readEnv('PAPER_INITIAL_BALANCE');
+    if (paperBalance) {
+        return env.toNonNegativeNumber('PAPER_INITIAL_BALANCE');
+    }
+
+    return env.toNonNegativeNumber('TRACE_INITIAL_BALANCE', 1_000);
+};
+
 export const loadRuntimeConfig = (): RuntimeConfig => {
     const runMode = env.toChoice('RUN_MODE', ['live', 'paper'] as const, 'paper');
     const strategyKind = normalizeStrategyKind();
@@ -103,7 +113,7 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
         signalWeakTicketUsdc: env.toPositiveNumber('SIGNAL_WEAK_TICKET_USDC', 10),
         signalNormalTicketUsdc: env.toPositiveNumber('SIGNAL_NORMAL_TICKET_USDC', 25),
         signalStrongTicketUsdc: env.toPositiveNumber('SIGNAL_STRONG_TICKET_USDC', 50),
-        traceInitialBalance: env.toNonNegativeNumber('TRACE_INITIAL_BALANCE', 1_000),
+        paperInitialBalance: resolvePaperInitialBalance(),
         clobHttpUrl: env.readEnv('CLOB_HTTP_URL') || defaultClobHttpUrl,
         dataApiUrl: env.readEnv('DATA_API_URL') || defaultDataApiUrl,
         gammaApiUrl: env.readEnv('GAMMA_API_URL') || defaultGammaApiUrl,
