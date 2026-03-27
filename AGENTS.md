@@ -10,9 +10,14 @@
 
 - `npm run dev`：通过 `tsx src/index.ts` 启动机器人。
 - `npm run format`：按 Prettier 规则格式化全仓库。
-- `npm run report:summary`、`npm run audit:osv`：生成执行汇总、执行依赖安全扫描。
+
+## 测试与类型检查注意事项
+
+- 提交前至少执行一次 `npm run check:refactor:quick`（等价于导入检查 + `npm test`）。
+- 涉及 `src/refactor/` 目录迁移、重命名或 import 调整时，必须执行 `npm run check:imports:refactor`。
+- 严禁使用 `npx tsc --noEmit`、`tsc --noEmit`（全量类型检查内存占用高、耗时长）。
+- 需要验证改动正确性时，优先使用“导入检查 + 单元测试”的轻量校验路径；如需补充类型约束，使用局部测试和编译约束替代全量 `tsc`。
 
 ## 安全与配置提示
 
 - 严禁提交 `.env`、`.env.live`、私钥或钱包密钥。
-- 严禁使用`npx tsc --noEmit`、`tsc --noEmit` 命令

@@ -32,13 +32,6 @@ export interface RuntimeConfig {
     dataApiUrl: string;
     gammaApiUrl: string;
     rpcUrl: string;
-    marketWsUrl: string;
-    userWsUrl: string;
-    marketWsEnabled: boolean;
-    marketCacheTtlMs: number;
-    marketWsReconnectMs: number;
-    marketWsSnapshotWaitMs: number;
-    userWsReconnectMs: number;
     orderConfirmationTimeoutMs: number;
     orderConfirmationPollMs: number;
     orderConfirmationBlocks: number;
@@ -62,8 +55,6 @@ const defaultClobHttpUrl = 'https://clob.polymarket.com';
 const defaultDataApiUrl = 'https://data-api.polymarket.com';
 const defaultGammaApiUrl = 'https://gamma-api.polymarket.com';
 const defaultRpcUrl = 'https://polygon.drpc.org';
-const defaultMarketWsUrl = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
-const defaultUserWsUrl = 'wss://ws-subscriptions-clob.polymarket.com/ws/user';
 const defaultUsdcContractAddress = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
 const defaultCtfContractAddress = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
 const defaultRelayerUrl = 'https://relayer-v2.polymarket.com';
@@ -110,13 +101,6 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
         dataApiUrl: env.readEnv('DATA_API_URL') || defaultDataApiUrl,
         gammaApiUrl: env.readEnv('GAMMA_API_URL') || defaultGammaApiUrl,
         rpcUrl: env.readEnv('RPC_URL') || defaultRpcUrl,
-        marketWsUrl: env.readEnv('MARKET_WS_URL') || defaultMarketWsUrl,
-        userWsUrl: env.readEnv('USER_WS_URL') || defaultUserWsUrl,
-        marketWsEnabled: env.toBoolean('MARKET_WS_ENABLED', true),
-        marketCacheTtlMs: env.toPositiveNumber('MARKET_CACHE_TTL_MS', 15_000),
-        marketWsReconnectMs: env.toPositiveNumber('MARKET_WS_RECONNECT_MS', 3_000),
-        marketWsSnapshotWaitMs: env.toPositiveNumber('MARKET_WS_SNAPSHOT_WAIT_MS', 800),
-        userWsReconnectMs: env.toPositiveNumber('USER_WS_RECONNECT_MS', 3_000),
         orderConfirmationTimeoutMs: env.toPositiveNumber('ORDER_CONFIRMATION_TIMEOUT_MS', 30_000),
         orderConfirmationPollMs: env.toPositiveNumber('ORDER_CONFIRMATION_POLL_MS', 2_000),
         orderConfirmationBlocks: env.toPositiveNumber('ORDER_CONFIRMATION_BLOCKS', 2),
