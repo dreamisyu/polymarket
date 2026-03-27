@@ -1,5 +1,5 @@
 import type { RuntimeConfig } from '../config/runtimeConfig';
-import type { SourceActivityRecord, UserPositionRecord } from '../types/polymarket';
+import type { SourceActivityRecord, UserPositionRecord } from '../infrastructure/polymarket/dto';
 import { buildConditionOutcomeKey, computeConditionMergeableSize } from './conditionMath';
 import { normalizeSize, toSafeNumber } from './math';
 

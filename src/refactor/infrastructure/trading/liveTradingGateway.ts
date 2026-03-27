@@ -7,7 +7,7 @@ import type {
     SourceTradeEvent,
     TradeExecutionRequest,
     TradeExecutionResult,
-} from '../../domain/types';
+} from '../../domain';
 import { confirmTransactionHashes } from '../chain/confirm';
 import { submitConditionMerge } from '../chain/ctf';
 import { getUsdcBalance } from '../chain/wallet';

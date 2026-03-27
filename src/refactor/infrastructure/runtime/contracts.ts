@@ -11,7 +11,7 @@ import type {
     TradeExecutionRequest,
     TradeExecutionResult,
     WorkflowExecutionRecord,
-} from '../../domain/types';
+} from '../../domain';
 export type LoggerLike = Logger;
 
 export interface SourceEventStore {

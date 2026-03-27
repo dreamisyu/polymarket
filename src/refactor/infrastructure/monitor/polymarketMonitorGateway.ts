@@ -1,13 +1,13 @@
 import type { Model } from 'mongoose';
 import type { RuntimeConfig } from '../../config/runtimeConfig';
-import type { MonitorSyncResult, SourceTradeEvent } from '../../domain/types';
-import { mapSourceActivity } from '../../mapper/sourceActivityMapper';
+import type { MonitorSyncResult, SourceTradeEvent } from '../../domain';
+import { mapSourceActivity } from '../polymarket/mappers/sourceActivityMapper';
 import { fetchSourceActivities, fetchUserPositions } from '../polymarket/api';
 import { getUsdcBalance } from '../chain/wallet';
 import { buildTradeSnapshots } from '../../utils/snapshots';
 import { buildActivityKey } from '../../utils/activityKey';
 import { toSafeNumber } from '../../utils/math';
-import type { SourceActivityRecord } from '../../types/polymarket';
+import type { SourceActivityRecord } from '../polymarket/dto';
 import type { LoggerLike, MonitorGateway } from '../runtime/contracts';
 import { getMonitorCursorModel } from '../db/models';
 

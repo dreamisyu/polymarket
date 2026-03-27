@@ -1,5 +1,5 @@
 import { env } from './env';
-import type { RunMode, StrategyKind } from '../domain/types';
+import type { RunMode, StrategyKind } from '../domain';
 
 export interface RuntimeConfig {
     runMode: RunMode;

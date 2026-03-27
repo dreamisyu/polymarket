@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import type { WorkflowExecutionRecord } from '../../domain/types';
+import type { WorkflowExecutionRecord } from '../../domain';
 import type { NodeContext } from '../../kernel/NodeContext';
 import type { NodeResult } from '../../kernel/NodeResult';
 import type { CopyTradeWorkflowState } from '../../strategy/workflowState';

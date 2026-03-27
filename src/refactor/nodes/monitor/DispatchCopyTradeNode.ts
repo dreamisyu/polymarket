@@ -2,7 +2,7 @@ import type { NodeContext } from '../../kernel/NodeContext';
 import type { NodeResult } from '../../kernel/NodeResult';
 import type { NodeWorkflowEngine } from '../../kernel/NodeWorkflowEngine';
 import type { NodeWorkflowDefinition } from '../../kernel/NodeChainBuilder';
-import type { SourceTradeEvent } from '../../domain/types';
+import type { SourceTradeEvent } from '../../domain';
 import type { MonitorWorkflowState } from './workflowState';
 import type { CopyTradeWorkflowState } from '../../strategy/workflowState';
 import { MonitorNode } from './MonitorNode';

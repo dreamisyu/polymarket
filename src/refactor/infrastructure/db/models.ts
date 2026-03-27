@@ -5,7 +5,7 @@ import type {
     SettlementTask,
     SourceTradeEvent,
     WorkflowExecutionRecord,
-} from '../../domain/types';
+} from '../../domain';
 
 interface MonitorCursorState {
     wallet: string;

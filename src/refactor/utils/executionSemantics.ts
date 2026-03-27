@@ -1,4 +1,4 @@
-import type { SourceActivityRecord } from '../types/polymarket';
+import type { SourceActivityRecord } from '../infrastructure/polymarket/dto';
 
 const traceExecutionTypes = new Set(['TRADE', 'MERGE', 'REDEEM']);
 const liveExecutionTypes = new Set(['TRADE', 'MERGE']);

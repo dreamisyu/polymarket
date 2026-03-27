@@ -8,7 +8,7 @@ import { PersistMonitorEventsNode } from '../nodes/monitor/PersistMonitorEventsN
 import { DispatchCopyTradeNode } from '../nodes/monitor/DispatchCopyTradeNode';
 import type { MonitorWorkflowState } from '../nodes/monitor/workflowState';
 import { SettlementSweepNode } from '../nodes/settlement/SettlementSweepNode';
-import type { SourceTradeEvent } from '../domain/types';
+import type { SourceTradeEvent } from '../domain';
 import { createStrategy } from '../strategy/createStrategy';
 import type { CopyTradeWorkflowState } from '../strategy/workflowState';
 import type { StrategyBuildResult } from '../strategy/types';

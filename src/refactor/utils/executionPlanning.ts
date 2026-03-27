@@ -1,6 +1,6 @@
 import { Side, TickSize } from '@polymarket/clob-client';
 import type { RuntimeConfig } from '../config/runtimeConfig';
-import type { SourceTradeEvent } from '../domain/types';
+import type { SourceTradeEvent } from '../domain';
 import { toSafeNumber } from './math';
 
 const minMarketBuyUsdc = 1;

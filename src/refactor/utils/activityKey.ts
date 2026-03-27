@@ -1,4 +1,4 @@
-import type { SourceActivityRecord } from '../types/polymarket';
+import type { SourceActivityRecord } from '../infrastructure/polymarket/dto';
 import { toSafeNumber } from './math';
 
 const normalizeText = (value: unknown) => String(value || '').trim();

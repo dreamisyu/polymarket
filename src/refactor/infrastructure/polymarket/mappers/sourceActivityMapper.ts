@@ -1,9 +1,9 @@
-import type { RuntimeConfig } from '../config/runtimeConfig';
-import type { SourceTradeEvent, TradeAction } from '../domain/types';
-import type { SourceActivityRecord } from '../types/polymarket';
-import { buildActivityKey } from '../utils/activityKey';
-import { resolveExecutionIntent, resolveTradeAction } from '../utils/executionSemantics';
-import { toSafeNumber } from '../utils/math';
+import type { RuntimeConfig } from '../../../config/runtimeConfig';
+import type { SourceTradeEvent, TradeAction } from '../../../domain';
+import type { SourceActivityRecord } from '../dto';
+import { buildActivityKey } from '../../../utils/activityKey';
+import { resolveExecutionIntent, resolveTradeAction } from '../../../utils/executionSemantics';
+import { toSafeNumber } from '../../../utils/math';
 
 const normalizeTradeAction = (trade: SourceActivityRecord): TradeAction => {
     const tradeAction = resolveTradeAction(trade).toLowerCase();

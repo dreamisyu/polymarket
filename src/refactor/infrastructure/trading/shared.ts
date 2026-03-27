@@ -1,5 +1,5 @@
-import type { ConditionPositionSnapshot, PortfolioSnapshot, PositionSnapshot, SourceTradeEvent } from '../../domain/types';
-import type { UserPositionRecord } from '../../types/polymarket';
+import type { ConditionPositionSnapshot, PortfolioSnapshot, PositionSnapshot, SourceTradeEvent } from '../../domain';
+import type { UserPositionRecord } from '../polymarket/dto';
 import { buildConditionOutcomeKey, computeConditionMergeableSize } from '../../utils/conditionMath';
 import { normalizeOutcomeLabel } from '../../utils/resolution';
 

@@ -7,7 +7,7 @@ import type {
     SourceTradeEvent,
     TradeExecutionRequest,
     TradeExecutionResult,
-} from '../../domain/types';
+} from '../../domain';
 import { buildChunkExecutionPlan, buildMarketBookSnapshot } from '../../utils/executionPlanning';
 import { normalizeSize } from '../../utils/math';
 import type { LedgerStore, LoggerLike, TradingGateway } from '../runtime/contracts';

@@ -1,5 +1,5 @@
 import type { RuntimeConfig } from '../config/runtimeConfig';
-import type { GammaMarketRecord, MarketTokenRecord } from '../types/polymarket';
+import type { GammaMarketRecord, MarketTokenRecord } from '../infrastructure/polymarket/dto';
 import { fetchJson } from '../infrastructure/http/fetchJson';
 import { toSafeNumber } from './math';
 

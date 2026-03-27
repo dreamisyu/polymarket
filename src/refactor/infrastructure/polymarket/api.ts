@@ -1,5 +1,5 @@
 import type { RuntimeConfig } from '../../config/runtimeConfig';
-import type { SourceActivityRecord, UserPositionRecord } from '../../types/polymarket';
+import type { SourceActivityRecord, UserPositionRecord } from './dto';
 import { fetchJson } from '../http/fetchJson';
 
 export interface OrderBookRecord {

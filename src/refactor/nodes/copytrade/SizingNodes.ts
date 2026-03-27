@@ -1,4 +1,4 @@
-import type { StrategySizingDecision } from '../../domain/types';
+import type { StrategySizingDecision } from '../../domain';
 import type { NodeContext } from '../../kernel/NodeContext';
 import type { NodeResult } from '../../kernel/NodeResult';
 import type { CopyTradeWorkflowState } from '../../strategy/workflowState';

@@ -1,5 +1,5 @@
 import type { RuntimeConfig } from '../config/runtimeConfig';
-import type { SourceTradeEvent, StrategySizingDecision } from '../domain/types';
+import type { SourceTradeEvent, StrategySizingDecision } from '../domain';
 import { computeBuyTargetUsdc, computeSellTargetSize } from './executionPlanning';
 import { isTradeWithinSignalMarketScope } from './marketScope';
 
