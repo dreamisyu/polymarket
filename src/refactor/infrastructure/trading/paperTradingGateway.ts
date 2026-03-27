@@ -1,4 +1,3 @@
-import { ClobClient } from '@polymarket/clob-client';
 import type { RuntimeConfig } from '../../config/runtimeConfig';
 import type {
     MergeExecutionRequest,
@@ -8,8 +7,9 @@ import type {
     TradeExecutionRequest,
     TradeExecutionResult,
 } from '../../domain';
-import { buildChunkExecutionPlan, buildMarketBookSnapshot } from '../../utils/executionPlanning';
+import { buildChunkExecutionPlan } from '../../utils/executionPlanning';
 import { normalizeSize } from '../../utils/math';
+import type { MarketBookFeed } from '../polymarket/marketBookFeed';
 import type { LedgerStore, LoggerLike, TradingGateway } from '../runtime/contracts';
 import { buildConditionPositionSnapshot, buildPortfolioSnapshot } from './shared';
 
@@ -31,18 +31,18 @@ export class PaperTradingGateway implements TradingGateway {
     private readonly config: RuntimeConfig;
     private readonly logger: LoggerLike;
     private readonly ledgerStore: LedgerStore;
-    private readonly clobClient: ClobClient;
+    private readonly marketFeed: MarketBookFeed;
 
     constructor(params: {
         config: RuntimeConfig;
         logger: LoggerLike;
         ledgerStore: LedgerStore;
-        clobClient: ClobClient;
+        marketFeed: MarketBookFeed;
     }) {
         this.config = params.config;
         this.logger = params.logger;
         this.ledgerStore = params.ledgerStore;
-        this.clobClient = params.clobClient;
+        this.marketFeed = params.marketFeed;
     }
 
     async getPortfolioSnapshot(): Promise<PortfolioSnapshot> {
@@ -66,19 +66,25 @@ export class PaperTradingGateway implements TradingGateway {
         }
 
         await this.ledgerStore.ensurePortfolio(this.config.paperInitialBalance);
-        const [portfolio, localPosition, orderBook] = await Promise.all([
+        const [portfolio, localPosition, marketSnapshot] = await Promise.all([
             this.ledgerStore.getPortfolio(),
             this.ledgerStore.findPositionByAsset(event.asset),
-            this.clobClient.getOrderBook(event.asset),
+            this.marketFeed.getSnapshot(event.asset),
         ]);
-        const snapshot = buildMarketBookSnapshot(event.asset, orderBook);
+        if (!marketSnapshot) {
+            return {
+                ...emptyResult('市场盘口不可用，稍后重试', request, event),
+                status: 'retry',
+                reason: '市场盘口不可用，稍后重试',
+            };
+        }
         const plan = buildChunkExecutionPlan({
             condition: event.action,
             trade: event,
             myPositionSize: Math.max(Number(localPosition?.size) || 0, 0),
             sourcePositionAfterTradeSize: Math.max(Number(event.sourcePositionSizeAfterTrade) || 0, 0),
             availableBalance: Math.max(Number(portfolio.cashBalance) || 0, 0),
-            marketSnapshot: snapshot,
+            marketSnapshot,
             config: this.config,
             requestedUsdcOverride: request.requestedUsdc,
             requestedSizeOverride: request.requestedSize,

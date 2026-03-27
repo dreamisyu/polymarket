@@ -2,6 +2,11 @@ import { ApiKeyCreds, Chain, ClobClient, SignatureType } from '@polymarket/clob-
 import { Wallet, type TypedDataDomain, type TypedDataField } from 'ethers';
 import type { RuntimeConfig } from '../../config/runtimeConfig';
 
+export interface LiveClobSession {
+    client: ClobClient;
+    creds: ApiKeyCreds;
+}
+
 const isValidApiKeyCreds = (value: unknown): value is ApiKeyCreds => {
     if (!value || typeof value !== 'object') {
         return false;
@@ -36,7 +41,7 @@ export const createPublicClobClient = (config: Pick<RuntimeConfig, 'clobHttpUrl'
 
 export const createLiveClobClient = async (
     config: Pick<RuntimeConfig, 'clobHttpUrl' | 'proxyWallet' | 'privateKey' | 'relayerTxType'>
-) => {
+): Promise<LiveClobSession> => {
     if (!config.proxyWallet || !config.privateKey) {
         throw new Error('live 模式缺少 PROXY_WALLET 或 PRIVATE_KEY');
     }
@@ -65,19 +70,22 @@ export const createLiveClobClient = async (
         throw new Error('创建或派生 CLOB API Key 失败');
     }
 
-    return new ClobClient(
-        config.clobHttpUrl,
-        Chain.POLYGON,
-        signer,
-        rawCreds,
-        signatureType,
-        config.proxyWallet,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        true
-    );
+    return {
+        client: new ClobClient(
+            config.clobHttpUrl,
+            Chain.POLYGON,
+            signer,
+            rawCreds,
+            signatureType,
+            config.proxyWallet,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            true
+        ),
+        creds: rawCreds,
+    };
 };

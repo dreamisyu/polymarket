@@ -12,8 +12,10 @@ import { confirmTransactionHashes } from '../chain/confirm';
 import { submitConditionMerge } from '../chain/ctf';
 import { getUsdcBalance } from '../chain/wallet';
 import { fetchUserPositions } from '../polymarket/api';
+import type { MarketBookFeed } from '../polymarket/marketBookFeed';
+import type { UserExecutionConfirmationResult, UserExecutionFeed } from '../polymarket/userExecutionFeed';
 import type { LoggerLike, TradingGateway } from '../runtime/contracts';
-import { buildChunkExecutionPlan, buildMarketBookSnapshot } from '../../utils/executionPlanning';
+import { buildChunkExecutionPlan } from '../../utils/executionPlanning';
 import { buildConditionPositionSnapshot, buildPortfolioSnapshot, findMatchingPosition, mapUserPosition } from './shared';
 
 const emptyResult = (reason: string, request: { requestedUsdc?: number; requestedSize?: number }, event: SourceTradeEvent) => ({
@@ -40,11 +42,21 @@ export class LiveTradingGateway implements TradingGateway {
     private readonly config: RuntimeConfig;
     private readonly logger: LoggerLike;
     private readonly clobClient: ClobClient;
+    private readonly marketFeed: MarketBookFeed;
+    private readonly userExecutionFeed: UserExecutionFeed | null;
 
-    constructor(params: { config: RuntimeConfig; logger: LoggerLike; clobClient: ClobClient }) {
+    constructor(params: {
+        config: RuntimeConfig;
+        logger: LoggerLike;
+        clobClient: ClobClient;
+        marketFeed: MarketBookFeed;
+        userExecutionFeed?: UserExecutionFeed | null;
+    }) {
         this.config = params.config;
         this.logger = params.logger;
         this.clobClient = params.clobClient;
+        this.marketFeed = params.marketFeed;
+        this.userExecutionFeed = params.userExecutionFeed || null;
     }
 
     async getPortfolioSnapshot(): Promise<PortfolioSnapshot> {
@@ -77,20 +89,26 @@ export class LiveTradingGateway implements TradingGateway {
             return emptyResult('当前节点仅处理 BUY/SELL', request, event);
         }
 
-        const [positions, balance, orderBook] = await Promise.all([
+        const [positions, balance, marketSnapshot] = await Promise.all([
             fetchUserPositions(this.config.targetWallet, this.config),
             getUsdcBalance(this.config.targetWallet, this.config),
-            this.clobClient.getOrderBook(event.asset),
+            this.marketFeed.getSnapshot(event.asset),
         ]);
+        if (!marketSnapshot) {
+            return {
+                ...emptyResult('市场盘口不可用，稍后重试', request, event),
+                status: 'retry',
+                reason: '市场盘口不可用，稍后重试',
+            };
+        }
         const localPosition = findMatchingPosition(positions || [], event);
-        const snapshot = buildMarketBookSnapshot(event.asset, orderBook);
         const plan = buildChunkExecutionPlan({
             condition: event.action,
             trade: event,
             myPositionSize: Math.max(Number(localPosition?.size) || 0, 0),
             sourcePositionAfterTradeSize: Math.max(Number(event.sourcePositionSizeAfterTrade) || 0, 0),
             availableBalance: Math.max(Number(balance) || 0, 0),
-            marketSnapshot: snapshot,
+            marketSnapshot,
             config: this.config,
             requestedUsdcOverride: request.requestedUsdc,
             requestedSizeOverride: request.requestedSize,
@@ -134,6 +152,36 @@ export class LiveTradingGateway implements TradingGateway {
 
             const orderIds = response.orderID ? [response.orderID] : [];
             const transactionHashes = Array.isArray(response.transactionsHashes) ? response.transactionsHashes : [];
+            const userConfirmation = await this.confirmViaUserFeed(event, orderIds);
+            if (userConfirmation?.confirmationStatus === 'CONFIRMED') {
+                const executedUsdc = event.action === 'buy' ? plan.orderAmount : plan.orderAmount * plan.executionPrice;
+                const executedSize =
+                    event.action === 'buy'
+                        ? executedUsdc / Math.max(plan.executionPrice, 0.0001)
+                        : plan.orderAmount;
+                return {
+                    status: 'confirmed',
+                    reason: request.note || '',
+                    requestedUsdc: plan.requestedUsdc,
+                    requestedSize: plan.requestedSize,
+                    executedUsdc,
+                    executedSize,
+                    executionPrice: plan.executionPrice,
+                    orderIds,
+                    transactionHashes,
+                    confirmedAt: userConfirmation.confirmedAt || Date.now(),
+                };
+            }
+            if (userConfirmation?.confirmationStatus === 'FAILED') {
+                return {
+                    ...emptyResult(userConfirmation.reason, request, event),
+                    status: 'failed',
+                    reason: userConfirmation.reason,
+                    orderIds,
+                    transactionHashes,
+                };
+            }
+
             const confirmation = await confirmTransactionHashes(transactionHashes, this.config, {
                 timeoutMs: this.config.liveConfirmTimeoutMs,
             });
@@ -172,7 +220,7 @@ export class LiveTradingGateway implements TradingGateway {
                 confirmedAt: confirmation.confirmedAt,
             };
         } catch (error) {
-            this.logger.error(`下单异常 activityKey=${event.activityKey}`, error);
+            this.logger.error({ err: error }, `下单异常 activityKey=${event.activityKey}`);
             return {
                 ...emptyResult('下单异常，稍后重试', request, event),
                 status: 'retry',
@@ -242,7 +290,7 @@ export class LiveTradingGateway implements TradingGateway {
                 confirmedAt: confirmation.confirmedAt,
             };
         } catch (error) {
-            this.logger.error(`链上 merge 异常 condition=${event.conditionId}`, error);
+            this.logger.error({ err: error }, `链上 merge 异常 condition=${event.conditionId}`);
             return {
                 ...emptyResult('链上 merge 提交失败', request, event),
                 status: 'retry',
@@ -250,6 +298,30 @@ export class LiveTradingGateway implements TradingGateway {
                 requestedSize,
                 requestedUsdc: requestedSize,
             };
+        }
+    }
+
+    private async confirmViaUserFeed(
+        event: SourceTradeEvent,
+        orderIds: string[]
+    ): Promise<UserExecutionConfirmationResult | null> {
+        if (!this.userExecutionFeed || orderIds.length === 0) {
+            return null;
+        }
+
+        try {
+            return await this.userExecutionFeed.waitForOrders({
+                conditionId: event.conditionId,
+                orderIds,
+                timeoutMs: this.config.liveConfirmTimeoutMs,
+            });
+        } catch (error) {
+            this.logger.warn(
+                `用户执行 websocket 确认失败，回退链上确认 activityKey=${event.activityKey}: ${
+                    (error as { message?: string })?.message || 'unknown'
+                }`
+            );
+            return null;
         }
     }
 }

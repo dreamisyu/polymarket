@@ -29,9 +29,16 @@ export interface RuntimeConfig {
     signalStrongTicketUsdc: number;
     paperInitialBalance: number;
     clobHttpUrl: string;
+    clobWsUrl: string;
+    userWsUrl: string;
     dataApiUrl: string;
     gammaApiUrl: string;
     rpcUrl: string;
+    marketWsReconnectMs: number;
+    userWsReconnectMs: number;
+    wsHeartbeatMs: number;
+    marketBookStaleMs: number;
+    marketWsBootstrapWaitMs: number;
     orderConfirmationTimeoutMs: number;
     orderConfirmationPollMs: number;
     orderConfirmationBlocks: number;
@@ -52,6 +59,7 @@ export interface RuntimeConfig {
 }
 
 const defaultClobHttpUrl = 'https://clob.polymarket.com';
+const defaultClobWsBaseUrl = 'wss://ws-subscriptions-clob.polymarket.com/ws';
 const defaultDataApiUrl = 'https://data-api.polymarket.com';
 const defaultGammaApiUrl = 'https://gamma-api.polymarket.com';
 const defaultRpcUrl = 'https://polygon.drpc.org';
@@ -98,9 +106,16 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
         signalStrongTicketUsdc: env.toPositiveNumber('SIGNAL_STRONG_TICKET_USDC', 50),
         paperInitialBalance: resolvePaperInitialBalance(),
         clobHttpUrl: env.readEnv('CLOB_HTTP_URL') || defaultClobHttpUrl,
+        clobWsUrl: env.readEnv('CLOB_WS_URL') || `${defaultClobWsBaseUrl}/market`,
+        userWsUrl: env.readEnv('USER_WS_URL') || `${defaultClobWsBaseUrl}/user`,
         dataApiUrl: env.readEnv('DATA_API_URL') || defaultDataApiUrl,
         gammaApiUrl: env.readEnv('GAMMA_API_URL') || defaultGammaApiUrl,
         rpcUrl: env.readEnv('RPC_URL') || defaultRpcUrl,
+        marketWsReconnectMs: env.toPositiveNumber('MARKET_WS_RECONNECT_MS', 1_000),
+        userWsReconnectMs: env.toPositiveNumber('USER_WS_RECONNECT_MS', 1_000),
+        wsHeartbeatMs: env.toPositiveNumber('WS_HEARTBEAT_MS', 10_000),
+        marketBookStaleMs: env.toPositiveNumber('MARKET_BOOK_STALE_MS', 2_500),
+        marketWsBootstrapWaitMs: env.toPositiveNumber('MARKET_WS_BOOTSTRAP_WAIT_MS', 750),
         orderConfirmationTimeoutMs: env.toPositiveNumber('ORDER_CONFIRMATION_TIMEOUT_MS', 30_000),
         orderConfirmationPollMs: env.toPositiveNumber('ORDER_CONFIRMATION_POLL_MS', 2_000),
         orderConfirmationBlocks: env.toPositiveNumber('ORDER_CONFIRMATION_BLOCKS', 2),

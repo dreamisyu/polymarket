@@ -6,6 +6,8 @@ import { PolymarketMonitorGateway } from '../monitor/polymarketMonitorGateway';
 import { LiveSettlementGateway } from '../settlement/liveSettlementGateway';
 import { PaperSettlementGateway } from '../settlement/paperSettlementGateway';
 import { createLiveClobClient, createPublicClobClient } from '../polymarket/clobClient';
+import { PolymarketMarketBookFeed } from '../polymarket/marketBookFeed';
+import { PolymarketUserExecutionFeed } from '../polymarket/userExecutionFeed';
 import { LiveTradingGateway } from '../trading/liveTradingGateway';
 import { PaperTradingGateway } from '../trading/paperTradingGateway';
 
@@ -22,11 +24,16 @@ export const createRuntime = async (
         }
 
         const publicClobClient = createPublicClobClient(config);
+        const marketFeed = new PolymarketMarketBookFeed({
+            config,
+            logger,
+            fetchBook: (assetId) => publicClobClient.getOrderBook(assetId),
+        });
         const trading = new PaperTradingGateway({
             config,
             logger,
             ledgerStore: stores.ledger,
-            clobClient: publicClobClient,
+            marketFeed,
         });
         const settlement = new PaperSettlementGateway({
             config,
@@ -46,11 +53,23 @@ export const createRuntime = async (
         };
     }
 
-    const clobClient = await createLiveClobClient(config);
+    const clobSession = await createLiveClobClient(config);
+    const marketFeed = new PolymarketMarketBookFeed({
+        config,
+        logger,
+        fetchBook: (assetId) => clobSession.client.getOrderBook(assetId),
+    });
+    const userExecutionFeed = new PolymarketUserExecutionFeed({
+        config,
+        logger,
+        creds: clobSession.creds,
+    });
     const trading = new LiveTradingGateway({
         config,
         logger,
-        clobClient,
+        clobClient: clobSession.client,
+        marketFeed,
+        userExecutionFeed,
     });
     const settlement = new LiveSettlementGateway({
         config,
