@@ -22,7 +22,7 @@ export const main = async () => {
     const app = createApp(runtime);
 
     runtime.logger.info(
-        `启动完成 mode=${runtime.config.runMode} strategy=${runtime.config.strategyKind} source=${runtime.config.sourceWallet} target=${runtime.config.targetWallet}`
+        `启动完成 mode=${runtime.config.runMode} strategy=${runtime.config.strategyKind} self=${runtime.config.sourceWallet} follow=${runtime.config.targetWallet}`
     );
 
     for (const worker of app.workers) {

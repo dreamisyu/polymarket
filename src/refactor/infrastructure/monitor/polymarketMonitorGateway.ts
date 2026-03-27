@@ -74,7 +74,7 @@ export class PolymarketMonitorGateway implements MonitorGateway {
     }
 
     async syncOnce(): Promise<MonitorSyncResult> {
-        const cursor = await this.Cursor.findOne({ wallet: this.config.sourceWallet }).lean<MonitorCursorState | null>();
+        const cursor = await this.Cursor.findOne({ wallet: this.config.targetWallet }).lean<MonitorCursorState | null>();
         const endTimestamp = Date.now();
         const startTimestamp = Math.max(
             0,
@@ -82,8 +82,8 @@ export class PolymarketMonitorGateway implements MonitorGateway {
         );
         const fetchedTrades = await this.fetchActivityWindow(startTimestamp, endTimestamp);
         const [positions, balance] = await Promise.all([
-            fetchUserPositions(this.config.sourceWallet, this.config),
-            getUsdcBalance(this.config.sourceWallet, this.config),
+            fetchUserPositions(this.config.targetWallet, this.config),
+            this.resolveMonitoredUsdcBalance(),
         ]);
         const capturedAt = Date.now();
         const snapshots = buildTradeSnapshots(fetchedTrades, positions, balance, capturedAt, this.config);
@@ -95,16 +95,16 @@ export class PolymarketMonitorGateway implements MonitorGateway {
                 },
                 this.config
             );
-            event.sourceWallet = this.config.sourceWallet;
+            event.sourceWallet = this.config.targetWallet;
             return event;
         });
 
         const lastTrade = fetchedTrades[fetchedTrades.length - 1];
         await this.Cursor.updateOne(
-            { wallet: this.config.sourceWallet },
+            { wallet: this.config.targetWallet },
             {
                 $set: {
-                    wallet: this.config.sourceWallet,
+                    wallet: this.config.targetWallet,
                     lastSyncedTimestamp: toSafeNumber(lastTrade?.timestamp, endTimestamp),
                     lastSyncedActivityKey: String(lastTrade?.activityKey || ''),
                 },
@@ -112,15 +112,24 @@ export class PolymarketMonitorGateway implements MonitorGateway {
             { upsert: true }
         );
 
-        if (events.length > 0) {
-            this.logger.debug(`监控同步完成 fetched=${events.length} start=${startTimestamp} end=${endTimestamp}`);
-        }
+        this.logger.debug(
+            `监控同步完成 wallet=${this.config.targetWallet} fetched=${events.length} start=${startTimestamp} end=${endTimestamp}`
+        );
 
         return {
             events,
             newEvents: events,
             syncedAt: capturedAt,
         };
+    }
+
+    private async resolveMonitoredUsdcBalance() {
+        if (this.config.runMode === 'paper') {
+            // paper 模式不依赖链上 RPC，避免节点连通性导致监控流程退出。
+            return 0;
+        }
+
+        return getUsdcBalance(this.config.targetWallet, this.config);
     }
 
     private async fetchActivityWindow(startTimestamp: number, endTimestamp: number) {
@@ -136,6 +145,7 @@ export class PolymarketMonitorGateway implements MonitorGateway {
                     end: normalizedEnd,
                     limit: this.config.activitySyncLimit,
                 },
+                this.config.targetWallet,
                 this.config
             );
             if (!Array.isArray(activitiesRaw)) {

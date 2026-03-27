@@ -16,10 +16,11 @@ export interface OrderBookRecord {
 
 export const fetchSourceActivities = async (
     params: { start: number; end: number; limit: number },
-    config: Pick<RuntimeConfig, 'dataApiUrl' | 'sourceWallet'>
+    wallet: string,
+    config: Pick<RuntimeConfig, 'dataApiUrl'>
 ) => {
     const search = new URLSearchParams({
-        user: config.sourceWallet,
+        user: wallet,
         start: String(params.start),
         end: String(params.end),
         limit: String(params.limit),

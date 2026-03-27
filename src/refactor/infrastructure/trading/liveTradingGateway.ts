@@ -61,8 +61,8 @@ export class LiveTradingGateway implements TradingGateway {
 
     async getPortfolioSnapshot(): Promise<PortfolioSnapshot> {
         const [positions, balance] = await Promise.all([
-            fetchUserPositions(this.config.targetWallet, this.config),
-            getUsdcBalance(this.config.targetWallet, this.config),
+            fetchUserPositions(this.config.sourceWallet, this.config),
+            getUsdcBalance(this.config.sourceWallet, this.config),
         ]);
 
         return buildPortfolioSnapshot(
@@ -73,13 +73,13 @@ export class LiveTradingGateway implements TradingGateway {
     }
 
     async getPositionForEvent(event: SourceTradeEvent): Promise<PositionSnapshot | null> {
-        const positions = (await fetchUserPositions(this.config.targetWallet, this.config)) || [];
+        const positions = (await fetchUserPositions(this.config.sourceWallet, this.config)) || [];
         const matched = findMatchingPosition(positions, event);
         return matched ? mapUserPosition(matched) : null;
     }
 
     async listConditionPositions(conditionId: string) {
-        const positions = ((await fetchUserPositions(this.config.targetWallet, this.config)) || []).map(mapUserPosition);
+        const positions = ((await fetchUserPositions(this.config.sourceWallet, this.config)) || []).map(mapUserPosition);
         return buildConditionPositionSnapshot(positions, conditionId);
     }
 
@@ -90,8 +90,8 @@ export class LiveTradingGateway implements TradingGateway {
         }
 
         const [positions, balance, marketSnapshot] = await Promise.all([
-            fetchUserPositions(this.config.targetWallet, this.config),
-            getUsdcBalance(this.config.targetWallet, this.config),
+            fetchUserPositions(this.config.sourceWallet, this.config),
+            getUsdcBalance(this.config.sourceWallet, this.config),
             this.marketFeed.getSnapshot(event.asset),
         ]);
         if (!marketSnapshot) {

@@ -58,15 +58,15 @@ export class LiveSettlementGateway implements SettlementGateway {
         const reason = `市场已 resolved winner=${resolution?.winnerOutcome || 'unknown'}，已停止未完成跟单并开始回收`;
         await this.sourceEvents.skipOutstandingByCondition(task.conditionId, reason, now);
 
-        const positions = (await fetchUserPositions(this.config.targetWallet, this.config)) || [];
-        const targetPositions = positions.filter(
+        const positions = (await fetchUserPositions(this.config.sourceWallet, this.config)) || [];
+        const localPositions = positions.filter(
             (position) =>
                 String(position.conditionId || '').trim() === task.conditionId &&
                 Boolean(position.redeemable) &&
                 Number(position.size) > 0
         );
 
-        if (targetPositions.length === 0) {
+        if (localPositions.length === 0) {
             await this.settlementTasks.markSettled(
                 String(task._id),
                 resolution?.winnerOutcome || '',
@@ -86,7 +86,7 @@ export class LiveSettlementGateway implements SettlementGateway {
             return;
         }
 
-        const indexSets = [...new Set(targetPositions.map((position) => 1n << BigInt(Number(position.outcomeIndex) || 0)))].sort(
+        const indexSets = [...new Set(localPositions.map((position) => 1n << BigInt(Number(position.outcomeIndex) || 0)))].sort(
             (left, right) => Number(left - right)
         );
         if (indexSets.length === 0) {
