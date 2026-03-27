@@ -44,6 +44,7 @@ export interface SettlementTaskStore {
     ): Promise<void>;
     claimDue(now: number): Promise<SettlementTask | null>;
     markSettled(taskId: string, winnerOutcome: string, reason: string, now: number): Promise<void>;
+    markClosed(taskId: string, winnerOutcome: string, reason: string, now: number): Promise<void>;
     markRetry(taskId: string, reason: string, now: number, delayMs: number): Promise<void>;
 }
 
@@ -60,7 +61,7 @@ export interface TradingGateway {
 }
 
 export interface SettlementGateway {
-    runDue(): Promise<void>;
+    runDue(): Promise<boolean>;
 }
 
 export interface RuntimeStores {

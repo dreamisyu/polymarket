@@ -11,9 +11,7 @@ import { PolymarketUserExecutionFeed } from '../polymarket/userExecutionFeed';
 import { LiveTradingGateway } from '../trading/liveTradingGateway';
 import { PaperTradingGateway } from '../trading/paperTradingGateway';
 
-export const createRuntime = async (
-    config = loadRuntimeConfig()
-): Promise<Runtime> => {
+export const createRuntime = async (config = loadRuntimeConfig()): Promise<Runtime> => {
     const logger = createLogger(`${config.runMode}:${config.strategyKind}`);
     const stores = createStores(config);
     const monitor = new PolymarketMonitorGateway({ config, logger });
@@ -37,6 +35,7 @@ export const createRuntime = async (
         });
         const settlement = new PaperSettlementGateway({
             config,
+            sourceEvents: stores.sourceEvents,
             settlementTasks: stores.settlementTasks,
             ledgerStore: stores.ledger,
         });

@@ -54,7 +54,8 @@ class MongoSourceEventStore implements SourceEventStore {
 
         await this.SourceEvent.bulkWrite(
             uniqueEvents.map((event) => {
-                const normalizedStatus = event.executionIntent === 'SYNC_ONLY' ? 'skipped' : 'pending';
+                const normalizedStatus =
+                    event.executionIntent === 'SYNC_ONLY' ? 'skipped' : 'pending';
                 return {
                     updateOne: {
                         filter: { activityKey: event.activityKey },
@@ -240,7 +241,11 @@ class MongoLedgerStore implements LedgerStore {
     }
 
     async savePosition(position: PositionSnapshot) {
-        await this.Position.findOneAndUpdate({ asset: position.asset }, { $set: position }, { upsert: true });
+        await this.Position.findOneAndUpdate(
+            { asset: position.asset },
+            { $set: position },
+            { upsert: true }
+        );
     }
 
     async deletePosition(asset: string) {
@@ -290,7 +295,7 @@ class MongoSettlementTaskStore implements SettlementTaskStore {
     async claimDue(now: number) {
         const task = await this.SettlementTask.findOneAndUpdate(
             {
-                status: { $in: ['pending', 'processing'] },
+                status: { $in: ['pending', 'processing', 'settled'] },
                 $or: [{ nextRetryAt: 0 }, { nextRetryAt: { $lte: now } }],
             },
             {
@@ -312,6 +317,22 @@ class MongoSettlementTaskStore implements SettlementTaskStore {
             {
                 $set: {
                     status: 'settled',
+                    winnerOutcome,
+                    reason,
+                    claimedAt: 0,
+                    nextRetryAt: 0,
+                    lastCheckedAt: now,
+                },
+            }
+        );
+    }
+
+    async markClosed(taskId: string, winnerOutcome: string, reason: string, now: number) {
+        await this.SettlementTask.updateOne(
+            { _id: new mongoose.Types.ObjectId(taskId) },
+            {
+                $set: {
+                    status: 'closed',
                     winnerOutcome,
                     reason,
                     claimedAt: 0,

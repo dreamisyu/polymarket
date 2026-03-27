@@ -34,7 +34,7 @@ export class LiveSettlementGateway implements SettlementGateway {
         const now = Date.now();
         const task = await this.settlementTasks.claimDue(now);
         if (!task || !task._id) {
-            return;
+            return false;
         }
 
         const resolution = await fetchMarketResolution(
@@ -52,7 +52,7 @@ export class LiveSettlementGateway implements SettlementGateway {
                 now,
                 this.config.settlementIntervalMs
             );
-            return;
+            return true;
         }
 
         const reason = `市场已 resolved winner=${resolution?.winnerOutcome || 'unknown'}，已停止未完成跟单并开始回收`;
@@ -67,13 +67,13 @@ export class LiveSettlementGateway implements SettlementGateway {
         );
 
         if (localPositions.length === 0) {
-            await this.settlementTasks.markSettled(
+            await this.settlementTasks.markClosed(
                 String(task._id),
                 resolution?.winnerOutcome || '',
                 `${reason}；本地无可回收仓位`,
                 now
             );
-            return;
+            return true;
         }
 
         if (!isBytes32Hex(task.conditionId)) {
@@ -83,20 +83,22 @@ export class LiveSettlementGateway implements SettlementGateway {
                 now,
                 this.config.retryBackoffMs
             );
-            return;
+            return true;
         }
 
-        const indexSets = [...new Set(localPositions.map((position) => 1n << BigInt(Number(position.outcomeIndex) || 0)))].sort(
-            (left, right) => Number(left - right)
-        );
+        const indexSets = [
+            ...new Set(
+                localPositions.map((position) => 1n << BigInt(Number(position.outcomeIndex) || 0))
+            ),
+        ].sort((left, right) => Number(left - right));
         if (indexSets.length === 0) {
-            await this.settlementTasks.markSettled(
+            await this.settlementTasks.markClosed(
                 String(task._id),
                 resolution?.winnerOutcome || '',
                 `${reason}；本地无可回收 outcome`,
                 now
             );
-            return;
+            return true;
         }
 
         try {
@@ -111,13 +113,13 @@ export class LiveSettlementGateway implements SettlementGateway {
                 timeoutMs: this.config.liveConfirmTimeoutMs,
             });
             if (confirmation.status === 'CONFIRMED') {
-                await this.settlementTasks.markSettled(
+                await this.settlementTasks.markClosed(
                     String(task._id),
                     resolution?.winnerOutcome || '',
                     `${reason}；redeem 已确认 tx=${hash}`,
                     now
                 );
-                return;
+                return true;
             }
 
             await this.settlementTasks.markRetry(
@@ -126,6 +128,7 @@ export class LiveSettlementGateway implements SettlementGateway {
                 now,
                 this.config.retryBackoffMs
             );
+            return true;
         } catch (error) {
             this.logger.error(`提交 live redeem 失败 condition=${task.conditionId}`, error);
             await this.settlementTasks.markRetry(
@@ -134,6 +137,7 @@ export class LiveSettlementGateway implements SettlementGateway {
                 now,
                 this.config.retryBackoffMs
             );
+            return true;
         }
     }
 }

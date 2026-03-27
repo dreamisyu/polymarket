@@ -4,20 +4,28 @@ import {
     isResolvedMarket,
     normalizeOutcomeLabel,
 } from '../../utils/resolution';
-import type { LedgerStore, SettlementGateway, SettlementTaskStore } from '../runtime/contracts';
+import type {
+    LedgerStore,
+    SettlementGateway,
+    SettlementTaskStore,
+    SourceEventStore,
+} from '../runtime/contracts';
 import { buildPortfolioSnapshot } from '../trading/shared';
 
 export class PaperSettlementGateway implements SettlementGateway {
     private readonly config: RuntimeConfig;
+    private readonly sourceEvents: SourceEventStore;
     private readonly settlementTasks: SettlementTaskStore;
     private readonly ledgerStore: LedgerStore;
 
     constructor(params: {
         config: RuntimeConfig;
+        sourceEvents: SourceEventStore;
         settlementTasks: SettlementTaskStore;
         ledgerStore: LedgerStore;
     }) {
         this.config = params.config;
+        this.sourceEvents = params.sourceEvents;
         this.settlementTasks = params.settlementTasks;
         this.ledgerStore = params.ledgerStore;
     }
@@ -26,7 +34,7 @@ export class PaperSettlementGateway implements SettlementGateway {
         const now = Date.now();
         const task = await this.settlementTasks.claimDue(now);
         if (!task || !task._id) {
-            return;
+            return false;
         }
 
         const resolution = await fetchMarketResolution(
@@ -43,15 +51,22 @@ export class PaperSettlementGateway implements SettlementGateway {
                 String(task._id),
                 '市场尚未 resolved，等待下次结算轮次',
                 now,
-                30_000
+                this.config.settlementIntervalMs
             );
-            return;
+            return true;
         }
+
+        const reason = `市场已 resolved winner=${resolution?.winnerOutcome || 'unknown'}，已停止未完成跟单并开始回收`;
+        await this.sourceEvents.skipOutstandingByCondition(task.conditionId, reason, now);
 
         const positions = await this.ledgerStore.listPositions();
         const remainedPositions = [];
-        const targetPositions = positions.filter((position) => position.conditionId === task.conditionId);
-        const untouchedPositions = positions.filter((position) => position.conditionId !== task.conditionId);
+        const targetPositions = positions.filter(
+            (position) => position.conditionId === task.conditionId
+        );
+        const untouchedPositions = positions.filter(
+            (position) => position.conditionId !== task.conditionId
+        );
         const winnerOutcome = normalizeOutcomeLabel(resolution?.winnerOutcome || '');
         const portfolio = await this.ledgerStore.getPortfolio();
         let nextCashBalance = portfolio.cashBalance;
@@ -67,13 +82,18 @@ export class PaperSettlementGateway implements SettlementGateway {
         }
 
         remainedPositions.push(...untouchedPositions);
-        const nextPortfolio = buildPortfolioSnapshot(nextCashBalance, nextRealizedPnl, remainedPositions);
+        const nextPortfolio = buildPortfolioSnapshot(
+            nextCashBalance,
+            nextRealizedPnl,
+            remainedPositions
+        );
         await this.ledgerStore.savePortfolio(nextPortfolio);
-        await this.settlementTasks.markSettled(
+        await this.settlementTasks.markClosed(
             String(task._id),
             resolution?.winnerOutcome || '',
-            `市场已 resolved winner=${resolution?.winnerOutcome || 'unknown'}`,
+            reason,
             now
         );
+        return true;
     }
 }

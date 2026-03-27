@@ -6,7 +6,12 @@ const requestTimeoutMs = 10_000;
 
 const shouldRetryStatus = (status: number) => status === 429 || status >= 500;
 
-export const fetchJson = async <T>(url: string, init?: RequestInit, retries = 3, delayMs = 1_500) => {
+export const fetchJson = async <T>(
+    url: string,
+    init?: RequestInit,
+    retries = 3,
+    delayMs = 1_500
+) => {
     for (let attempt = 1; attempt <= retries; attempt += 1) {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
@@ -37,7 +42,7 @@ export const fetchJson = async <T>(url: string, init?: RequestInit, retries = 3,
         } catch (error) {
             clearTimeout(timeout);
             if (attempt === retries) {
-                logger.error(`请求失败 url=${url}`, error);
+                logger.error({ error }, `请求失败 url=${url}`);
                 return null;
             }
 

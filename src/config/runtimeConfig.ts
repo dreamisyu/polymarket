@@ -17,6 +17,7 @@ export interface RuntimeConfig {
     retryBackoffMs: number;
     maxRetryCount: number;
     settlementIntervalMs: number;
+    settlementMaxTasksPerRun: number;
     fixedTradeAmountUsdc: number;
     maxOpenPositions: number;
     maxActiveExposureUsdc: number;
@@ -68,7 +69,11 @@ const defaultCtfContractAddress = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
 const defaultRelayerUrl = 'https://relayer-v2.polymarket.com';
 
 const normalizeStrategyKind = (): StrategyKind =>
-    env.toChoice('STRATEGY_KIND', ['signal', 'fixed_amount', 'proportional'] as const, 'fixed_amount');
+    env.toChoice(
+        'STRATEGY_KIND',
+        ['signal', 'fixed_amount', 'proportional'] as const,
+        'fixed_amount'
+    );
 
 const resolvePaperInitialBalance = () => env.toNonNegativeNumber('PAPER_INITIAL_BALANCE', 1_000);
 
@@ -86,18 +91,29 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
         mongoUri: env.requireEnv('MONGO_URI'),
         scopeKey: `${sourceWallet}:${targetWallet}:${runMode}:${strategyKind}`,
         monitorIntervalMs: env.toPositiveNumber('MONITOR_INTERVAL_MS', 5_000),
-        monitorInitialLookbackMs: env.toNonNegativeNumber('MONITOR_INITIAL_LOOKBACK_MS', 24 * 60 * 60 * 1000),
+        monitorInitialLookbackMs: env.toNonNegativeNumber(
+            'MONITOR_INITIAL_LOOKBACK_MS',
+            24 * 60 * 60 * 1000
+        ),
         monitorOverlapMs: env.toNonNegativeNumber('MONITOR_OVERLAP_MS', 30_000),
         activitySyncLimit: env.toPositiveNumber('ACTIVITY_SYNC_LIMIT', 500),
-        activityAdjacentMergeWindowMs: env.toNonNegativeNumber('ACTIVITY_ADJACENT_MERGE_WINDOW_MS', 3_000),
+        activityAdjacentMergeWindowMs: env.toNonNegativeNumber(
+            'ACTIVITY_ADJACENT_MERGE_WINDOW_MS',
+            3_000
+        ),
         snapshotStaleAfterMs: env.toPositiveNumber('SNAPSHOT_STALE_AFTER_MS', 5 * 60_000),
         retryBackoffMs: env.toPositiveNumber('RETRY_BACKOFF_MS', 2_000),
         maxRetryCount: env.toPositiveNumber('MAX_RETRY_COUNT', 3),
         settlementIntervalMs: env.toPositiveNumber('SETTLEMENT_INTERVAL_MS', 30_000),
+        settlementMaxTasksPerRun: env.toPositiveNumber('SETTLEMENT_MAX_TASKS_PER_RUN', 8),
         fixedTradeAmountUsdc: env.toPositiveNumber('FIXED_TRADE_USDC', 20),
         maxOpenPositions: env.toPositiveNumber('MAX_OPEN_POSITIONS', 20),
         maxActiveExposureUsdc: env.toPositiveNumber('MAX_ACTIVE_EXPOSURE_USDC', 1_000),
-        signalMarketScope: env.toChoice('SIGNAL_MARKET_SCOPE', ['all', 'crypto_updown_5m'] as const, 'all'),
+        signalMarketScope: env.toChoice(
+            'SIGNAL_MARKET_SCOPE',
+            ['all', 'crypto_updown_5m'] as const,
+            'all'
+        ),
         signalWeakThresholdUsdc: env.toPositiveNumber('SIGNAL_WEAK_THRESHOLD_USDC', 50),
         signalNormalThresholdUsdc: env.toPositiveNumber('SIGNAL_NORMAL_THRESHOLD_USDC', 100),
         signalStrongThresholdUsdc: env.toPositiveNumber('SIGNAL_STRONG_THRESHOLD_USDC', 250),
@@ -120,10 +136,17 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
         orderConfirmationPollMs: env.toPositiveNumber('ORDER_CONFIRMATION_POLL_MS', 2_000),
         orderConfirmationBlocks: env.toPositiveNumber('ORDER_CONFIRMATION_BLOCKS', 2),
         liveConfirmTimeoutMs: env.toPositiveNumber('LIVE_CONFIRM_TIMEOUT_MS', 60_000),
-        liveReconcileAfterTimeoutMs: env.toPositiveNumber('LIVE_RECONCILE_AFTER_TIMEOUT_MS', 30_000),
+        liveReconcileAfterTimeoutMs: env.toPositiveNumber(
+            'LIVE_RECONCILE_AFTER_TIMEOUT_MS',
+            30_000
+        ),
         maxSlippageBps: env.toNonNegativeNumber('MAX_SLIPPAGE_BPS', 300),
         maxOrderUsdc: env.toNonNegativeNumber('MAX_ORDER_USDC', 250),
-        buyDustResidualMode: env.toChoice('BUY_DUST_RESIDUAL_MODE', ['off', 'defer', 'trim'] as const, 'trim'),
+        buyDustResidualMode: env.toChoice(
+            'BUY_DUST_RESIDUAL_MODE',
+            ['off', 'defer', 'trim'] as const,
+            'trim'
+        ),
         proxyWallet: runMode === 'live' ? env.requireEnv('PROXY_WALLET') : undefined,
         privateKey: runMode === 'live' ? env.requireEnv('PRIVATE_KEY') : undefined,
         relayerUrl: env.readEnv('RELAYER_URL') || defaultRelayerUrl,
@@ -132,6 +155,9 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
         ctfContractAddress: env.readEnv('CTF_CONTRACT_ADDRESS') || defaultCtfContractAddress,
         autoRedeemEnabled: env.toBoolean('AUTO_REDEEM_ENABLED', true),
         autoRedeemIntervalMs: env.toPositiveNumber('AUTO_REDEEM_INTERVAL_MS', 30_000),
-        autoRedeemMaxConditionsPerRun: env.toPositiveNumber('AUTO_REDEEM_MAX_CONDITIONS_PER_RUN', 8),
+        autoRedeemMaxConditionsPerRun: env.toPositiveNumber(
+            'AUTO_REDEEM_MAX_CONDITIONS_PER_RUN',
+            8
+        ),
     };
 };

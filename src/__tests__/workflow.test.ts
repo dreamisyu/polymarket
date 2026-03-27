@@ -58,6 +58,7 @@ const buildTestContext = (): NodeContext => ({
             dataApiUrl: 'https://data-api.polymarket.com',
             gammaApiUrl: 'https://gamma-api.polymarket.com',
             rpcUrl: 'https://polygon.drpc.org',
+            settlementMaxTasksPerRun: 8,
             marketWsReconnectMs: 1000,
             userWsReconnectMs: 1000,
             wsHeartbeatMs: 10_000,
