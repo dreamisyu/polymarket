@@ -71,15 +71,7 @@ const defaultRelayerUrl = 'https://relayer-v2.polymarket.com';
 const normalizeStrategyKind = (): StrategyKind =>
     env.toChoice('STRATEGY_KIND', ['signal', 'fixed_amount', 'proportional'] as const, 'fixed_amount');
 
-const resolvePaperInitialBalance = () => {
-    // 优先使用新语义 PAPER_INITIAL_BALANCE，兼容历史 TRACE_INITIAL_BALANCE。
-    const paperBalance = env.readEnv('PAPER_INITIAL_BALANCE');
-    if (paperBalance) {
-        return env.toNonNegativeNumber('PAPER_INITIAL_BALANCE');
-    }
-
-    return env.toNonNegativeNumber('TRACE_INITIAL_BALANCE', 1_000);
-};
+const resolvePaperInitialBalance = () => env.toNonNegativeNumber('PAPER_INITIAL_BALANCE', 1_000);
 
 export const loadRuntimeConfig = (): RuntimeConfig => {
     const runMode = env.toChoice('RUN_MODE', ['live', 'paper'] as const, 'paper');
