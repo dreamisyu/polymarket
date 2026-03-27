@@ -45,6 +45,7 @@ export interface RuntimeConfig {
     orderConfirmationBlocks: number;
     liveConfirmTimeoutMs: number;
     liveReconcileAfterTimeoutMs: number;
+    liveOrderMinIntervalMs: number;
     maxSlippageBps: number;
     maxOrderUsdc: number;
     buyDustResidualMode: 'off' | 'defer' | 'trim';
@@ -140,6 +141,7 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
             'LIVE_RECONCILE_AFTER_TIMEOUT_MS',
             30_000
         ),
+        liveOrderMinIntervalMs: env.toNonNegativeNumber('LIVE_ORDER_MIN_INTERVAL_MS', 250),
         maxSlippageBps: env.toNonNegativeNumber('MAX_SLIPPAGE_BPS', 300),
         maxOrderUsdc: env.toNonNegativeNumber('MAX_ORDER_USDC', 250),
         buyDustResidualMode: env.toChoice(

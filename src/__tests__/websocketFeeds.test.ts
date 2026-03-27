@@ -108,6 +108,12 @@ describe('PolymarketMarketBookFeed', () => {
         }
 
         socket.open();
+        expect(socket.url).toBe('wss://example.com/market');
+        expect(JSON.parse(socket.sent[0] || '{}')).toEqual({
+            type: 'market',
+            assets_ids: ['asset-1'],
+            custom_feature_enabled: true,
+        });
         socket.emit({
             event_type: 'book',
             asset_id: 'asset-1',
@@ -127,6 +133,41 @@ describe('PolymarketMarketBookFeed', () => {
         expect(snapshot?.bids[0]?.price).toBe(0.42);
         expect(snapshot?.asks[0]?.price).toBe(0.43);
         expect(fetchBook).not.toHaveBeenCalled();
+    });
+
+    it('并发获取同一资产快照时只回退一次 HTTP 拉单', async () => {
+        delete (globalThis as unknown as { WebSocket?: typeof MockWebSocket }).WebSocket;
+        const fetchBook = jest.fn(async () => ({
+            market: 'market-1',
+            asset_id: 'asset-1',
+            timestamp: Date.now().toString(),
+            bids: [{ price: '0.41', size: '100' }],
+            asks: [{ price: '0.42', size: '120' }],
+            min_order_size: '5',
+            tick_size: '0.01',
+            neg_risk: false,
+            last_trade_price: '0.415',
+        }));
+        feed = new PolymarketMarketBookFeed({
+            config: {
+                clobWsUrl: 'wss://example.com/market',
+                marketWsReconnectMs: 100,
+                wsHeartbeatMs: 1000,
+                marketBookStaleMs: 5000,
+                marketWsBootstrapWaitMs: 25,
+            },
+            logger,
+            fetchBook: fetchBook as never,
+        });
+
+        const [left, right] = await Promise.all([
+            feed.getSnapshot('asset-1'),
+            feed.getSnapshot('asset-1'),
+        ]);
+
+        expect(fetchBook).toHaveBeenCalledTimes(1);
+        expect(left).toEqual(right);
+        expect(left?.asks[0]?.price).toBe(0.42);
     });
 });
 
@@ -173,6 +214,16 @@ describe('PolymarketUserExecutionFeed', () => {
             throw new Error('缺少用户 websocket mock 实例');
         }
         socket.open();
+        expect(socket.url).toBe('wss://example.com/user');
+        expect(JSON.parse(socket.sent[0] || '{}')).toEqual({
+            auth: {
+                apiKey: 'key',
+                secret: 'secret',
+                passphrase: 'pass',
+            },
+            markets: ['condition-1'],
+            type: 'user',
+        });
         socket.emit({
             event_type: 'trade',
             taker_order_id: 'order-1',

@@ -41,11 +41,15 @@ const ctfRedeemAbi = [
 ] as const;
 
 const isBytes32Hex = (value: string): value is Hex => /^0x[a-fA-F0-9]{64}$/.test(value);
-const normalizeAmount = (value: number) => BigInt(Math.max(Math.floor(Math.max(value, 0) * 10 ** positionTokenDecimals), 0));
+const normalizeAmount = (value: number) =>
+    BigInt(Math.max(Math.floor(Math.max(value, 0) * 10 ** positionTokenDecimals), 0));
 
 export const submitConditionMerge = async (
     params: { conditionId: string; partition: bigint[]; amount: number },
-    config: Pick<RuntimeConfig, 'privateKey' | 'rpcUrl' | 'ctfContractAddress' | 'usdcContractAddress'>
+    config: Pick<
+        RuntimeConfig,
+        'privateKey' | 'rpcUrl' | 'ctfContractAddress' | 'usdcContractAddress'
+    >
 ) => {
     if (!isBytes32Hex(params.conditionId)) {
         throw new Error('conditionId 非法，无法提交 merge');
@@ -54,6 +58,8 @@ export const submitConditionMerge = async (
     const wallet = createWalletWriter(config);
     return wallet.sendTransaction({
         account: wallet.account,
+        chain: undefined,
+        kzg: undefined,
         to: asAddress(config.ctfContractAddress),
         data: encodeFunctionData({
             abi: ctfMergeAbi,
@@ -71,7 +77,10 @@ export const submitConditionMerge = async (
 
 export const submitRedeemPositions = async (
     params: { conditionId: string; indexSets: bigint[] },
-    config: Pick<RuntimeConfig, 'privateKey' | 'rpcUrl' | 'ctfContractAddress' | 'usdcContractAddress'>
+    config: Pick<
+        RuntimeConfig,
+        'privateKey' | 'rpcUrl' | 'ctfContractAddress' | 'usdcContractAddress'
+    >
 ) => {
     if (!isBytes32Hex(params.conditionId)) {
         throw new Error('conditionId 非法，无法提交 redeem');
@@ -80,11 +89,18 @@ export const submitRedeemPositions = async (
     const wallet = createWalletWriter(config);
     return wallet.sendTransaction({
         account: wallet.account,
+        chain: undefined,
+        kzg: undefined,
         to: asAddress(config.ctfContractAddress),
         data: encodeFunctionData({
             abi: ctfRedeemAbi,
             functionName: 'redeemPositions',
-            args: [asAddress(config.usdcContractAddress), zeroHash, params.conditionId, params.indexSets],
+            args: [
+                asAddress(config.usdcContractAddress),
+                zeroHash,
+                params.conditionId,
+                params.indexSets,
+            ],
         }),
     });
 };

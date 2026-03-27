@@ -69,6 +69,7 @@ const buildTestContext = (): NodeContext => ({
             orderConfirmationBlocks: 1,
             liveConfirmTimeoutMs: 1000,
             liveReconcileAfterTimeoutMs: 1000,
+            liveOrderMinIntervalMs: 100,
             maxSlippageBps: 100,
             maxOrderUsdc: 10,
             buyDustResidualMode: 'trim',

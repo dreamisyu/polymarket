@@ -13,12 +13,25 @@ import { submitConditionMerge } from '../chain/ctf';
 import { getUsdcBalance } from '../chain/wallet';
 import { fetchUserPositions } from '../polymarket/api';
 import type { MarketBookFeed } from '../polymarket/marketBookFeed';
-import type { UserExecutionConfirmationResult, UserExecutionFeed } from '../polymarket/userExecutionFeed';
+import type {
+    UserExecutionConfirmationResult,
+    UserExecutionFeed,
+} from '../polymarket/userExecutionFeed';
 import type { LoggerLike, TradingGateway } from '../runtime/contracts';
 import { buildChunkExecutionPlan } from '../../utils/executionPlanning';
-import { buildConditionPositionSnapshot, buildPortfolioSnapshot, findMatchingPosition, mapUserPosition } from './shared';
+import {
+    buildConditionPositionSnapshot,
+    buildPortfolioSnapshot,
+    findMatchingPosition,
+    mapUserPosition,
+} from './shared';
+import { sleep } from '../../utils/sleep';
 
-const emptyResult = (reason: string, request: { requestedUsdc?: number; requestedSize?: number }, event: SourceTradeEvent) => ({
+const emptyResult = (
+    reason: string,
+    request: { requestedUsdc?: number; requestedSize?: number },
+    event: SourceTradeEvent
+) => ({
     status: 'skipped' as const,
     reason,
     requestedUsdc: Math.max(Number(request.requestedUsdc) || Number(event.usdcSize) || 0, 0),
@@ -44,6 +57,8 @@ export class LiveTradingGateway implements TradingGateway {
     private readonly clobClient: ClobClient;
     private readonly marketFeed: MarketBookFeed;
     private readonly userExecutionFeed: UserExecutionFeed | null;
+    private submissionQueue: Promise<void> = Promise.resolve();
+    private lastSubmissionStartedAt = 0;
 
     constructor(params: {
         config: RuntimeConfig;
@@ -67,7 +82,10 @@ export class LiveTradingGateway implements TradingGateway {
 
         return buildPortfolioSnapshot(
             Math.max(Number(balance) || 0, 0),
-            (positions || []).reduce((sum, position) => sum + (Number(position.realizedPnl) || 0), 0),
+            (positions || []).reduce(
+                (sum, position) => sum + (Number(position.realizedPnl) || 0),
+                0
+            ),
             (positions || []).map(mapUserPosition)
         );
     }
@@ -79,7 +97,9 @@ export class LiveTradingGateway implements TradingGateway {
     }
 
     async listConditionPositions(conditionId: string) {
-        const positions = ((await fetchUserPositions(this.config.sourceWallet, this.config)) || []).map(mapUserPosition);
+        const positions = (
+            (await fetchUserPositions(this.config.sourceWallet, this.config)) || []
+        ).map(mapUserPosition);
         return buildConditionPositionSnapshot(positions, conditionId);
     }
 
@@ -106,7 +126,10 @@ export class LiveTradingGateway implements TradingGateway {
             condition: event.action,
             trade: event,
             myPositionSize: Math.max(Number(localPosition?.size) || 0, 0),
-            sourcePositionAfterTradeSize: Math.max(Number(event.sourcePositionSizeAfterTrade) || 0, 0),
+            sourcePositionAfterTradeSize: Math.max(
+                Number(event.sourcePositionSizeAfterTrade) || 0,
+                0
+            ),
             availableBalance: Math.max(Number(balance) || 0, 0),
             marketSnapshot,
             config: this.config,
@@ -128,18 +151,20 @@ export class LiveTradingGateway implements TradingGateway {
         }
 
         try {
-            const response = await this.clobClient.createAndPostMarketOrder(
-                {
-                    side: plan.side,
-                    tokenID: event.asset,
-                    amount: plan.orderAmount,
-                    price: plan.executionPrice,
-                },
-                {
-                    tickSize: plan.tickSize,
-                    negRisk: plan.negRisk,
-                },
-                OrderType.FOK
+            const response = await this.submitWithPacing(() =>
+                this.clobClient.createAndPostMarketOrder(
+                    {
+                        side: plan.side,
+                        tokenID: event.asset,
+                        amount: plan.orderAmount,
+                        price: plan.executionPrice,
+                    },
+                    {
+                        tickSize: plan.tickSize,
+                        negRisk: plan.negRisk,
+                    },
+                    OrderType.FOK
+                )
             );
 
             if (response.success !== true) {
@@ -151,10 +176,15 @@ export class LiveTradingGateway implements TradingGateway {
             }
 
             const orderIds = response.orderID ? [response.orderID] : [];
-            const transactionHashes = Array.isArray(response.transactionsHashes) ? response.transactionsHashes : [];
+            const transactionHashes = Array.isArray(response.transactionsHashes)
+                ? response.transactionsHashes
+                : [];
             const userConfirmation = await this.confirmViaUserFeed(event, orderIds);
             if (userConfirmation?.confirmationStatus === 'CONFIRMED') {
-                const executedUsdc = event.action === 'buy' ? plan.orderAmount : plan.orderAmount * plan.executionPrice;
+                const executedUsdc =
+                    event.action === 'buy'
+                        ? plan.orderAmount
+                        : plan.orderAmount * plan.executionPrice;
                 const executedSize =
                     event.action === 'buy'
                         ? executedUsdc / Math.max(plan.executionPrice, 0.0001)
@@ -205,8 +235,12 @@ export class LiveTradingGateway implements TradingGateway {
                 };
             }
 
-            const executedUsdc = event.action === 'buy' ? plan.orderAmount : plan.orderAmount * plan.executionPrice;
-            const executedSize = event.action === 'buy' ? executedUsdc / Math.max(plan.executionPrice, 0.0001) : plan.orderAmount;
+            const executedUsdc =
+                event.action === 'buy' ? plan.orderAmount : plan.orderAmount * plan.executionPrice;
+            const executedSize =
+                event.action === 'buy'
+                    ? executedUsdc / Math.max(plan.executionPrice, 0.0001)
+                    : plan.orderAmount;
             return {
                 status: 'confirmed',
                 reason: request.note || '',
@@ -232,26 +266,33 @@ export class LiveTradingGateway implements TradingGateway {
     async executeMerge(request: MergeExecutionRequest): Promise<TradeExecutionResult> {
         const event = request.sourceEvent;
         const conditionSnapshot = await this.listConditionPositions(event.conditionId);
-        const requestedSize = Math.min(Math.max(Number(request.requestedSize) || 0, 0), conditionSnapshot.mergeableSize);
+        const requestedSize = Math.min(
+            Math.max(Number(request.requestedSize) || 0, 0),
+            conditionSnapshot.mergeableSize
+        );
         if (requestedSize <= 0 || conditionSnapshot.positions.length < 2) {
             return emptyResult('本地缺少可 merge 的 complete set', request, event);
         }
 
-        const partition = [...new Set(conditionSnapshot.positions.map((position) => 1n << BigInt(position.outcomeIndex)))].sort(
-            (left, right) => Number(left - right)
-        );
+        const partition = [
+            ...new Set(
+                conditionSnapshot.positions.map((position) => 1n << BigInt(position.outcomeIndex))
+            ),
+        ].sort((left, right) => Number(left - right));
         if (partition.length < 2) {
             return emptyResult('缺少完整 outcome partition，无法执行链上 merge', request, event);
         }
 
         try {
-            const hash = await submitConditionMerge(
-                {
-                    conditionId: event.conditionId,
-                    partition,
-                    amount: requestedSize,
-                },
-                this.config
+            const hash = await this.submitWithPacing(() =>
+                submitConditionMerge(
+                    {
+                        conditionId: event.conditionId,
+                        partition,
+                        amount: requestedSize,
+                    },
+                    this.config
+                )
             );
             const confirmation = await confirmTransactionHashes([hash], this.config, {
                 timeoutMs: this.config.liveConfirmTimeoutMs,
@@ -323,5 +364,36 @@ export class LiveTradingGateway implements TradingGateway {
             );
             return null;
         }
+    }
+
+    private async submitWithPacing<T>(task: () => Promise<T>): Promise<T> {
+        const previous = this.submissionQueue.catch(() => undefined);
+        let release: (() => void) | null = null;
+        this.submissionQueue = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+
+        await previous;
+
+        const waitMs = Math.max(
+            this.lastSubmissionStartedAt + this.config.liveOrderMinIntervalMs - Date.now(),
+            0
+        );
+        if (waitMs > 0) {
+            await sleep(waitMs);
+        }
+
+        this.lastSubmissionStartedAt = Date.now();
+
+        let taskPromise: Promise<T>;
+        try {
+            taskPromise = Promise.resolve(task());
+        } catch (error) {
+            release?.();
+            throw error;
+        }
+
+        release?.();
+        return taskPromise;
     }
 }

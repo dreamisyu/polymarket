@@ -45,7 +45,10 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const buySide = 'BUY' as Side;
 const sellSide = 'SELL' as Side;
 
-const normalizeLevel = (level: { price?: string | number; size?: string | number }): MarketBookLevel => ({
+const normalizeLevel = (level: {
+    price?: string | number;
+    size?: string | number;
+}): MarketBookLevel => ({
     price: Math.max(Number(level.price) || 0, 0),
     size: Math.max(Number(level.size) || 0, 0),
 });
@@ -85,6 +88,7 @@ export class PolymarketMarketBookFeed implements MarketBookFeed {
     private readonly fetchBook: FetchBook;
     private readonly subscribedAssets = new Set<string>();
     private readonly snapshots = new Map<string, MarketBookSnapshot>();
+    private readonly pendingLoads = new Map<string, Promise<MarketBookSnapshot | null>>();
     private ws: RuntimeWebSocket | null = null;
     private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -133,23 +137,19 @@ export class PolymarketMarketBookFeed implements MarketBookFeed {
             return currentSnapshot;
         }
 
-        if (this.isAvailable()) {
-            await sleep(this.config.marketWsBootstrapWaitMs);
-            const wsSnapshot = this.snapshots.get(normalizedAssetId);
-            if (wsSnapshot && !this.isSnapshotStale(wsSnapshot)) {
-                return wsSnapshot;
-            }
+        const pendingLoad = this.pendingLoads.get(normalizedAssetId);
+        if (pendingLoad) {
+            return pendingLoad;
         }
 
-        try {
-            const orderBook = await this.fetchBook(normalizedAssetId);
-            const snapshot = buildMarketBookSnapshot(normalizedAssetId, orderBook);
-            this.snapshots.set(normalizedAssetId, snapshot);
-            return snapshot;
-        } catch (error) {
-            this.logger.error({ err: error }, `获取市场盘口失败 asset=${normalizedAssetId}`);
-            return this.snapshots.get(normalizedAssetId) || null;
-        }
+        let loadPromise: Promise<MarketBookSnapshot | null>;
+        loadPromise = this.loadSnapshot(normalizedAssetId).finally(() => {
+            if (this.pendingLoads.get(normalizedAssetId) === loadPromise) {
+                this.pendingLoads.delete(normalizedAssetId);
+            }
+        });
+        this.pendingLoads.set(normalizedAssetId, loadPromise);
+        return loadPromise;
     }
 
     close() {
@@ -214,6 +214,26 @@ export class PolymarketMarketBookFeed implements MarketBookFeed {
             this.reconnectTimer = null;
             this.connect();
         }, this.config.marketWsReconnectMs);
+    }
+
+    private async loadSnapshot(assetId: string): Promise<MarketBookSnapshot | null> {
+        if (this.isAvailable()) {
+            await sleep(this.config.marketWsBootstrapWaitMs);
+            const wsSnapshot = this.snapshots.get(assetId);
+            if (wsSnapshot && !this.isSnapshotStale(wsSnapshot)) {
+                return wsSnapshot;
+            }
+        }
+
+        try {
+            const orderBook = await this.fetchBook(assetId);
+            const snapshot = buildMarketBookSnapshot(assetId, orderBook);
+            this.snapshots.set(assetId, snapshot);
+            return snapshot;
+        } catch (error) {
+            this.logger.error({ err: error }, `获取市场盘口失败 asset=${assetId}`);
+            return this.snapshots.get(assetId) || null;
+        }
     }
 
     private startHeartbeat() {
@@ -324,7 +344,10 @@ export class PolymarketMarketBookFeed implements MarketBookFeed {
                 }
 
                 if (message.event_type === 'book') {
-                    this.snapshots.set(assetId, buildMarketBookSnapshot(assetId, toBookSnapshotPayload(message)));
+                    this.snapshots.set(
+                        assetId,
+                        buildMarketBookSnapshot(assetId, toBookSnapshotPayload(message))
+                    );
                     continue;
                 }
 
@@ -357,11 +380,17 @@ export class PolymarketMarketBookFeed implements MarketBookFeed {
                     this.upsertSnapshot(assetId, {
                         bids:
                             Number.isFinite(bestBid) && bestBid > 0
-                                ? [{ price: bestBid, size: existing.bids[0]?.size || 0 }, ...existing.bids.slice(1)]
+                                ? [
+                                      { price: bestBid, size: existing.bids[0]?.size || 0 },
+                                      ...existing.bids.slice(1),
+                                  ]
                                 : existing.bids,
                         asks:
                             Number.isFinite(bestAsk) && bestAsk > 0
-                                ? [{ price: bestAsk, size: existing.asks[0]?.size || 0 }, ...existing.asks.slice(1)]
+                                ? [
+                                      { price: bestAsk, size: existing.asks[0]?.size || 0 },
+                                      ...existing.asks.slice(1),
+                                  ]
                                 : existing.asks,
                         timestamp: Date.now(),
                     });
