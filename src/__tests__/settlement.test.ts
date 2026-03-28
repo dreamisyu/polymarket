@@ -28,6 +28,7 @@ const buildRuntime = (overrides: Partial<Runtime> = {}): Runtime =>
             snapshotStaleAfterMs: 1000,
             retryBackoffMs: 1000,
             maxRetryCount: 3,
+            copytradeDispatchConcurrency: 2,
             settlementIntervalMs: 1000,
             settlementMaxTasksPerRun: 3,
             fixedTradeAmountUsdc: 1,
@@ -243,6 +244,7 @@ describe('PaperSettlementGateway', () => {
         const savePortfolio = jest.fn(async () => undefined);
         const sourceEvents: SourceEventStore = {
             upsertMany: async () => [],
+            claimDueRetries: async () => [],
             markConfirmed: async () => undefined,
             markSkipped: async () => undefined,
             markRetry: async () => undefined,
@@ -306,6 +308,7 @@ describe('PaperSettlementGateway', () => {
             config: buildRuntime().config,
             sourceEvents: {
                 upsertMany: async () => [],
+                claimDueRetries: async () => [],
                 markConfirmed: async () => undefined,
                 markSkipped: async () => undefined,
                 markRetry: async () => undefined,

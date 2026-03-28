@@ -94,6 +94,35 @@ class MongoSourceEventStore implements SourceEventStore {
         return persistedEvents || [];
     }
 
+    async claimDueRetries(now: number, limit: number) {
+        const claimedEvents: SourceTradeEvent[] = [];
+        const maxItems = Math.max(Math.trunc(limit), 0);
+        while (claimedEvents.length < maxItems) {
+            const nextEvent = await this.SourceEvent.findOneAndUpdate(
+                {
+                    executionIntent: 'EXECUTE',
+                    status: 'retry',
+                    $or: [{ nextRetryAt: 0 }, { nextRetryAt: { $lte: now } }],
+                },
+                {
+                    $set: {
+                        status: 'processing',
+                        claimedAt: now,
+                    },
+                },
+                { sort: { nextRetryAt: 1, timestamp: 1 }, new: true }
+            ).lean<SourceTradeEvent | null>();
+
+            if (!nextEvent) {
+                break;
+            }
+
+            claimedEvents.push(nextEvent);
+        }
+
+        return claimedEvents;
+    }
+
     async markConfirmed(eventId: string, reason: string, now: number) {
         await this.SourceEvent.updateOne(
             { _id: new mongoose.Types.ObjectId(eventId) },
@@ -131,6 +160,9 @@ class MongoSourceEventStore implements SourceEventStore {
                     claimedAt: 0,
                     nextRetryAt: now + Math.max(delayMs, 0),
                     lastError: reason,
+                },
+                $inc: {
+                    attemptCount: 1,
                 },
             }
         );

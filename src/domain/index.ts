@@ -5,3 +5,4 @@ export * from './model/portfolio';
 export * from './model/execution';
 export * from './model/monitor';
 export * from './model/settlement';
+export * from './model/dispatch';

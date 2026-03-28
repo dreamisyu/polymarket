@@ -5,10 +5,11 @@ import { NodeWorkflowEngine } from '../domain/nodes/kernel/NodeWorkflowEngine';
 import type { NodeContext } from '../domain/nodes/kernel/NodeContext';
 import { FetchMonitorEventsNode } from '../domain/nodes/monitor/FetchMonitorEventsNode';
 import { PersistMonitorEventsNode } from '../domain/nodes/monitor/PersistMonitorEventsNode';
+import { PrepareDispatchBundlesNode } from '../domain/nodes/monitor/PrepareDispatchBundlesNode';
 import { DispatchCopyTradeNode } from '../domain/nodes/monitor/DispatchCopyTradeNode';
 import type { MonitorWorkflowState } from '../domain/nodes/monitor/workflowState';
 import { SettlementSweepNode } from '../domain/nodes/settlement/SettlementSweepNode';
-import type { SourceTradeEvent } from '../domain';
+import type { CopyTradeDispatchItem } from '../domain';
 import { createStrategy } from '../domain/strategy/createStrategy';
 import type { CopyTradeWorkflowState } from '../domain/strategy/workflowState';
 import type { StrategyBuildResult } from '../domain/strategy/types';
@@ -64,18 +65,21 @@ const createLoopWorker = (params: {
 
 export const createApp = (runtime: Runtime): App => {
     const registry = new NodeRegistry();
-    const engine = new NodeWorkflowEngine(registry);
+    const engine = new NodeWorkflowEngine(registry, {
+        detachedConcurrency: runtime.config.copytradeDispatchConcurrency,
+    });
     const strategy = createStrategy(runtime.config.strategyKind).build(registry);
 
     const buildCopyTradeContext = (
-        event: SourceTradeEvent,
+        dispatchItem: CopyTradeDispatchItem,
         parentCtx: NodeContext<MonitorWorkflowState>
     ): NodeContext<CopyTradeWorkflowState> =>
         buildContext(
             runtime,
             'copytrade',
             {
-                sourceEvent: event,
+                sourceEvent: dispatchItem.sourceEvent,
+                sourceEvents: dispatchItem.sourceEvents,
                 portfolio: undefined,
                 localPosition: undefined,
                 conditionPositions: undefined,
@@ -84,15 +88,18 @@ export const createApp = (runtime: Runtime): App => {
                 policyTrail: [],
             },
             {
-                workflowId: `copytrade:${runtime.config.strategyKind}:${event.activityKey}`,
+                workflowId: `copytrade:${runtime.config.strategyKind}:${dispatchItem.dispatchId}`,
                 parentWorkflowId: parentCtx.workflowId,
-                dispatchReason: 'monitor-dispatch',
-                dispatchId: event.activityKey,
+                dispatchReason: dispatchItem.aggregated
+                    ? 'monitor-bundle-dispatch'
+                    : 'monitor-dispatch',
+                dispatchId: dispatchItem.dispatchId,
             }
         );
 
     registry.register(new FetchMonitorEventsNode());
     registry.register(new PersistMonitorEventsNode());
+    registry.register(new PrepareDispatchBundlesNode());
     registry.register(
         new DispatchCopyTradeNode({
             engine,
@@ -105,6 +112,7 @@ export const createApp = (runtime: Runtime): App => {
     const monitorWorkflow = new NodeChainBuilder()
         .append('monitor.fetch')
         .append('monitor.persist')
+        .append('monitor.aggregate')
         .append('monitor.dispatch')
         .build();
     const settlementWorkflow = new NodeChainBuilder().append('settlement.sweep').build();
@@ -116,7 +124,10 @@ export const createApp = (runtime: Runtime): App => {
                 name: '监控分发工作流',
                 intervalMs: runtime.config.monitorIntervalMs,
                 runOnce: async () => {
-                    await engine.run(buildContext(runtime, 'monitor', {} as MonitorWorkflowState), monitorWorkflow);
+                    await engine.run(
+                        buildContext(runtime, 'monitor', {} as MonitorWorkflowState),
+                        monitorWorkflow
+                    );
                 },
             }),
             createLoopWorker({

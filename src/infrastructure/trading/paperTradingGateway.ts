@@ -7,6 +7,7 @@ import type {
     TradeExecutionRequest,
     TradeExecutionResult,
 } from '../../domain';
+import { resolveFixedAmountBundleExecution } from '../../utils/copytradeDispatch';
 import { buildChunkExecutionPlan } from '../../utils/executionPlanning';
 import { normalizeSize } from '../../utils/math';
 import type { MarketBookFeed } from '../polymarket/marketBookFeed';
@@ -15,7 +16,11 @@ import { buildConditionPositionSnapshot, buildPortfolioSnapshot } from './shared
 
 const epsilon = 1e-8;
 
-const emptyResult = (reason: string, request: { requestedUsdc?: number; requestedSize?: number }, event: SourceTradeEvent) => ({
+const emptyResult = (
+    reason: string,
+    request: { requestedUsdc?: number; requestedSize?: number },
+    event: SourceTradeEvent
+) => ({
     status: 'skipped' as const,
     reason,
     requestedUsdc: Math.max(Number(request.requestedUsdc) || Number(event.usdcSize) || 0, 0),
@@ -82,7 +87,10 @@ export class PaperTradingGateway implements TradingGateway {
             condition: event.action,
             trade: event,
             myPositionSize: Math.max(Number(localPosition?.size) || 0, 0),
-            sourcePositionAfterTradeSize: Math.max(Number(event.sourcePositionSizeAfterTrade) || 0, 0),
+            sourcePositionAfterTradeSize: Math.max(
+                Number(event.sourcePositionSizeAfterTrade) || 0,
+                0
+            ),
             availableBalance: Math.max(Number(portfolio.cashBalance) || 0, 0),
             marketSnapshot,
             config: this.config,
@@ -102,14 +110,50 @@ export class PaperTradingGateway implements TradingGateway {
             };
         }
 
-        const executedUsdc = event.action === 'buy' ? plan.orderAmount : plan.orderAmount * plan.executionPrice;
-        const executedSize = event.action === 'buy' ? executedUsdc / Math.max(plan.executionPrice, 0.0001) : plan.orderAmount;
-        await this.applyTradeExecution(event, localPosition, portfolio, executedUsdc, executedSize, plan.executionPrice);
-        this.logger.debug(`模拟成交 activityKey=${event.activityKey} price=${plan.executionPrice} size=${executedSize.toFixed(4)}`);
+        const bundleExecution = resolveFixedAmountBundleExecution({
+            event,
+            requestedUsdc: plan.requestedUsdc,
+            executableUsdc: plan.orderAmount,
+            fixedTradeAmountUsdc: this.config.fixedTradeAmountUsdc,
+        });
+        if (bundleExecution && bundleExecution.plannedCount <= 0) {
+            return emptyResult('聚合买单在当前余额下不可执行', request, event);
+        }
+        if (bundleExecution && bundleExecution.executedCount <= 0) {
+            return {
+                ...emptyResult('聚合买单未达到单笔最小金额，稍后重试', request, event),
+                status: 'retry',
+                reason: '聚合买单未达到单笔最小金额，稍后重试',
+                metadata: {
+                    bundlePlannedCount: bundleExecution.plannedCount,
+                    bundleExecutedCount: 0,
+                },
+            };
+        }
+
+        const executedUsdc =
+            event.action === 'buy'
+                ? (bundleExecution?.executableUsdc ?? plan.orderAmount)
+                : plan.orderAmount * plan.executionPrice;
+        const executedSize =
+            event.action === 'buy'
+                ? executedUsdc / Math.max(plan.executionPrice, 0.0001)
+                : plan.orderAmount;
+        await this.applyTradeExecution(
+            event,
+            localPosition,
+            portfolio,
+            executedUsdc,
+            executedSize,
+            plan.executionPrice
+        );
+        this.logger.debug(
+            `模拟成交 activityKey=${event.activityKey} price=${plan.executionPrice} size=${executedSize.toFixed(4)}`
+        );
         return {
             status: 'confirmed',
             reason: request.note || '',
-            requestedUsdc: plan.requestedUsdc,
+            requestedUsdc: bundleExecution?.requestedUsdc ?? plan.requestedUsdc,
             requestedSize: plan.requestedSize,
             executedUsdc,
             executedSize,
@@ -117,6 +161,12 @@ export class PaperTradingGateway implements TradingGateway {
             orderIds: [],
             transactionHashes: [],
             confirmedAt: Date.now(),
+            metadata: bundleExecution
+                ? {
+                      bundlePlannedCount: bundleExecution.plannedCount,
+                      bundleExecutedCount: bundleExecution.executedCount,
+                  }
+                : undefined,
         };
     }
 
@@ -128,14 +178,19 @@ export class PaperTradingGateway implements TradingGateway {
             this.ledgerStore.listPositions(),
         ]);
         const snapshot = buildConditionPositionSnapshot(positions, event.conditionId);
-        const requestedSize = Math.min(Math.max(Number(request.requestedSize) || 0, 0), snapshot.mergeableSize);
+        const requestedSize = Math.min(
+            Math.max(Number(request.requestedSize) || 0, 0),
+            snapshot.mergeableSize
+        );
         if (requestedSize <= 0 || snapshot.positions.length < 2) {
             return emptyResult('本地缺少可 merge 的 complete set', request, event);
         }
 
         let nextCashBalance = portfolio.cashBalance + requestedSize;
         let nextRealizedPnl = portfolio.realizedPnl;
-        const positionsByAsset = new Map(positions.map((position) => [position.asset, { ...position }]));
+        const positionsByAsset = new Map(
+            positions.map((position) => [position.asset, { ...position }])
+        );
 
         for (const position of snapshot.positions) {
             const current = positionsByAsset.get(position.asset);
@@ -144,7 +199,10 @@ export class PaperTradingGateway implements TradingGateway {
             }
 
             const sizeBefore = Math.max(Number(current.size) || 0, 0);
-            const releasedCostBasis = sizeBefore > 0 ? (Number(current.costBasis) || 0) * (requestedSize / sizeBefore) : 0;
+            const releasedCostBasis =
+                sizeBefore > 0
+                    ? (Number(current.costBasis) || 0) * (requestedSize / sizeBefore)
+                    : 0;
             const proceedsShare = requestedSize / snapshot.positions.length;
             const realizedPnlDelta = proceedsShare - releasedCostBasis;
             current.size = normalizeSize(sizeBefore - requestedSize);
@@ -163,8 +221,14 @@ export class PaperTradingGateway implements TradingGateway {
             }
         }
 
-        const nextPositions = [...positionsByAsset.values()].filter((position) => position.size > epsilon);
-        const nextPortfolio = buildPortfolioSnapshot(nextCashBalance, nextRealizedPnl, nextPositions);
+        const nextPositions = [...positionsByAsset.values()].filter(
+            (position) => position.size > epsilon
+        );
+        const nextPortfolio = buildPortfolioSnapshot(
+            nextCashBalance,
+            nextRealizedPnl,
+            nextPositions
+        );
         await this.ledgerStore.savePortfolio(nextPortfolio);
 
         return {
@@ -191,21 +255,20 @@ export class PaperTradingGateway implements TradingGateway {
     ) {
         const positions = await this.ledgerStore.listPositions();
         const withoutCurrent = positions.filter((position) => position.asset !== event.asset);
-        const basePosition: PositionSnapshot =
-            currentPosition || {
-                asset: event.asset,
-                conditionId: event.conditionId,
-                outcome: event.outcome,
-                outcomeIndex: event.outcomeIndex,
-                size: 0,
-                avgPrice: 0,
-                marketPrice: 0,
-                marketValue: 0,
-                costBasis: 0,
-                realizedPnl: 0,
-                redeemable: false,
-                lastUpdatedAt: Date.now(),
-            };
+        const basePosition: PositionSnapshot = currentPosition || {
+            asset: event.asset,
+            conditionId: event.conditionId,
+            outcome: event.outcome,
+            outcomeIndex: event.outcomeIndex,
+            size: 0,
+            avgPrice: 0,
+            marketPrice: 0,
+            marketValue: 0,
+            costBasis: 0,
+            realizedPnl: 0,
+            redeemable: false,
+            lastUpdatedAt: Date.now(),
+        };
 
         let nextCashBalance = currentPortfolio.cashBalance;
         let nextRealizedPnl = currentPortfolio.realizedPnl;
@@ -226,7 +289,10 @@ export class PaperTradingGateway implements TradingGateway {
             };
         } else {
             const sellSize = Math.min(executedSize, basePosition.size);
-            const avgPrice = basePosition.size > epsilon ? basePosition.costBasis / basePosition.size : basePosition.avgPrice;
+            const avgPrice =
+                basePosition.size > epsilon
+                    ? basePosition.costBasis / basePosition.size
+                    : basePosition.avgPrice;
             const realizedPnlDelta = executedUsdc - avgPrice * sellSize;
             const remainingSize = Math.max(basePosition.size - sellSize, 0);
             const remainingCostBasis = Math.max(basePosition.costBasis - avgPrice * sellSize, 0);
@@ -238,7 +304,8 @@ export class PaperTradingGateway implements TradingGateway {
                     : {
                           ...basePosition,
                           size: remainingSize,
-                          avgPrice: remainingSize > epsilon ? remainingCostBasis / remainingSize : 0,
+                          avgPrice:
+                              remainingSize > epsilon ? remainingCostBasis / remainingSize : 0,
                           costBasis: remainingCostBasis,
                           marketPrice: executionPrice,
                           marketValue: remainingSize * executionPrice,
@@ -254,7 +321,11 @@ export class PaperTradingGateway implements TradingGateway {
         }
 
         const nextPositions = nextPosition ? [...withoutCurrent, nextPosition] : withoutCurrent;
-        const nextPortfolio = buildPortfolioSnapshot(nextCashBalance, nextRealizedPnl, nextPositions);
+        const nextPortfolio = buildPortfolioSnapshot(
+            nextCashBalance,
+            nextRealizedPnl,
+            nextPositions
+        );
         await this.ledgerStore.savePortfolio(nextPortfolio);
     }
 }

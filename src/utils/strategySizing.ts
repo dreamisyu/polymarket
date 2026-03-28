@@ -1,5 +1,6 @@
 import type { RuntimeConfig } from '../config/runtimeConfig';
 import type { SourceTradeEvent, StrategySizingDecision } from '../domain';
+import { getAggregatedTradeCount } from './copytradeDispatch';
 import { computeBuyTargetUsdc, computeSellTargetSize } from './executionPlanning';
 import { isTradeWithinSignalMarketScope } from './marketScope';
 
@@ -60,7 +61,10 @@ export const computeFixedAmountDecision = (
     config: Pick<RuntimeConfig, 'fixedTradeAmountUsdc'>
 ): StrategySizingDecision => {
     if (event.action === 'buy') {
-        const requestedUsdc = Math.min(config.fixedTradeAmountUsdc, availableBalance);
+        const requestedUsdc = Math.min(
+            config.fixedTradeAmountUsdc * getAggregatedTradeCount(event),
+            availableBalance
+        );
         if (requestedUsdc <= 0) {
             return {
                 status: 'skip',
@@ -101,10 +105,7 @@ export const computeSignalDecision = (
         return computeProportionalDecision(event, availableBalance, localPositionSize, config);
     }
 
-    if (
-        config.signalMarketScope === 'crypto_updown_5m' &&
-        !isTradeWithinSignalMarketScope(event)
-    ) {
+    if (config.signalMarketScope === 'crypto_updown_5m' && !isTradeWithinSignalMarketScope(event)) {
         return {
             status: 'skip',
             reason: '当前信号策略仅跟 BTC/ETH 5 分钟 Up/Down 市场',

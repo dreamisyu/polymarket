@@ -6,6 +6,7 @@ import type { NodeResult } from '../domain/nodes/kernel/NodeResult';
 import { NodeRegistry } from '../domain/nodes/kernel/NodeRegistry';
 import { NodeWorkflowEngine } from '../domain/nodes/kernel/NodeWorkflowEngine';
 import { DispatchCopyTradeNode } from '../domain/nodes/monitor/DispatchCopyTradeNode';
+import { buildCopyTradeDispatchItems } from '../utils/copytradeDispatch';
 
 class TestNode extends BaseNode {
     private readonly handler: (ctx: NodeContext) => Promise<NodeResult>;
@@ -52,6 +53,7 @@ const buildTestContext = (): NodeContext => ({
             signalStrongTicketUsdc: 3,
             maxRetryCount: 3,
             retryBackoffMs: 1000,
+            copytradeDispatchConcurrency: 2,
             clobHttpUrl: 'https://clob.polymarket.com',
             clobWsUrl: 'wss://ws-subscriptions-clob.polymarket.com/ws/market',
             userWsUrl: 'wss://ws-subscriptions-clob.polymarket.com/ws/user',
@@ -143,21 +145,57 @@ describe('NodeWorkflowEngine', () => {
         expect(visited).toEqual(['a', 'b']);
         expect(summary.lastNodeId).toBe('b');
     });
+
+    it('异步派发会遵守并发上限', async () => {
+        const registry = new NodeRegistry();
+        const started: string[] = [];
+        const releases = new Map<string, () => void>();
+
+        registry.register(
+            new TestNode('slow', async (ctx) => {
+                started.push(String(ctx.workflowId));
+                await new Promise<void>((resolve) => {
+                    releases.set(String(ctx.workflowId), resolve);
+                });
+                return { status: 'success', next: null };
+            })
+        );
+
+        const engine = new NodeWorkflowEngine(registry, { detachedConcurrency: 2 });
+        const workflow = new NodeChainBuilder().append('slow').build();
+
+        engine.runDetached({ ...buildTestContext(), workflowId: 'job-1' }, workflow);
+        engine.runDetached({ ...buildTestContext(), workflowId: 'job-2' }, workflow);
+        engine.runDetached({ ...buildTestContext(), workflowId: 'job-3' }, workflow);
+
+        await Promise.resolve();
+
+        expect(started).toEqual(['job-1', 'job-2']);
+
+        releases.get('job-1')?.();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(started).toEqual(['job-1', 'job-2', 'job-3']);
+
+        releases.get('job-2')?.();
+        releases.get('job-3')?.();
+    });
 });
 
 describe('DispatchCopyTradeNode', () => {
-    it('只异步派发 EXECUTE 事件', async () => {
+    it('只异步派发已准备好的 dispatch items', async () => {
         const runDetached = jest.fn();
         const node = new DispatchCopyTradeNode({
             engine: { runDetached } as unknown as NodeWorkflowEngine,
             workflow: { headNodeId: 'copytrade.context', transitions: new Map() },
-            buildCopyTradeContext: (event) =>
+            buildCopyTradeContext: (dispatchItem) =>
                 ({
                     ...buildTestContext(),
-                    workflowId: `copytrade:${event.activityKey}`,
+                    workflowId: `copytrade:${dispatchItem.dispatchId}`,
                     workflowKind: 'copytrade',
                     state: {
-                        sourceEvent: event,
+                        sourceEvent: dispatchItem.sourceEvent,
+                        sourceEvents: dispatchItem.sourceEvents,
                     },
                 }) as NodeContext,
         });
@@ -167,16 +205,20 @@ describe('DispatchCopyTradeNode', () => {
             workflowId: 'monitor:test',
             workflowKind: 'monitor',
             state: {
-                newEvents: [
+                dispatchItems: [
                     {
-                        _id: '1',
-                        activityKey: 'execute-1',
-                        executionIntent: 'EXECUTE',
-                    },
-                    {
-                        _id: '2',
-                        activityKey: 'sync-1',
-                        executionIntent: 'SYNC_ONLY',
+                        dispatchId: 'bundle:1',
+                        aggregated: true,
+                        sourceEvent: {
+                            activityKey: 'bundle:1',
+                        },
+                        sourceEvents: [
+                            {
+                                _id: '1',
+                                activityKey: 'execute-1',
+                                executionIntent: 'EXECUTE',
+                            },
+                        ],
                     },
                 ],
             },
@@ -187,7 +229,113 @@ describe('DispatchCopyTradeNode', () => {
         expect(result.status).toBe('success');
         expect(runDetached).toHaveBeenCalledTimes(1);
         expect((runDetached.mock.calls[0]?.[0] as NodeContext).workflowId).toBe(
-            'copytrade:execute-1'
+            'copytrade:bundle:1'
         );
+    });
+});
+
+describe('buildCopyTradeDispatchItems', () => {
+    it('会按同资产同价格窗口聚合 fixed_amount BUY', () => {
+        const baseTs = 1_700_000_000_000;
+        const items = buildCopyTradeDispatchItems({
+            strategyKind: 'fixed_amount',
+            mergeWindowMs: 1000,
+            events: [
+                {
+                    _id: '1',
+                    sourceWallet: 'source',
+                    activityKey: 'buy-1',
+                    timestamp: baseTs,
+                    type: 'TRADE',
+                    side: 'BUY',
+                    action: 'buy',
+                    transactionHash: 'hash-1',
+                    conditionId: 'condition-1',
+                    asset: 'asset-1',
+                    outcome: 'Yes',
+                    outcomeIndex: 0,
+                    title: 'market-1',
+                    slug: 'market-1',
+                    eventSlug: 'event-1',
+                    price: 0.54,
+                    size: 1,
+                    usdcSize: 1,
+                    executionIntent: 'EXECUTE',
+                    raw: {},
+                },
+                {
+                    _id: '2',
+                    sourceWallet: 'source',
+                    activityKey: 'buy-2',
+                    timestamp: baseTs + 100,
+                    type: 'TRADE',
+                    side: 'BUY',
+                    action: 'buy',
+                    transactionHash: 'hash-2',
+                    conditionId: 'condition-1',
+                    asset: 'asset-1',
+                    outcome: 'Yes',
+                    outcomeIndex: 0,
+                    title: 'market-1',
+                    slug: 'market-1',
+                    eventSlug: 'event-1',
+                    price: 0.54,
+                    size: 2,
+                    usdcSize: 1,
+                    executionIntent: 'EXECUTE',
+                    raw: {},
+                },
+                {
+                    _id: '3',
+                    sourceWallet: 'source',
+                    activityKey: 'buy-3',
+                    timestamp: baseTs + 150,
+                    type: 'TRADE',
+                    side: 'BUY',
+                    action: 'buy',
+                    transactionHash: 'hash-3',
+                    conditionId: 'condition-1',
+                    asset: 'asset-1',
+                    outcome: 'Yes',
+                    outcomeIndex: 0,
+                    title: 'market-1',
+                    slug: 'market-1',
+                    eventSlug: 'event-1',
+                    price: 0.53,
+                    size: 3,
+                    usdcSize: 2,
+                    executionIntent: 'EXECUTE',
+                    raw: {},
+                },
+                {
+                    _id: '4',
+                    sourceWallet: 'source',
+                    activityKey: 'buy-4',
+                    timestamp: baseTs + 200,
+                    type: 'TRADE',
+                    side: 'BUY',
+                    action: 'buy',
+                    transactionHash: 'hash-4',
+                    conditionId: 'condition-1',
+                    asset: 'asset-1',
+                    outcome: 'Yes',
+                    outcomeIndex: 0,
+                    title: 'market-1',
+                    slug: 'market-1',
+                    eventSlug: 'event-1',
+                    price: 0.54,
+                    size: 1,
+                    usdcSize: 1,
+                    executionIntent: 'EXECUTE',
+                    raw: {},
+                },
+            ] as never,
+        });
+
+        expect(items).toHaveLength(3);
+        expect(items[0]?.aggregated).toBe(true);
+        expect(items[0]?.sourceEvents).toHaveLength(2);
+        expect(items[1]?.aggregated).toBe(false);
+        expect(items[2]?.aggregated).toBe(false);
     });
 });

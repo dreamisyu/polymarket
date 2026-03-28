@@ -2,13 +2,16 @@ import type { NodeContext } from '../kernel/NodeContext';
 import type { NodeResult } from '../kernel/NodeResult';
 import type { NodeWorkflowEngine } from '../kernel/NodeWorkflowEngine';
 import type { NodeWorkflowDefinition } from '../kernel/NodeChainBuilder';
-import type { SourceTradeEvent } from '../..';
+import type { CopyTradeDispatchItem } from '../..';
 import type { MonitorWorkflowState } from './workflowState';
 import type { CopyTradeWorkflowState } from '../../strategy/workflowState';
 import { MonitorNode } from './MonitorNode';
 
 interface CopyTradeContextBuilder {
-    (event: SourceTradeEvent, parentCtx: NodeContext<MonitorWorkflowState>): NodeContext<CopyTradeWorkflowState>;
+    (
+        dispatchItem: CopyTradeDispatchItem,
+        parentCtx: NodeContext<MonitorWorkflowState>
+    ): NodeContext<CopyTradeWorkflowState>;
 }
 
 export class DispatchCopyTradeNode extends MonitorNode<MonitorWorkflowState> {
@@ -28,18 +31,16 @@ export class DispatchCopyTradeNode extends MonitorNode<MonitorWorkflowState> {
     }
 
     async doAction(ctx: NodeContext<MonitorWorkflowState>): Promise<NodeResult> {
-        const executableEvents = (ctx.state.newEvents || []).filter(
-            (event) => event.executionIntent === 'EXECUTE'
-        );
-        if (executableEvents.length === 0) {
+        const dispatchItems = ctx.state.dispatchItems || [];
+        if (dispatchItems.length === 0) {
             return this.skip('本轮没有待派发的可执行源事件', null);
         }
 
-        for (const event of executableEvents) {
-            const childCtx = this.buildCopyTradeContext(event, ctx);
+        for (const dispatchItem of dispatchItems) {
+            const childCtx = this.buildCopyTradeContext(dispatchItem, ctx);
             this.engine.runDetached(childCtx, this.workflow);
         }
 
-        return this.success({ dispatched: executableEvents.length });
+        return this.success({ dispatched: dispatchItems.length });
     }
 }

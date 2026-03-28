@@ -18,6 +18,7 @@ import type {
     UserExecutionFeed,
 } from '../polymarket/userExecutionFeed';
 import type { LoggerLike, TradingGateway } from '../runtime/contracts';
+import { resolveFixedAmountBundleExecution } from '../../utils/copytradeDispatch';
 import { buildChunkExecutionPlan } from '../../utils/executionPlanning';
 import {
     buildConditionPositionSnapshot,
@@ -150,13 +151,43 @@ export class LiveTradingGateway implements TradingGateway {
             };
         }
 
+        const bundleExecution = resolveFixedAmountBundleExecution({
+            event,
+            requestedUsdc: plan.requestedUsdc,
+            executableUsdc: plan.orderAmount,
+            fixedTradeAmountUsdc: this.config.fixedTradeAmountUsdc,
+        });
+        if (bundleExecution && bundleExecution.plannedCount <= 0) {
+            return emptyResult('聚合买单在当前余额下不可执行', request, event);
+        }
+        if (bundleExecution && bundleExecution.executedCount <= 0) {
+            return {
+                ...emptyResult('聚合买单未达到单笔最小金额，稍后重试', request, event),
+                status: 'retry',
+                reason: '聚合买单未达到单笔最小金额，稍后重试',
+                metadata: {
+                    bundlePlannedCount: bundleExecution.plannedCount,
+                    bundleExecutedCount: 0,
+                },
+            };
+        }
+
+        const orderAmount = bundleExecution?.executableUsdc ?? plan.orderAmount;
+        const requestedUsdc = bundleExecution?.requestedUsdc ?? plan.requestedUsdc;
+        const executionMetadata = bundleExecution
+            ? {
+                  bundlePlannedCount: bundleExecution.plannedCount,
+                  bundleExecutedCount: bundleExecution.executedCount,
+              }
+            : undefined;
+
         try {
             const response = await this.submitWithPacing(() =>
                 this.clobClient.createAndPostMarketOrder(
                     {
                         side: plan.side,
                         tokenID: event.asset,
-                        amount: plan.orderAmount,
+                        amount: orderAmount,
                         price: plan.executionPrice,
                     },
                     {
@@ -182,17 +213,15 @@ export class LiveTradingGateway implements TradingGateway {
             const userConfirmation = await this.confirmViaUserFeed(event, orderIds);
             if (userConfirmation?.confirmationStatus === 'CONFIRMED') {
                 const executedUsdc =
-                    event.action === 'buy'
-                        ? plan.orderAmount
-                        : plan.orderAmount * plan.executionPrice;
+                    event.action === 'buy' ? orderAmount : orderAmount * plan.executionPrice;
                 const executedSize =
                     event.action === 'buy'
                         ? executedUsdc / Math.max(plan.executionPrice, 0.0001)
-                        : plan.orderAmount;
+                        : orderAmount;
                 return {
                     status: 'confirmed',
                     reason: request.note || '',
-                    requestedUsdc: plan.requestedUsdc,
+                    requestedUsdc,
                     requestedSize: plan.requestedSize,
                     executedUsdc,
                     executedSize,
@@ -200,6 +229,7 @@ export class LiveTradingGateway implements TradingGateway {
                     orderIds,
                     transactionHashes,
                     confirmedAt: userConfirmation.confirmedAt || Date.now(),
+                    metadata: executionMetadata,
                 };
             }
             if (userConfirmation?.confirmationStatus === 'FAILED') {
@@ -236,15 +266,15 @@ export class LiveTradingGateway implements TradingGateway {
             }
 
             const executedUsdc =
-                event.action === 'buy' ? plan.orderAmount : plan.orderAmount * plan.executionPrice;
+                event.action === 'buy' ? orderAmount : orderAmount * plan.executionPrice;
             const executedSize =
                 event.action === 'buy'
                     ? executedUsdc / Math.max(plan.executionPrice, 0.0001)
-                    : plan.orderAmount;
+                    : orderAmount;
             return {
                 status: 'confirmed',
                 reason: request.note || '',
-                requestedUsdc: plan.requestedUsdc,
+                requestedUsdc,
                 requestedSize: plan.requestedSize,
                 executedUsdc,
                 executedSize,
@@ -252,6 +282,7 @@ export class LiveTradingGateway implements TradingGateway {
                 orderIds,
                 transactionHashes,
                 confirmedAt: confirmation.confirmedAt,
+                metadata: executionMetadata,
             };
         } catch (error) {
             this.logger.error({ err: error }, `下单异常 activityKey=${event.activityKey}`);

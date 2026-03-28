@@ -142,6 +142,7 @@ const buildLiveConfig = (overrides: Record<string, unknown> = {}) => ({
     snapshotStaleAfterMs: 1000,
     retryBackoffMs: 1000,
     maxRetryCount: 3,
+    copytradeDispatchConcurrency: 2,
     settlementIntervalMs: 1000,
     settlementMaxTasksPerRun: 8,
     fixedTradeAmountUsdc: 1.2,
@@ -320,8 +321,71 @@ describe('LiveTradingGateway submission pacing', () => {
         await Promise.all([first, second]);
 
         expect(submitTimestamps).toHaveLength(2);
-        expect((submitTimestamps[1] || 0) - (submitTimestamps[0] || 0)).toBeGreaterThanOrEqual(
-            45
-        );
+        expect((submitTimestamps[1] || 0) - (submitTimestamps[0] || 0)).toBeGreaterThanOrEqual(45);
+    });
+
+    it('聚合买单会按固定金额整批裁剪下单金额', async () => {
+        const createAndPostMarketOrder = jest.fn(async () => ({
+            success: true,
+            orderID: 'order-1',
+            transactionsHashes: [],
+        }));
+        const gateway = new LiveTradingGateway({
+            config: buildLiveConfig(),
+            logger: mockLogger as never,
+            clobClient: {
+                createAndPostMarketOrder,
+            } as never,
+            marketFeed: {
+                ensureAsset: async () => undefined,
+                getSnapshot: async () => ({
+                    assetId: 'asset-1',
+                    market: 'market-1',
+                    bids: [{ price: 0.49, size: 100 }],
+                    asks: [{ price: 0.5, size: 5.8 }],
+                    minOrderSize: 5,
+                    tickSize: '0.01' as never,
+                    negRisk: false,
+                    lastTradePrice: 0.5,
+                    timestamp: Date.now(),
+                }),
+            },
+            userExecutionFeed: {
+                isAvailable: () => true,
+                ensureMarket: async () => undefined,
+                waitForOrders: async () => ({
+                    confirmationStatus: 'CONFIRMED',
+                    status: 'CONFIRMED',
+                    reason: '',
+                    confirmedAt: Date.now(),
+                }),
+            },
+        });
+
+        const result = await gateway.executeTrade({
+            sourceEvent: {
+                ...buildBuyEvent('bundle-buy-1'),
+                activityKey: 'bundle:asset-1:0.5:1',
+                usdcSize: 5,
+                raw: {
+                    aggregatedBuyBundle: true,
+                    sourceTradeCount: 3,
+                },
+            },
+            requestedUsdc: 3.6,
+        });
+
+        expect(createAndPostMarketOrder).toHaveBeenCalledTimes(1);
+        const firstOrder = (
+            (createAndPostMarketOrder as jest.Mock).mock.calls as Array<[{ amount: number }]>
+        )[0]?.[0];
+        expect(firstOrder.amount).toBe(2.4);
+        expect(result.status).toBe('confirmed');
+        expect(result.requestedUsdc).toBeCloseTo(3.6, 6);
+        expect(result.executedUsdc).toBeCloseTo(2.4, 6);
+        expect(result.metadata).toEqual({
+            bundlePlannedCount: 3,
+            bundleExecutedCount: 2,
+        });
     });
 });

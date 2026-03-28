@@ -16,6 +16,7 @@ export interface RuntimeConfig {
     snapshotStaleAfterMs: number;
     retryBackoffMs: number;
     maxRetryCount: number;
+    copytradeDispatchConcurrency: number;
     settlementIntervalMs: number;
     settlementMaxTasksPerRun: number;
     fixedTradeAmountUsdc: number;
@@ -105,6 +106,7 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
         snapshotStaleAfterMs: env.toPositiveNumber('SNAPSHOT_STALE_AFTER_MS', 5 * 60_000),
         retryBackoffMs: env.toPositiveNumber('RETRY_BACKOFF_MS', 2_000),
         maxRetryCount: env.toPositiveNumber('MAX_RETRY_COUNT', 3),
+        copytradeDispatchConcurrency: env.toPositiveNumber('COPYTRADE_DISPATCH_CONCURRENCY', 4),
         settlementIntervalMs: env.toPositiveNumber('SETTLEMENT_INTERVAL_MS', 30_000),
         settlementMaxTasksPerRun: env.toPositiveNumber('SETTLEMENT_MAX_TASKS_PER_RUN', 8),
         fixedTradeAmountUsdc: env.toPositiveNumber('FIXED_TRADE_USDC', 20),
