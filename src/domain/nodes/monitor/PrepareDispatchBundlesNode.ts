@@ -12,7 +12,11 @@ export class PrepareDispatchBundlesNode extends MonitorNode<MonitorWorkflowState
     async doAction(ctx: NodeContext<MonitorWorkflowState>): Promise<NodeResult> {
         const retryEvents = await ctx.runtime.stores.sourceEvents.claimDueRetries(
             ctx.now(),
-            ctx.runtime.config.activitySyncLimit
+            ctx.runtime.config.activitySyncLimit,
+            {
+                processingLeaseMs: ctx.runtime.config.copytradeProcessingLeaseMs,
+                maxRetryCount: ctx.runtime.config.maxRetryCount,
+            }
         );
         const dispatchItems = buildCopyTradeDispatchItems({
             events: [...(ctx.state.newEvents || []), ...retryEvents],

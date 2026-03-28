@@ -17,6 +17,7 @@ export interface RuntimeConfig {
     retryBackoffMs: number;
     maxRetryCount: number;
     copytradeDispatchConcurrency: number;
+    copytradeProcessingLeaseMs: number;
     settlementIntervalMs: number;
     settlementMaxTasksPerRun: number;
     fixedTradeAmountUsdc: number;
@@ -108,6 +109,10 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
         retryBackoffMs: env.toPositiveNumber('RETRY_BACKOFF_MS', 2_000),
         maxRetryCount: env.toPositiveNumber('MAX_RETRY_COUNT', 3),
         copytradeDispatchConcurrency: env.toPositiveNumber('COPYTRADE_DISPATCH_CONCURRENCY', 4),
+        copytradeProcessingLeaseMs: env.toPositiveNumber(
+            'COPYTRADE_PROCESSING_LEASE_MS',
+            5 * 60_000
+        ),
         settlementIntervalMs: env.toPositiveNumber('SETTLEMENT_INTERVAL_MS', 30_000),
         settlementMaxTasksPerRun: env.toPositiveNumber('SETTLEMENT_MAX_TASKS_PER_RUN', 8),
         fixedTradeAmountUsdc: env.toPositiveNumber('FIXED_TRADE_USDC', 20),

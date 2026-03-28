@@ -6,6 +6,7 @@ import type { NodeResult } from '../domain/nodes/kernel/NodeResult';
 import { NodeRegistry } from '../domain/nodes/kernel/NodeRegistry';
 import { NodeWorkflowEngine } from '../domain/nodes/kernel/NodeWorkflowEngine';
 import { DispatchCopyTradeNode } from '../domain/nodes/monitor/DispatchCopyTradeNode';
+import { PrepareDispatchBundlesNode } from '../domain/nodes/monitor/PrepareDispatchBundlesNode';
 import { buildCopyTradeDispatchItems } from '../utils/copytradeDispatch';
 
 class TestNode extends BaseNode {
@@ -54,6 +55,7 @@ const buildTestContext = (): NodeContext => ({
             maxRetryCount: 3,
             retryBackoffMs: 1000,
             copytradeDispatchConcurrency: 2,
+            copytradeProcessingLeaseMs: 300_000,
             clobHttpUrl: 'https://clob.polymarket.com',
             clobWsUrl: 'wss://ws-subscriptions-clob.polymarket.com/ws/market',
             userWsUrl: 'wss://ws-subscriptions-clob.polymarket.com/ws/user',
@@ -232,6 +234,39 @@ describe('DispatchCopyTradeNode', () => {
         expect((runDetached.mock.calls[0]?.[0] as NodeContext).workflowId).toBe(
             'copytrade:bundle:1'
         );
+    });
+});
+
+describe('PrepareDispatchBundlesNode', () => {
+    it('claim retry 事件时会带上 processing 租约配置', async () => {
+        const claimDueRetries = jest.fn(async () => []);
+        const node = new PrepareDispatchBundlesNode();
+        const ctx = {
+            ...buildTestContext(),
+            workflowId: 'monitor:test',
+            workflowKind: 'monitor',
+            runtime: {
+                ...buildTestContext().runtime,
+                stores: {
+                    ...buildTestContext().runtime.stores,
+                    sourceEvents: {
+                        ...buildTestContext().runtime.stores.sourceEvents,
+                        claimDueRetries,
+                    },
+                },
+            },
+            state: {
+                newEvents: [],
+            },
+        } as unknown as NodeContext;
+
+        const result = await node.doAction(ctx);
+
+        expect(result.status).toBe('success');
+        expect(claimDueRetries).toHaveBeenCalledWith(expect.any(Number), 100, {
+            processingLeaseMs: 300_000,
+            maxRetryCount: 3,
+        });
     });
 });
 

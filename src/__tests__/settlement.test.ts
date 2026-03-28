@@ -31,6 +31,7 @@ const buildConfig = (overrides: Partial<Runtime['config']> = {}): Runtime['confi
     retryBackoffMs: 1000,
     maxRetryCount: 3,
     copytradeDispatchConcurrency: 2,
+    copytradeProcessingLeaseMs: 300_000,
     settlementIntervalMs: 1000,
     settlementMaxTasksPerRun: 3,
     fixedTradeAmountUsdc: 1,

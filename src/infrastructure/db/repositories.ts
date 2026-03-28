@@ -94,10 +94,32 @@ class MongoSourceEventStore implements SourceEventStore {
         return persistedEvents || [];
     }
 
-    async claimDueRetries(now: number, limit: number) {
+    async claimDueRetries(
+        now: number,
+        limit: number,
+        options: {
+            processingLeaseMs?: number;
+            maxRetryCount?: number;
+        } = {}
+    ) {
         const claimedEvents: SourceTradeEvent[] = [];
         const maxItems = Math.max(Math.trunc(limit), 0);
+        const processingLeaseMs = Math.max(Math.trunc(options.processingLeaseMs || 5 * 60_000), 1);
+        const maxRetryCount = Math.max(Math.trunc(options.maxRetryCount || 0), 0);
         while (claimedEvents.length < maxItems) {
+            const staleProcessingEvent = await this.claimStaleProcessing(
+                now,
+                processingLeaseMs,
+                maxRetryCount
+            );
+            if (staleProcessingEvent === 'handled') {
+                continue;
+            }
+            if (staleProcessingEvent) {
+                claimedEvents.push(staleProcessingEvent);
+                continue;
+            }
+
             const nextEvent = await this.SourceEvent.findOneAndUpdate(
                 {
                     executionIntent: 'EXECUTE',
@@ -121,6 +143,75 @@ class MongoSourceEventStore implements SourceEventStore {
         }
 
         return claimedEvents;
+    }
+
+    private async claimStaleProcessing(
+        now: number,
+        processingLeaseMs: number,
+        maxRetryCount: number
+    ): Promise<SourceTradeEvent | 'handled' | null> {
+        const staleProcessing = await this.SourceEvent.findOne(
+            {
+                executionIntent: 'EXECUTE',
+                status: 'processing',
+                claimedAt: { $gt: 0, $lte: now - processingLeaseMs },
+            },
+            {
+                _id: 1,
+                claimedAt: 1,
+                attemptCount: 1,
+                lastError: 1,
+            }
+        )
+            .sort({ claimedAt: 1, timestamp: 1 })
+            .lean<SourceTradeEvent | null>();
+        if (!staleProcessing || !staleProcessing._id) {
+            return null;
+        }
+
+        const nextAttempt = Math.max(Number(staleProcessing.attemptCount) || 0, 0) + 1;
+        const baseReason = String(staleProcessing.lastError || '').trim() || '处理租约超时';
+        if (maxRetryCount > 0 && nextAttempt > maxRetryCount) {
+            await this.SourceEvent.updateOne(
+                {
+                    _id: new mongoose.Types.ObjectId(String(staleProcessing._id)),
+                    status: 'processing',
+                    claimedAt: staleProcessing.claimedAt,
+                },
+                {
+                    $set: {
+                        status: 'failed',
+                        processedAt: now,
+                        claimedAt: 0,
+                        nextRetryAt: 0,
+                        lastError: `${baseReason}；processing 租约超时，已超过最大重试次数 ${maxRetryCount}`,
+                    },
+                }
+            );
+            return 'handled';
+        }
+
+        const reclaimed = await this.SourceEvent.findOneAndUpdate(
+            {
+                _id: new mongoose.Types.ObjectId(String(staleProcessing._id)),
+                status: 'processing',
+                claimedAt: staleProcessing.claimedAt,
+            },
+            {
+                $set: {
+                    status: 'processing',
+                    claimedAt: now,
+                    nextRetryAt: 0,
+                    lastError: `${baseReason}；processing 租约超时，已重新派发`,
+                },
+                $inc: {
+                    attemptCount: 1,
+                },
+            },
+            { new: true }
+        ).lean<SourceTradeEvent | null>();
+
+        return reclaimed || null;
     }
 
     async markConfirmed(eventId: string, reason: string, now: number) {

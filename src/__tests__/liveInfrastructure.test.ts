@@ -163,6 +163,7 @@ const buildLiveConfig = (overrides: Record<string, unknown> = {}) => ({
     retryBackoffMs: 1000,
     maxRetryCount: 3,
     copytradeDispatchConcurrency: 2,
+    copytradeProcessingLeaseMs: 300_000,
     settlementIntervalMs: 1000,
     settlementMaxTasksPerRun: 8,
     fixedTradeAmountUsdc: 1.2,

@@ -19,7 +19,14 @@ export type LoggerLike = Logger;
 
 export interface SourceEventStore {
     upsertMany(events: SourceTradeEvent[]): Promise<SourceTradeEvent[]>;
-    claimDueRetries(now: number, limit: number): Promise<SourceTradeEvent[]>;
+    claimDueRetries(
+        now: number,
+        limit: number,
+        options?: {
+            processingLeaseMs?: number;
+            maxRetryCount?: number;
+        }
+    ): Promise<SourceTradeEvent[]>;
     markConfirmed(eventId: string, reason: string, now: number): Promise<void>;
     markSkipped(eventId: string, reason: string, now: number): Promise<void>;
     markRetry(eventId: string, reason: string, now: number, delayMs: number): Promise<void>;
