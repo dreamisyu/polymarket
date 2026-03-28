@@ -16,15 +16,19 @@ export class LoadTradingContextNode extends CopyTradeNode {
 
         ctx.state.conditionPositions = undefined;
         ctx.state.sizingDecision = undefined;
+        ctx.state.marketSnapshot = undefined;
+        ctx.state.tradeExecutionRequest = undefined;
         ctx.state.executionResult = undefined;
         ctx.state.policyTrail = [];
 
-        const [portfolio, localPosition] = await Promise.all([
+        const [portfolio, localPosition, marketSnapshot] = await Promise.all([
             ctx.runtime.gateways.trading.getPortfolioSnapshot(),
             ctx.runtime.gateways.trading.getPositionForEvent(event),
+            ctx.runtime.gateways.trading.getMarketSnapshot(event.asset),
         ]);
         ctx.state.portfolio = portfolio;
         ctx.state.localPosition = localPosition;
+        ctx.state.marketSnapshot = marketSnapshot;
 
         return this.success({
             cashBalance: portfolio.cashBalance,

@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import type { SourceTradeEvent } from '../domain';
+import { confirmTransactionHashes } from '../infrastructure/chain/confirm';
+import { submitRedeemPositions } from '../infrastructure/chain/ctf';
 import { createLiveClobClient } from '../infrastructure/polymarket/clobClient';
 import { fetchUserPositions } from '../infrastructure/polymarket/api';
+import { LiveSettlementGateway } from '../infrastructure/settlement/liveSettlementGateway';
 import { getUsdcBalance } from '../infrastructure/chain/wallet';
 import { LiveTradingGateway } from '../infrastructure/trading/liveTradingGateway';
 
@@ -98,6 +101,17 @@ jest.mock('../infrastructure/chain/wallet', () => ({
     getUsdcBalance: jest.fn(),
 }));
 
+jest.mock('../infrastructure/chain/confirm', () => ({
+    __esModule: true,
+    confirmTransactionHashes: jest.fn(),
+}));
+
+jest.mock('../infrastructure/chain/ctf', () => ({
+    __esModule: true,
+    submitConditionMerge: jest.fn(),
+    submitRedeemPositions: jest.fn(),
+}));
+
 const mockLogger = {
     debug: jest.fn(),
     info: jest.fn(),
@@ -126,6 +140,12 @@ const mockedFetchUserPositions = fetchUserPositions as jest.MockedFunction<
     typeof fetchUserPositions
 >;
 const mockedGetUsdcBalance = getUsdcBalance as jest.MockedFunction<typeof getUsdcBalance>;
+const mockedConfirmTransactionHashes = confirmTransactionHashes as jest.MockedFunction<
+    typeof confirmTransactionHashes
+>;
+const mockedSubmitRedeemPositions = submitRedeemPositions as jest.MockedFunction<
+    typeof submitRedeemPositions
+>;
 
 const buildLiveConfig = (overrides: Record<string, unknown> = {}) => ({
     runMode: 'live' as const,
@@ -173,6 +193,7 @@ const buildLiveConfig = (overrides: Record<string, unknown> = {}) => ({
     liveConfirmTimeoutMs: 1000,
     liveReconcileAfterTimeoutMs: 1000,
     liveOrderMinIntervalMs: 100,
+    liveSettlementOnchainRedeemEnabled: true,
     maxSlippageBps: 100,
     maxOrderUsdc: 10,
     buyDustResidualMode: 'trim' as const,
@@ -312,10 +333,20 @@ describe('LiveTradingGateway submission pacing', () => {
         const first = gateway.executeTrade({
             sourceEvent: buildBuyEvent('buy-1'),
             requestedUsdc: 1.2,
+            requestedSize: 2.4,
+            orderAmount: 1.2,
+            executionPrice: 0.5,
+            side: 'BUY' as never,
+            tickSize: '0.01' as never,
         });
         const second = gateway.executeTrade({
             sourceEvent: buildBuyEvent('buy-2'),
             requestedUsdc: 1.2,
+            requestedSize: 2.4,
+            orderAmount: 1.2,
+            executionPrice: 0.5,
+            side: 'BUY' as never,
+            tickSize: '0.01' as never,
         });
 
         await Promise.all([first, second]);
@@ -324,7 +355,7 @@ describe('LiveTradingGateway submission pacing', () => {
         expect((submitTimestamps[1] || 0) - (submitTimestamps[0] || 0)).toBeGreaterThanOrEqual(45);
     });
 
-    it('聚合买单会按固定金额整批裁剪下单金额', async () => {
+    it('executeTrade 只执行领域已规划好的订单请求', async () => {
         const createAndPostMarketOrder = jest.fn(async () => ({
             success: true,
             orderID: 'order-1',
@@ -338,17 +369,7 @@ describe('LiveTradingGateway submission pacing', () => {
             } as never,
             marketFeed: {
                 ensureAsset: async () => undefined,
-                getSnapshot: async () => ({
-                    assetId: 'asset-1',
-                    market: 'market-1',
-                    bids: [{ price: 0.49, size: 100 }],
-                    asks: [{ price: 0.5, size: 5.8 }],
-                    minOrderSize: 5,
-                    tickSize: '0.01' as never,
-                    negRisk: false,
-                    lastTradePrice: 0.5,
-                    timestamp: Date.now(),
-                }),
+                getSnapshot: async () => null,
             },
             userExecutionFeed: {
                 isAvailable: () => true,
@@ -373,6 +394,15 @@ describe('LiveTradingGateway submission pacing', () => {
                 },
             },
             requestedUsdc: 3.6,
+            requestedSize: 7.2,
+            orderAmount: 2.4,
+            executionPrice: 0.5,
+            side: 'BUY' as never,
+            tickSize: '0.01' as never,
+            metadata: {
+                bundlePlannedCount: 3,
+                bundleExecutedCount: 2,
+            },
         });
 
         expect(createAndPostMarketOrder).toHaveBeenCalledTimes(1);
@@ -386,6 +416,91 @@ describe('LiveTradingGateway submission pacing', () => {
         expect(result.metadata).toEqual({
             bundlePlannedCount: 3,
             bundleExecutedCount: 2,
+        });
+    });
+});
+
+describe('LiveSettlementGateway', () => {
+    beforeEach(() => {
+        jest.clearAllMocks();
+        mockedSubmitRedeemPositions.mockResolvedValue(
+            '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef'
+        );
+        mockedConfirmTransactionHashes.mockResolvedValue({
+            status: 'CONFIRMED',
+            reason: '',
+            confirmedAt: 123,
+        } as never);
+    });
+
+    it('executeRedeem 会提交链上 redeem 并等待确认', async () => {
+        const gateway = new LiveSettlementGateway({
+            config: buildLiveConfig(),
+            logger: mockLogger as never,
+        });
+
+        const result = await gateway.executeRedeem({
+            conditionId: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+            positions: [
+                {
+                    asset: 'winner-asset',
+                    conditionId:
+                        '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+                    outcome: 'Yes',
+                    outcomeIndex: 0,
+                    size: 10,
+                    avgPrice: 0.6,
+                    marketPrice: 1,
+                    marketValue: 10,
+                    costBasis: 6,
+                    realizedPnl: 0,
+                    redeemable: true,
+                },
+            ],
+            indexSets: [1n],
+        });
+
+        expect(mockedSubmitRedeemPositions).toHaveBeenCalledWith(
+            {
+                conditionId: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+                indexSets: [1n],
+            },
+            expect.objectContaining({
+                privateKey: expect.any(String),
+            })
+        );
+        expect(mockedConfirmTransactionHashes).toHaveBeenCalledWith(
+            ['0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef'],
+            expect.any(Object),
+            { timeoutMs: 1000 }
+        );
+        expect(result).toEqual({
+            status: 'confirmed',
+            reason: 'redeem 已确认 tx=0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+            transactionHashes: [
+                '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+            ],
+            confirmedAt: 123,
+        });
+    });
+
+    it('conditionId 非法时不会发送链上 redeem', async () => {
+        const gateway = new LiveSettlementGateway({
+            config: buildLiveConfig(),
+            logger: mockLogger as never,
+        });
+
+        const result = await gateway.executeRedeem({
+            conditionId: 'condition-1',
+            positions: [],
+            indexSets: [],
+        });
+
+        expect(mockedSubmitRedeemPositions).not.toHaveBeenCalled();
+        expect(result).toEqual({
+            status: 'failed',
+            reason: 'conditionId 非法，无法提交 redeem',
+            transactionHashes: [],
         });
     });
 });

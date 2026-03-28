@@ -80,6 +80,7 @@ const buildContext = (overrides: Partial<NodeContext> = {}) =>
                 liveConfirmTimeoutMs: 1000,
                 liveReconcileAfterTimeoutMs: 1000,
                 liveOrderMinIntervalMs: 100,
+                liveSettlementOnchainRedeemEnabled: true,
                 maxSlippageBps: 100,
                 maxOrderUsdc: 10,
                 buyDustResidualMode: 'trim',

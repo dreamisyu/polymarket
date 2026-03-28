@@ -1,5 +1,5 @@
-import { sleep } from '../../utils/sleep';
 import { createLogger } from '../../utils/logger';
+import { runWithRetry } from '../../utils/retry';
 
 const logger = createLogger('http');
 const requestTimeoutMs = 10_000;
@@ -12,44 +12,43 @@ export const fetchJson = async <T>(
     retries = 3,
     delayMs = 1_500
 ) => {
-    for (let attempt = 1; attempt <= retries; attempt += 1) {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
+    try {
+        return await runWithRetry<T | null>(
+            {
+                times: retries,
+                baseDelayMs: delayMs,
+            },
+            async () => {
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
 
-        try {
-            const response = await fetch(url, {
-                ...init,
-                signal: controller.signal,
-                headers: {
-                    'User-Agent': 'polymarket-copytrading-bot/next',
-                    ...(init?.headers || {}),
-                },
-            });
-            clearTimeout(timeout);
+                try {
+                    const response = await fetch(url, {
+                        ...init,
+                        signal: controller.signal,
+                        headers: {
+                            'User-Agent': 'polymarket-copytrading-bot/next',
+                            ...(init?.headers || {}),
+                        },
+                    });
 
-            if (!response.ok) {
-                if (attempt === retries || !shouldRetryStatus(response.status)) {
-                    logger.error(`请求失败 url=${url} status=${response.status}`);
-                    return null;
+                    if (!response.ok) {
+                        if (!shouldRetryStatus(response.status)) {
+                            logger.error(`请求失败 url=${url} status=${response.status}`);
+                            return null;
+                        }
+
+                        throw new Error(`请求失败 status=${response.status}`);
+                    }
+
+                    return (await response.json()) as T;
+                } finally {
+                    clearTimeout(timeout);
                 }
-
-                await sleep(delayMs);
-                delayMs = Math.round(delayMs * 1.5);
-                continue;
             }
-
-            return (await response.json()) as T;
-        } catch (error) {
-            clearTimeout(timeout);
-            if (attempt === retries) {
-                logger.error({ error }, `请求失败 url=${url}`);
-                return null;
-            }
-
-            await sleep(delayMs);
-            delayMs = Math.round(delayMs * 1.5);
-        }
+        );
+    } catch (error) {
+        logger.error({ error }, `请求失败 url=${url}`);
+        return null;
     }
-
-    return null;
 };

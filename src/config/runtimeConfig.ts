@@ -47,6 +47,7 @@ export interface RuntimeConfig {
     liveConfirmTimeoutMs: number;
     liveReconcileAfterTimeoutMs: number;
     liveOrderMinIntervalMs: number;
+    liveSettlementOnchainRedeemEnabled: boolean;
     maxSlippageBps: number;
     maxOrderUsdc: number;
     buyDustResidualMode: 'off' | 'defer' | 'trim';
@@ -144,6 +145,10 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
             30_000
         ),
         liveOrderMinIntervalMs: env.toNonNegativeNumber('LIVE_ORDER_MIN_INTERVAL_MS', 250),
+        liveSettlementOnchainRedeemEnabled: env.toBoolean(
+            'LIVE_SETTLEMENT_ONCHAIN_REDEEM_ENABLED',
+            true
+        ),
         maxSlippageBps: env.toNonNegativeNumber('MAX_SLIPPAGE_BPS', 300),
         maxOrderUsdc: env.toNonNegativeNumber('MAX_ORDER_USDC', 250),
         buyDustResidualMode: env.toChoice(

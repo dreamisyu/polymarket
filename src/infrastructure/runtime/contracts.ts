@@ -6,12 +6,15 @@ import type {
     MonitorSyncResult,
     PortfolioSnapshot,
     PositionSnapshot,
+    SettlementRedeemRequest,
+    SettlementRedeemResult,
     SettlementTask,
     SourceTradeEvent,
     TradeExecutionRequest,
     TradeExecutionResult,
     WorkflowExecutionRecord,
 } from '../../domain';
+import type { MarketBookSnapshot } from '../../utils/executionPlanning';
 export type LoggerLike = Logger;
 
 export interface SourceEventStore {
@@ -44,7 +47,13 @@ export interface SettlementTaskStore {
         options?: { reason?: string; triggerNow?: boolean }
     ): Promise<void>;
     claimDue(now: number): Promise<SettlementTask | null>;
-    markSettled(taskId: string, winnerOutcome: string, reason: string, now: number): Promise<void>;
+    markSettled(
+        taskId: string,
+        winnerOutcome: string,
+        reason: string,
+        now: number,
+        delayMs?: number
+    ): Promise<void>;
     markClosed(taskId: string, winnerOutcome: string, reason: string, now: number): Promise<void>;
     markRetry(taskId: string, reason: string, now: number, delayMs: number): Promise<void>;
 }
@@ -56,13 +65,14 @@ export interface MonitorGateway {
 export interface TradingGateway {
     getPortfolioSnapshot(): Promise<PortfolioSnapshot>;
     getPositionForEvent(event: SourceTradeEvent): Promise<PositionSnapshot | null>;
+    getMarketSnapshot(assetId: string): Promise<MarketBookSnapshot | null>;
     listConditionPositions(conditionId: string): Promise<ConditionPositionSnapshot>;
     executeTrade(request: TradeExecutionRequest): Promise<TradeExecutionResult>;
     executeMerge(request: MergeExecutionRequest): Promise<TradeExecutionResult>;
 }
 
 export interface SettlementGateway {
-    runDue(): Promise<boolean>;
+    executeRedeem(request: SettlementRedeemRequest): Promise<SettlementRedeemResult>;
 }
 
 export interface RuntimeStores {

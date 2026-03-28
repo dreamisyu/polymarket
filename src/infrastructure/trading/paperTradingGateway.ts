@@ -7,8 +7,6 @@ import type {
     TradeExecutionRequest,
     TradeExecutionResult,
 } from '../../domain';
-import { resolveFixedAmountBundleExecution } from '../../utils/copytradeDispatch';
-import { buildChunkExecutionPlan } from '../../utils/executionPlanning';
 import { normalizeSize } from '../../utils/math';
 import type { MarketBookFeed } from '../polymarket/marketBookFeed';
 import type { LedgerStore, LoggerLike, TradingGateway } from '../runtime/contracts';
@@ -59,6 +57,10 @@ export class PaperTradingGateway implements TradingGateway {
         return this.ledgerStore.findPositionByAsset(event.asset);
     }
 
+    async getMarketSnapshot(assetId: string) {
+        return this.marketFeed.getSnapshot(assetId);
+    }
+
     async listConditionPositions(conditionId: string) {
         const positions = await this.ledgerStore.listPositions();
         return buildConditionPositionSnapshot(positions, conditionId);
@@ -71,102 +73,42 @@ export class PaperTradingGateway implements TradingGateway {
         }
 
         await this.ledgerStore.ensurePortfolio(this.config.paperInitialBalance);
-        const [portfolio, localPosition, marketSnapshot] = await Promise.all([
+        const [portfolio, localPosition] = await Promise.all([
             this.ledgerStore.getPortfolio(),
             this.ledgerStore.findPositionByAsset(event.asset),
-            this.marketFeed.getSnapshot(event.asset),
         ]);
-        if (!marketSnapshot) {
-            return {
-                ...emptyResult('市场盘口不可用，稍后重试', request, event),
-                status: 'retry',
-                reason: '市场盘口不可用，稍后重试',
-            };
-        }
-        const plan = buildChunkExecutionPlan({
-            condition: event.action,
-            trade: event,
-            myPositionSize: Math.max(Number(localPosition?.size) || 0, 0),
-            sourcePositionAfterTradeSize: Math.max(
-                Number(event.sourcePositionSizeAfterTrade) || 0,
-                0
-            ),
-            availableBalance: Math.max(Number(portfolio.cashBalance) || 0, 0),
-            marketSnapshot,
-            config: this.config,
-            requestedUsdcOverride: request.requestedUsdc,
-            requestedSizeOverride: request.requestedSize,
-            sourcePriceOverride: event.price,
-            noteOverride: request.note,
-        });
-        if (plan.status === 'SKIPPED') {
-            return emptyResult(plan.reason, request, event);
-        }
-        if (plan.status !== 'READY') {
-            return {
-                ...emptyResult(plan.reason, request, event),
-                status: 'retry',
-                reason: plan.reason,
-            };
-        }
-
-        const bundleExecution = resolveFixedAmountBundleExecution({
-            event,
-            requestedUsdc: plan.requestedUsdc,
-            executableUsdc: plan.orderAmount,
-            fixedTradeAmountUsdc: this.config.fixedTradeAmountUsdc,
-        });
-        if (bundleExecution && bundleExecution.plannedCount <= 0) {
-            return emptyResult('聚合买单在当前余额下不可执行', request, event);
-        }
-        if (bundleExecution && bundleExecution.executedCount <= 0) {
-            return {
-                ...emptyResult('聚合买单未达到单笔最小金额，稍后重试', request, event),
-                status: 'retry',
-                reason: '聚合买单未达到单笔最小金额，稍后重试',
-                metadata: {
-                    bundlePlannedCount: bundleExecution.plannedCount,
-                    bundleExecutedCount: 0,
-                },
-            };
-        }
 
         const executedUsdc =
-            event.action === 'buy'
-                ? (bundleExecution?.executableUsdc ?? plan.orderAmount)
-                : plan.orderAmount * plan.executionPrice;
+            request.side === 'BUY'
+                ? request.orderAmount
+                : request.orderAmount * request.executionPrice;
         const executedSize =
-            event.action === 'buy'
-                ? executedUsdc / Math.max(plan.executionPrice, 0.0001)
-                : plan.orderAmount;
+            request.side === 'BUY'
+                ? executedUsdc / Math.max(request.executionPrice, 0.0001)
+                : request.orderAmount;
         await this.applyTradeExecution(
             event,
             localPosition,
             portfolio,
             executedUsdc,
             executedSize,
-            plan.executionPrice
+            request.executionPrice
         );
         this.logger.debug(
-            `模拟成交 activityKey=${event.activityKey} price=${plan.executionPrice} size=${executedSize.toFixed(4)}`
+            `模拟成交 activityKey=${event.activityKey} price=${request.executionPrice} size=${executedSize.toFixed(4)}`
         );
         return {
             status: 'confirmed',
             reason: request.note || '',
-            requestedUsdc: bundleExecution?.requestedUsdc ?? plan.requestedUsdc,
-            requestedSize: plan.requestedSize,
+            requestedUsdc: request.requestedUsdc,
+            requestedSize: request.requestedSize,
             executedUsdc,
             executedSize,
-            executionPrice: plan.executionPrice,
+            executionPrice: request.executionPrice,
             orderIds: [],
             transactionHashes: [],
             confirmedAt: Date.now(),
-            metadata: bundleExecution
-                ? {
-                      bundlePlannedCount: bundleExecution.plannedCount,
-                      bundleExecutedCount: bundleExecution.executedCount,
-                  }
-                : undefined,
+            metadata: request.metadata,
         };
     }
 

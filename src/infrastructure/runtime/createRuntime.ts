@@ -35,9 +35,6 @@ export const createRuntime = async (config = loadRuntimeConfig()): Promise<Runti
         });
         const settlement = new PaperSettlementGateway({
             config,
-            sourceEvents: stores.sourceEvents,
-            settlementTasks: stores.settlementTasks,
-            ledgerStore: stores.ledger,
         });
 
         return {
@@ -73,8 +70,6 @@ export const createRuntime = async (config = loadRuntimeConfig()): Promise<Runti
     const settlement = new LiveSettlementGateway({
         config,
         logger,
-        sourceEvents: stores.sourceEvents,
-        settlementTasks: stores.settlementTasks,
     });
 
     return {

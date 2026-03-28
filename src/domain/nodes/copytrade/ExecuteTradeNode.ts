@@ -9,21 +9,19 @@ export class ExecuteTradeNode extends CopyTradeNode {
     }
 
     async doAction(ctx: NodeContext<CopyTradeWorkflowState>): Promise<NodeResult> {
-        const event = ctx.state.sourceEvent;
+        const request = ctx.state.tradeExecutionRequest;
         const decision = ctx.state.sizingDecision;
-        if (!event || !decision || decision.status !== 'ready') {
+        if (!request || !decision || decision.status !== 'ready') {
             return this.skip('缺少执行所需上下文', 'copytrade.persist');
         }
 
-        const result = await ctx.runtime.gateways.trading.executeTrade({
-            sourceEvent: event,
-            requestedUsdc: decision.requestedUsdc,
-            requestedSize: decision.requestedSize,
-            note: decision.note,
-        });
+        const result = await ctx.runtime.gateways.trading.executeTrade(request);
         ctx.state.executionResult = result;
         if (decision.ticketTier) {
-            ctx.state.policyTrail = [...(ctx.state.policyTrail || []), `signal:${decision.ticketTier}`];
+            ctx.state.policyTrail = [
+                ...(ctx.state.policyTrail || []),
+                `signal:${decision.ticketTier}`,
+            ];
         }
 
         if (result.status === 'confirmed') {

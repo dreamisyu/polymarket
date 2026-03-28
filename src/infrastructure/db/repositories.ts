@@ -343,7 +343,13 @@ class MongoSettlementTaskStore implements SettlementTaskStore {
         return task || null;
     }
 
-    async markSettled(taskId: string, winnerOutcome: string, reason: string, now: number) {
+    async markSettled(
+        taskId: string,
+        winnerOutcome: string,
+        reason: string,
+        now: number,
+        delayMs = 0
+    ) {
         await this.SettlementTask.updateOne(
             { _id: new mongoose.Types.ObjectId(taskId) },
             {
@@ -352,7 +358,7 @@ class MongoSettlementTaskStore implements SettlementTaskStore {
                     winnerOutcome,
                     reason,
                     claimedAt: 0,
-                    nextRetryAt: 0,
+                    nextRetryAt: now + Math.max(delayMs, 0),
                     lastCheckedAt: now,
                 },
             }

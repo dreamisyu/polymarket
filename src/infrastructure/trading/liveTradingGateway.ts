@@ -18,8 +18,6 @@ import type {
     UserExecutionFeed,
 } from '../polymarket/userExecutionFeed';
 import type { LoggerLike, TradingGateway } from '../runtime/contracts';
-import { resolveFixedAmountBundleExecution } from '../../utils/copytradeDispatch';
-import { buildChunkExecutionPlan } from '../../utils/executionPlanning';
 import {
     buildConditionPositionSnapshot,
     buildPortfolioSnapshot,
@@ -97,6 +95,10 @@ export class LiveTradingGateway implements TradingGateway {
         return matched ? mapUserPosition(matched) : null;
     }
 
+    async getMarketSnapshot(assetId: string) {
+        return this.marketFeed.getSnapshot(assetId);
+    }
+
     async listConditionPositions(conditionId: string) {
         const positions = (
             (await fetchUserPositions(this.config.sourceWallet, this.config)) || []
@@ -110,89 +112,18 @@ export class LiveTradingGateway implements TradingGateway {
             return emptyResult('当前节点仅处理 BUY/SELL', request, event);
         }
 
-        const [positions, balance, marketSnapshot] = await Promise.all([
-            fetchUserPositions(this.config.sourceWallet, this.config),
-            getUsdcBalance(this.config.sourceWallet, this.config),
-            this.marketFeed.getSnapshot(event.asset),
-        ]);
-        if (!marketSnapshot) {
-            return {
-                ...emptyResult('市场盘口不可用，稍后重试', request, event),
-                status: 'retry',
-                reason: '市场盘口不可用，稍后重试',
-            };
-        }
-        const localPosition = findMatchingPosition(positions || [], event);
-        const plan = buildChunkExecutionPlan({
-            condition: event.action,
-            trade: event,
-            myPositionSize: Math.max(Number(localPosition?.size) || 0, 0),
-            sourcePositionAfterTradeSize: Math.max(
-                Number(event.sourcePositionSizeAfterTrade) || 0,
-                0
-            ),
-            availableBalance: Math.max(Number(balance) || 0, 0),
-            marketSnapshot,
-            config: this.config,
-            requestedUsdcOverride: request.requestedUsdc,
-            requestedSizeOverride: request.requestedSize,
-            sourcePriceOverride: event.price,
-            noteOverride: request.note,
-        });
-
-        if (plan.status === 'SKIPPED') {
-            return emptyResult(plan.reason, request, event);
-        }
-        if (plan.status !== 'READY' || !plan.side || !plan.tickSize) {
-            return {
-                ...emptyResult(plan.reason, request, event),
-                status: 'retry',
-                reason: plan.reason,
-            };
-        }
-
-        const bundleExecution = resolveFixedAmountBundleExecution({
-            event,
-            requestedUsdc: plan.requestedUsdc,
-            executableUsdc: plan.orderAmount,
-            fixedTradeAmountUsdc: this.config.fixedTradeAmountUsdc,
-        });
-        if (bundleExecution && bundleExecution.plannedCount <= 0) {
-            return emptyResult('聚合买单在当前余额下不可执行', request, event);
-        }
-        if (bundleExecution && bundleExecution.executedCount <= 0) {
-            return {
-                ...emptyResult('聚合买单未达到单笔最小金额，稍后重试', request, event),
-                status: 'retry',
-                reason: '聚合买单未达到单笔最小金额，稍后重试',
-                metadata: {
-                    bundlePlannedCount: bundleExecution.plannedCount,
-                    bundleExecutedCount: 0,
-                },
-            };
-        }
-
-        const orderAmount = bundleExecution?.executableUsdc ?? plan.orderAmount;
-        const requestedUsdc = bundleExecution?.requestedUsdc ?? plan.requestedUsdc;
-        const executionMetadata = bundleExecution
-            ? {
-                  bundlePlannedCount: bundleExecution.plannedCount,
-                  bundleExecutedCount: bundleExecution.executedCount,
-              }
-            : undefined;
-
         try {
             const response = await this.submitWithPacing(() =>
                 this.clobClient.createAndPostMarketOrder(
                     {
-                        side: plan.side,
+                        side: request.side,
                         tokenID: event.asset,
-                        amount: orderAmount,
-                        price: plan.executionPrice,
+                        amount: request.orderAmount,
+                        price: request.executionPrice,
                     },
                     {
-                        tickSize: plan.tickSize,
-                        negRisk: plan.negRisk,
+                        tickSize: request.tickSize,
+                        negRisk: request.negRisk,
                     },
                     OrderType.FOK
                 )
@@ -213,23 +144,25 @@ export class LiveTradingGateway implements TradingGateway {
             const userConfirmation = await this.confirmViaUserFeed(event, orderIds);
             if (userConfirmation?.confirmationStatus === 'CONFIRMED') {
                 const executedUsdc =
-                    event.action === 'buy' ? orderAmount : orderAmount * plan.executionPrice;
+                    request.side === 'BUY'
+                        ? request.orderAmount
+                        : request.orderAmount * request.executionPrice;
                 const executedSize =
-                    event.action === 'buy'
-                        ? executedUsdc / Math.max(plan.executionPrice, 0.0001)
-                        : orderAmount;
+                    request.side === 'BUY'
+                        ? executedUsdc / Math.max(request.executionPrice, 0.0001)
+                        : request.orderAmount;
                 return {
                     status: 'confirmed',
                     reason: request.note || '',
-                    requestedUsdc,
-                    requestedSize: plan.requestedSize,
+                    requestedUsdc: request.requestedUsdc,
+                    requestedSize: request.requestedSize,
                     executedUsdc,
                     executedSize,
-                    executionPrice: plan.executionPrice,
+                    executionPrice: request.executionPrice,
                     orderIds,
                     transactionHashes,
                     confirmedAt: userConfirmation.confirmedAt || Date.now(),
-                    metadata: executionMetadata,
+                    metadata: request.metadata,
                 };
             }
             if (userConfirmation?.confirmationStatus === 'FAILED') {
@@ -266,23 +199,25 @@ export class LiveTradingGateway implements TradingGateway {
             }
 
             const executedUsdc =
-                event.action === 'buy' ? orderAmount : orderAmount * plan.executionPrice;
+                request.side === 'BUY'
+                    ? request.orderAmount
+                    : request.orderAmount * request.executionPrice;
             const executedSize =
-                event.action === 'buy'
-                    ? executedUsdc / Math.max(plan.executionPrice, 0.0001)
-                    : orderAmount;
+                request.side === 'BUY'
+                    ? executedUsdc / Math.max(request.executionPrice, 0.0001)
+                    : request.orderAmount;
             return {
                 status: 'confirmed',
                 reason: request.note || '',
-                requestedUsdc,
-                requestedSize: plan.requestedSize,
+                requestedUsdc: request.requestedUsdc,
+                requestedSize: request.requestedSize,
                 executedUsdc,
                 executedSize,
-                executionPrice: plan.executionPrice,
+                executionPrice: request.executionPrice,
                 orderIds,
                 transactionHashes,
                 confirmedAt: confirmation.confirmedAt,
-                metadata: executionMetadata,
+                metadata: request.metadata,
             };
         } catch (error) {
             this.logger.error({ err: error }, `下单异常 activityKey=${event.activityKey}`);

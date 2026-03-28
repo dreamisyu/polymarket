@@ -8,6 +8,7 @@ import { MergePlanningNode } from '../nodes/copytrade/MergePlanningNode';
 import { PersistExecutionNode } from '../nodes/copytrade/PersistExecutionNode';
 import { RedeemForwardNode } from '../nodes/copytrade/RedeemForwardNode';
 import { RiskGuardNode } from '../nodes/copytrade/RiskGuardNode';
+import { TradePlanningNode } from '../nodes/copytrade/TradePlanningNode';
 import type { Strategy, StrategyBuildResult, StrategyExtensionDefinition } from './types';
 import { applyStrategyExtensions } from './types';
 
@@ -23,6 +24,7 @@ export abstract class BaseCopyTradeStrategy implements Strategy {
         registry.register(new ActionRouterNode(strategyEntryNodeId));
         registry.register(new LoadTradingContextNode());
         registry.register(new RiskGuardNode());
+        registry.register(new TradePlanningNode());
         registry.register(new ExecuteTradeNode());
         registry.register(new MergePlanningNode());
         registry.register(new MergeExecuteNode());
@@ -40,6 +42,7 @@ export abstract class BaseCopyTradeStrategy implements Strategy {
             .append('copytrade.action-router')
             .append(sizingNodeId)
             .append('copytrade.risk')
+            .append('copytrade.trade.plan')
             .append('copytrade.trade.execute')
             .append('copytrade.merge.plan')
             .append('copytrade.merge.execute')
@@ -50,6 +53,10 @@ export abstract class BaseCopyTradeStrategy implements Strategy {
         builder.setTransition('copytrade.trade.execute', 'skip', 'copytrade.persist');
         builder.setTransition('copytrade.trade.execute', 'retry', 'copytrade.persist');
         builder.setTransition('copytrade.trade.execute', 'fail', 'copytrade.persist');
+        builder.setTransition('copytrade.trade.plan', 'success', 'copytrade.trade.execute');
+        builder.setTransition('copytrade.trade.plan', 'skip', 'copytrade.persist');
+        builder.setTransition('copytrade.trade.plan', 'retry', 'copytrade.persist');
+        builder.setTransition('copytrade.trade.plan', 'fail', 'copytrade.persist');
         builder.setTransition('copytrade.risk', 'skip', 'copytrade.persist');
         builder.setTransition(sizingNodeId, 'skip', 'copytrade.persist');
         builder.setTransition('copytrade.merge.plan', 'success', 'copytrade.merge.execute');

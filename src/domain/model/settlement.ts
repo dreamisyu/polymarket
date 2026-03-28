@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import type { SettlementTaskStatus } from '../value-objects/enums';
+import type { PositionSnapshot } from './portfolio';
 
 export interface SettlementTask {
     _id?: mongoose.Types.ObjectId;
@@ -13,4 +14,17 @@ export interface SettlementTask {
     claimedAt: number;
     nextRetryAt: number;
     winnerOutcome?: string;
+}
+
+export interface SettlementRedeemRequest {
+    conditionId: string;
+    positions: PositionSnapshot[];
+    indexSets: bigint[];
+}
+
+export interface SettlementRedeemResult {
+    status: 'confirmed' | 'retry' | 'failed';
+    reason: string;
+    transactionHashes: string[];
+    confirmedAt?: number;
 }

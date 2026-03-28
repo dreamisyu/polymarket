@@ -1,12 +1,24 @@
 import mongoose from 'mongoose';
-import type { RunMode, StrategyKind, TradeAction, WorkflowExecutionStatus } from '../value-objects/enums';
+import { Side, type TickSize } from '@polymarket/clob-client';
+import type {
+    RunMode,
+    StrategyKind,
+    TradeAction,
+    WorkflowExecutionStatus,
+} from '../value-objects/enums';
 import type { SourceTradeEvent } from './sourceTradeEvent';
 
 export interface TradeExecutionRequest {
     sourceEvent: SourceTradeEvent;
-    requestedUsdc?: number;
-    requestedSize?: number;
+    requestedUsdc: number;
+    requestedSize: number;
+    orderAmount: number;
+    executionPrice: number;
+    side: Side;
+    tickSize: TickSize;
+    negRisk?: boolean;
     note?: string;
+    metadata?: Record<string, unknown>;
 }
 
 export interface MergeExecutionRequest {
