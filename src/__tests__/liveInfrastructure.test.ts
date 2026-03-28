@@ -434,6 +434,93 @@ describe('LiveTradingGateway submission pacing', () => {
             bundleExecutedCount: 2,
         });
     });
+
+    it('启用后台确认后会立即返回 submitted，不等待确认完成', async () => {
+        let resolveConfirmation:
+            | ((value: {
+                  confirmationStatus: 'CONFIRMED';
+                  status: 'CONFIRMED';
+                  reason: string;
+                  confirmedAt: number;
+              }) => void)
+            | null = null;
+        const waitForOrders = jest.fn(
+            () =>
+                new Promise<{
+                    confirmationStatus: 'CONFIRMED';
+                    status: 'CONFIRMED';
+                    reason: string;
+                    confirmedAt: number;
+                }>((resolve) => {
+                    resolveConfirmation = resolve;
+                })
+        );
+        const persistence = {
+            sourceEvents: {
+                markConfirmed: jest.fn(async () => undefined),
+                markRetry: jest.fn(async () => undefined),
+                markSkipped: jest.fn(async () => undefined),
+                markFailed: jest.fn(async () => undefined),
+            },
+            executions: {
+                save: jest.fn(async (record) => record),
+            },
+            settlementTasks: {
+                touchFromEvent: jest.fn(async () => undefined),
+            },
+        };
+        const gateway = new LiveTradingGateway({
+            config: buildLiveConfig(),
+            logger: mockLogger as never,
+            clobClient: {
+                createAndPostMarketOrder: jest.fn(async () => ({
+                    success: true,
+                    orderID: 'order-1',
+                    transactionsHashes: [],
+                })),
+            } as never,
+            marketFeed: {
+                ensureAsset: async () => undefined,
+                getSnapshot: async () => null,
+            },
+            userExecutionFeed: {
+                isAvailable: () => true,
+                ensureMarket: async () => undefined,
+                waitForOrders,
+            },
+            persistence: persistence as never,
+        });
+
+        const result = await gateway.executeTrade({
+            sourceEvent: buildBuyEvent('async-buy-1'),
+            sourceEvents: [buildBuyEvent('async-buy-1')],
+            requestedUsdc: 1.2,
+            requestedSize: 2.4,
+            orderAmount: 1.2,
+            executionPrice: 0.5,
+            side: 'BUY' as never,
+            tickSize: '0.01' as never,
+            workflowId: 'copytrade:test',
+            policyTrail: ['risk:test'],
+        });
+
+        expect(result.status).toBe('submitted');
+        expect(waitForOrders).toHaveBeenCalledTimes(0);
+
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(waitForOrders).toHaveBeenCalledTimes(1);
+
+        resolveConfirmation?.({
+            confirmationStatus: 'CONFIRMED',
+            status: 'CONFIRMED',
+            reason: '',
+            confirmedAt: 123,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(persistence.sourceEvents.markConfirmed).toHaveBeenCalledTimes(1);
+        expect(persistence.executions.save).toHaveBeenCalled();
+    });
 });
 
 describe('LiveSettlementGateway', () => {

@@ -17,7 +17,13 @@ import type {
     UserExecutionConfirmationResult,
     UserExecutionFeed,
 } from '../polymarket/userExecutionFeed';
-import type { LoggerLike, TradingGateway } from '../runtime/contracts';
+import type {
+    ExecutionStore,
+    LoggerLike,
+    SettlementTaskStore,
+    SourceEventStore,
+    TradingGateway,
+} from '../runtime/contracts';
 import {
     buildConditionPositionSnapshot,
     buildPortfolioSnapshot,
@@ -25,6 +31,7 @@ import {
     mapUserPosition,
 } from './shared';
 import { sleep } from '../../utils/sleep';
+import { buildExecutionRecord, buildPersistencePlans } from '../../utils/executionPersistence';
 
 const emptyResult = (
     reason: string,
@@ -50,12 +57,85 @@ const orderFailureReason = (payload: unknown) =>
             '下单接口返回失败'
     );
 
+const buildConfirmedResult = (
+    request: TradeExecutionRequest,
+    orderIds: string[],
+    transactionHashes: string[],
+    confirmedAt: number,
+    statusUpdate: Partial<Pick<TradeExecutionResult, 'matchedAt' | 'minedAt'>> = {}
+): TradeExecutionResult => {
+    const executedUsdc =
+        request.side === 'BUY'
+            ? request.orderAmount
+            : request.orderAmount * request.executionPrice;
+    const executedSize =
+        request.side === 'BUY'
+            ? executedUsdc / Math.max(request.executionPrice, 0.0001)
+            : request.orderAmount;
+
+    return {
+        status: 'confirmed',
+        reason: request.note || '',
+        requestedUsdc: request.requestedUsdc,
+        requestedSize: request.requestedSize,
+        executedUsdc,
+        executedSize,
+        executionPrice: request.executionPrice,
+        orderIds,
+        transactionHashes,
+        matchedAt: statusUpdate.matchedAt,
+        minedAt: statusUpdate.minedAt,
+        confirmedAt,
+        metadata: request.metadata,
+    };
+};
+
+const buildSubmittedResult = (
+    request: TradeExecutionRequest,
+    orderIds: string[],
+    transactionHashes: string[]
+): TradeExecutionResult => ({
+    status: 'submitted',
+    reason: request.note || '订单已提交，等待后台确认',
+    requestedUsdc: request.requestedUsdc,
+    requestedSize: request.requestedSize,
+    executedUsdc: 0,
+    executedSize: 0,
+    executionPrice: request.executionPrice,
+    orderIds,
+    transactionHashes,
+    metadata: request.metadata,
+});
+
+const buildFailureResult = (
+    request: TradeExecutionRequest,
+    event: SourceTradeEvent,
+    reason: string,
+    status: 'retry' | 'failed',
+    orderIds: string[],
+    transactionHashes: string[]
+): TradeExecutionResult => ({
+    ...emptyResult(reason, request, event),
+    status,
+    reason,
+    orderIds,
+    transactionHashes,
+    metadata: request.metadata,
+});
+
+interface BackgroundTradePersistence {
+    sourceEvents: SourceEventStore;
+    executions: ExecutionStore;
+    settlementTasks: SettlementTaskStore;
+}
+
 export class LiveTradingGateway implements TradingGateway {
     private readonly config: RuntimeConfig;
     private readonly logger: LoggerLike;
     private readonly clobClient: ClobClient;
     private readonly marketFeed: MarketBookFeed;
     private readonly userExecutionFeed: UserExecutionFeed | null;
+    private readonly persistence: BackgroundTradePersistence | null;
     private submissionQueue: Promise<void> = Promise.resolve();
     private lastSubmissionStartedAt = 0;
 
@@ -65,12 +145,14 @@ export class LiveTradingGateway implements TradingGateway {
         clobClient: ClobClient;
         marketFeed: MarketBookFeed;
         userExecutionFeed?: UserExecutionFeed | null;
+        persistence?: BackgroundTradePersistence | null;
     }) {
         this.config = params.config;
         this.logger = params.logger;
         this.clobClient = params.clobClient;
         this.marketFeed = params.marketFeed;
         this.userExecutionFeed = params.userExecutionFeed || null;
+        this.persistence = params.persistence || null;
     }
 
     async getPortfolioSnapshot(): Promise<PortfolioSnapshot> {
@@ -141,84 +223,15 @@ export class LiveTradingGateway implements TradingGateway {
             const transactionHashes = Array.isArray(response.transactionsHashes)
                 ? response.transactionsHashes
                 : [];
-            const userConfirmation = await this.confirmViaUserFeed(event, orderIds);
-            if (userConfirmation?.confirmationStatus === 'CONFIRMED') {
-                const executedUsdc =
-                    request.side === 'BUY'
-                        ? request.orderAmount
-                        : request.orderAmount * request.executionPrice;
-                const executedSize =
-                    request.side === 'BUY'
-                        ? executedUsdc / Math.max(request.executionPrice, 0.0001)
-                        : request.orderAmount;
-                return {
-                    status: 'confirmed',
-                    reason: request.note || '',
-                    requestedUsdc: request.requestedUsdc,
-                    requestedSize: request.requestedSize,
-                    executedUsdc,
-                    executedSize,
-                    executionPrice: request.executionPrice,
-                    orderIds,
-                    transactionHashes,
-                    confirmedAt: userConfirmation.confirmedAt || Date.now(),
-                    metadata: request.metadata,
-                };
-            }
-            if (userConfirmation?.confirmationStatus === 'FAILED') {
-                return {
-                    ...emptyResult(userConfirmation.reason, request, event),
-                    status: 'failed',
-                    reason: userConfirmation.reason,
-                    orderIds,
-                    transactionHashes,
-                };
+            if (!this.persistence) {
+                return await this.waitForTradeConfirmation(request, orderIds, transactionHashes);
             }
 
-            const confirmation = await confirmTransactionHashes(transactionHashes, this.config, {
-                timeoutMs: this.config.liveConfirmTimeoutMs,
-            });
-            if (confirmation.status === 'FAILED') {
-                return {
-                    ...emptyResult(confirmation.reason, request, event),
-                    status: 'failed',
-                    reason: confirmation.reason,
-                    orderIds,
-                    transactionHashes,
-                };
-            }
-            if (confirmation.status !== 'CONFIRMED') {
-                this.logger.warn(`订单确认超时 activityKey=${event.activityKey}`);
-                return {
-                    ...emptyResult(confirmation.reason, request, event),
-                    status: 'retry',
-                    reason: confirmation.reason,
-                    orderIds,
-                    transactionHashes,
-                };
-            }
+            setTimeout(() => {
+                void this.confirmSubmittedTrade(request, orderIds, transactionHashes);
+            }, 0);
 
-            const executedUsdc =
-                request.side === 'BUY'
-                    ? request.orderAmount
-                    : request.orderAmount * request.executionPrice;
-            const executedSize =
-                request.side === 'BUY'
-                    ? executedUsdc / Math.max(request.executionPrice, 0.0001)
-                    : request.orderAmount;
-            return {
-                status: 'confirmed',
-                reason: request.note || '',
-                requestedUsdc: request.requestedUsdc,
-                requestedSize: request.requestedSize,
-                executedUsdc,
-                executedSize,
-                executionPrice: request.executionPrice,
-                orderIds,
-                transactionHashes,
-                confirmedAt: confirmation.confirmedAt,
-                metadata: request.metadata,
-            };
+            return buildSubmittedResult(request, orderIds, transactionHashes);
         } catch (error) {
             this.logger.error({ err: error }, `下单异常 activityKey=${event.activityKey}`);
             return {
@@ -226,6 +239,124 @@ export class LiveTradingGateway implements TradingGateway {
                 status: 'retry',
                 reason: (error as { message?: string })?.message || '下单异常，稍后重试',
             };
+        }
+    }
+
+    private async confirmSubmittedTrade(
+        request: TradeExecutionRequest,
+        orderIds: string[],
+        transactionHashes: string[]
+    ) {
+        try {
+            const result = await this.waitForTradeConfirmation(request, orderIds, transactionHashes);
+            const retryDelayMsOverride =
+                result.status === 'retry' ? this.config.liveReconcileAfterTimeoutMs : undefined;
+            await this.persistBackgroundTradeResult(request, result, retryDelayMsOverride);
+        } catch (error) {
+            this.logger.error(
+                { err: error },
+                `后台确认订单失败 activityKey=${request.sourceEvent.activityKey}`
+            );
+            await this.persistBackgroundTradeResult(
+                request,
+                buildFailureResult(
+                    request,
+                    request.sourceEvent,
+                    (error as { message?: string })?.message || '后台确认订单失败',
+                    'retry',
+                    orderIds,
+                    transactionHashes
+                ),
+                this.config.liveReconcileAfterTimeoutMs
+            );
+        }
+    }
+
+    private async persistBackgroundTradeResult(
+        request: TradeExecutionRequest,
+        result: TradeExecutionResult,
+        retryDelayMsOverride?: number
+    ) {
+        if (!this.persistence) {
+            return;
+        }
+
+        const sourceEvents =
+            (request.sourceEvents || []).filter(
+                (event): event is SourceTradeEvent => Boolean(event && event._id)
+            ) || [];
+        const persistedSourceEvents =
+            sourceEvents.length > 0
+                ? sourceEvents
+                : request.sourceEvent?._id
+                  ? [request.sourceEvent]
+                  : [];
+        if (persistedSourceEvents.length === 0) {
+            return;
+        }
+
+        const workflowId =
+            String(request.workflowId || '').trim() ||
+            `copytrade:${this.config.strategyKind}:${request.sourceEvent.activityKey}`;
+        const policyTrail = request.policyTrail || [];
+        const plans = buildPersistencePlans({
+            strategyKind: this.config.strategyKind,
+            fixedTradeAmountUsdc: this.config.fixedTradeAmountUsdc,
+            retryBackoffMs: this.config.retryBackoffMs,
+            maxRetryCount: this.config.maxRetryCount,
+            sourceEvent: request.sourceEvent,
+            sourceEvents: persistedSourceEvents,
+            result,
+            retryDelayMsOverride,
+        });
+
+        for (const plan of plans) {
+            await this.persistence.executions.save(
+                buildExecutionRecord({
+                    workflowId,
+                    strategyKind: this.config.strategyKind,
+                    runMode: this.config.runMode,
+                    result,
+                    plan,
+                    note: request.note || '',
+                    policyTrail,
+                })
+            );
+        }
+
+        const now = Date.now();
+        const confirmedConditions = new Set<string>();
+        for (const plan of plans) {
+            const eventId = String(plan.event._id || '');
+            if (!eventId) {
+                continue;
+            }
+
+            if (plan.status === 'confirmed') {
+                await this.persistence.sourceEvents.markConfirmed(eventId, plan.reason, now);
+                if (plan.event.conditionId && !confirmedConditions.has(plan.event.conditionId)) {
+                    confirmedConditions.add(plan.event.conditionId);
+                    await this.persistence.settlementTasks.touchFromEvent(plan.event);
+                }
+                continue;
+            }
+
+            if (plan.status === 'retry') {
+                await this.persistence.sourceEvents.markRetry(
+                    eventId,
+                    plan.reason,
+                    now,
+                    plan.delayMs || this.config.liveReconcileAfterTimeoutMs
+                );
+                continue;
+            }
+
+            if (plan.status === 'skipped') {
+                await this.persistence.sourceEvents.markSkipped(eventId, plan.reason, now);
+                continue;
+            }
+
+            await this.persistence.sourceEvents.markFailed(eventId, plan.reason, now);
         }
     }
 
@@ -330,6 +461,63 @@ export class LiveTradingGateway implements TradingGateway {
             );
             return null;
         }
+    }
+
+    private async waitForTradeConfirmation(
+        request: TradeExecutionRequest,
+        orderIds: string[],
+        transactionHashes: string[]
+    ): Promise<TradeExecutionResult> {
+        const event = request.sourceEvent;
+        const userConfirmation = await this.confirmViaUserFeed(event, orderIds);
+        if (userConfirmation?.confirmationStatus === 'CONFIRMED') {
+            return buildConfirmedResult(request, orderIds, transactionHashes, userConfirmation.confirmedAt || Date.now(), {
+                matchedAt: userConfirmation.matchedAt,
+                minedAt: userConfirmation.minedAt,
+            });
+        }
+        if (userConfirmation?.confirmationStatus === 'FAILED') {
+            return buildFailureResult(
+                request,
+                event,
+                userConfirmation.reason,
+                'failed',
+                orderIds,
+                transactionHashes
+            );
+        }
+
+        const confirmation = await confirmTransactionHashes(transactionHashes, this.config, {
+            timeoutMs: this.config.liveConfirmTimeoutMs,
+        });
+        if (confirmation.status === 'FAILED') {
+            return buildFailureResult(
+                request,
+                event,
+                confirmation.reason,
+                'failed',
+                orderIds,
+                transactionHashes
+            );
+        }
+        if (confirmation.status !== 'CONFIRMED') {
+            this.logger.warn(`订单确认超时 activityKey=${event.activityKey}`);
+            return buildFailureResult(
+                request,
+                event,
+                confirmation.reason,
+                'retry',
+                orderIds,
+                transactionHashes
+            );
+        }
+
+        return buildConfirmedResult(
+            request,
+            orderIds,
+            transactionHashes,
+            confirmation.confirmedAt || Date.now()
+        );
     }
 
     private async submitWithPacing<T>(task: () => Promise<T>): Promise<T> {

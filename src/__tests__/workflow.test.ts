@@ -273,7 +273,7 @@ describe('PrepareDispatchBundlesNode', () => {
 });
 
 describe('RiskGuardNode', () => {
-    it('市场窗口已结束时跳过迟到买单', async () => {
+    it('信号过期时跳过迟到买单', async () => {
         const node = new RiskGuardNode();
         const ctx = {
             ...buildTestContext(),
@@ -281,6 +281,35 @@ describe('RiskGuardNode', () => {
             state: {
                 sourceEvent: {
                     action: 'buy',
+                    timestamp: 1774713000000,
+                    eventSlug: 'btc-updown-15m-1774712700',
+                    slug: 'btc-updown-15m-1774712700',
+                },
+                portfolio: {
+                    openPositionCount: 0,
+                    activeExposureUsdc: 0,
+                },
+                localPosition: null,
+                policyTrail: [],
+            },
+        } as unknown as NodeContext;
+
+        const result = await node.doAction(ctx);
+
+        expect(result.status).toBe('skip');
+        expect(result.reason).toBe('信号已超过最大时效 15000ms，已跳过迟到买单');
+        expect(ctx.state.policyTrail).toContain('risk:signal_stale');
+    });
+
+    it('市场窗口已结束时跳过迟到买单', async () => {
+        const node = new RiskGuardNode();
+        const ctx = {
+            ...buildTestContext(),
+            now: () => 1774713001000,
+            state: {
+                sourceEvent: {
+                    action: 'buy',
+                    timestamp: 1774712999000,
                     eventSlug: 'eth-updown-5m-1774712700',
                     slug: 'eth-updown-5m-1774712700',
                 },

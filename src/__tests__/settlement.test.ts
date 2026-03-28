@@ -79,6 +79,7 @@ const buildConfig = (overrides: Partial<Runtime['config']> = {}): Runtime['confi
 const createSourceEventStore = (overrides: Partial<SourceEventStore> = {}): SourceEventStore => ({
     upsertMany: jest.fn(async () => []),
     claimDueRetries: jest.fn(async () => []),
+    markProcessing: jest.fn(async () => undefined),
     markConfirmed: jest.fn(async () => undefined),
     markSkipped: jest.fn(async () => undefined),
     markRetry: jest.fn(async () => undefined),

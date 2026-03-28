@@ -21,6 +21,24 @@ export class RiskGuardNode extends CopyTradeNode {
             return this.success();
         }
 
+        const signalAgeMs = Math.max(ctx.now() - Math.max(Number(event.timestamp) || 0, 0), 0);
+        const maxSignalAgeMs = Math.max(Number(ctx.runtime.config.maxSignalAgeMs) || 15_000, 0);
+        if (maxSignalAgeMs > 0 && signalAgeMs > maxSignalAgeMs) {
+            ctx.state.executionResult = {
+                status: 'skipped',
+                reason: `信号已超过最大时效 ${maxSignalAgeMs}ms，已跳过迟到买单`,
+                requestedUsdc: 0,
+                requestedSize: 0,
+                executedUsdc: 0,
+                executedSize: 0,
+                executionPrice: 0,
+                orderIds: [],
+                transactionHashes: [],
+            };
+            ctx.state.policyTrail = [...(ctx.state.policyTrail || []), 'risk:signal_stale'];
+            return this.skip(ctx.state.executionResult.reason, 'copytrade.persist');
+        }
+
         if (isMarketWindowClosed(event, ctx.now())) {
             ctx.state.executionResult = {
                 status: 'skipped',

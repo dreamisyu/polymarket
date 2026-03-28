@@ -10,6 +10,7 @@ import type { SourceTradeEvent } from './sourceTradeEvent';
 
 export interface TradeExecutionRequest {
     sourceEvent: SourceTradeEvent;
+    sourceEvents?: SourceTradeEvent[];
     requestedUsdc: number;
     requestedSize: number;
     orderAmount: number;
@@ -18,6 +19,8 @@ export interface TradeExecutionRequest {
     tickSize: TickSize;
     negRisk?: boolean;
     note?: string;
+    workflowId?: string;
+    policyTrail?: string[];
     metadata?: Record<string, unknown>;
 }
 

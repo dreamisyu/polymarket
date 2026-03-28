@@ -27,6 +27,7 @@ export interface SourceEventStore {
             maxRetryCount?: number;
         }
     ): Promise<SourceTradeEvent[]>;
+    markProcessing(eventId: string, reason: string, now: number): Promise<void>;
     markConfirmed(eventId: string, reason: string, now: number): Promise<void>;
     markSkipped(eventId: string, reason: string, now: number): Promise<void>;
     markRetry(eventId: string, reason: string, now: number, delayMs: number): Promise<void>;

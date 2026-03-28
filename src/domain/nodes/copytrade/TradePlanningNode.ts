@@ -132,6 +132,7 @@ export class TradePlanningNode extends CopyTradeNode {
 
         ctx.state.tradeExecutionRequest = {
             sourceEvent: event,
+            sourceEvents: ctx.state.sourceEvents,
             requestedUsdc: bundleExecution?.requestedUsdc ?? plan.requestedUsdc,
             requestedSize: plan.requestedSize,
             orderAmount: bundleExecution?.executableUsdc ?? plan.orderAmount,
@@ -140,6 +141,8 @@ export class TradePlanningNode extends CopyTradeNode {
             tickSize: plan.tickSize,
             negRisk: plan.negRisk,
             note: plan.note || decision.note,
+            workflowId: ctx.workflowId,
+            policyTrail: ctx.state.policyTrail || [],
             metadata: bundleExecution
                 ? {
                       bundlePlannedCount: bundleExecution.plannedCount,

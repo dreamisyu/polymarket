@@ -66,6 +66,11 @@ export const createRuntime = async (config = loadRuntimeConfig()): Promise<Runti
         clobClient: clobSession.client,
         marketFeed,
         userExecutionFeed,
+        persistence: {
+            sourceEvents: stores.sourceEvents,
+            executions: stores.executions,
+            settlementTasks: stores.settlementTasks,
+        },
     });
     const settlement = new LiveSettlementGateway({
         config,

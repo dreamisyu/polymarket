@@ -25,6 +25,7 @@ export interface RuntimeConfig {
     fixedTradeAmountUsdc: number;
     maxOpenPositions: number;
     maxActiveExposureUsdc: number;
+    maxSignalAgeMs?: number;
     signalMarketScope: 'all' | 'crypto_updown_5m';
     signalWeakThresholdUsdc: number;
     signalNormalThresholdUsdc: number;
@@ -136,6 +137,7 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
         fixedTradeAmountUsdc: env.toPositiveNumber('FIXED_TRADE_USDC', 20),
         maxOpenPositions: env.toPositiveNumber('MAX_OPEN_POSITIONS', 20),
         maxActiveExposureUsdc: env.toPositiveNumber('MAX_ACTIVE_EXPOSURE_USDC', 1_000),
+        maxSignalAgeMs: env.toNonNegativeNumber('MAX_SIGNAL_AGE_MS', 15_000),
         signalMarketScope: env.toChoice(
             'SIGNAL_MARKET_SCOPE',
             ['all', 'crypto_updown_5m'] as const,

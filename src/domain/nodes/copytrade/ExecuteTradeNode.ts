@@ -28,6 +28,10 @@ export class ExecuteTradeNode extends CopyTradeNode {
             return this.success(result);
         }
 
+        if (result.status === 'submitted') {
+            return this.success(result);
+        }
+
         if (result.status === 'skipped') {
             return this.skip(result.reason, 'copytrade.persist');
         }

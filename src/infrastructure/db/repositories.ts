@@ -228,6 +228,23 @@ class MongoSourceEventStore implements SourceEventStore {
         );
     }
 
+    async markProcessing(eventId: string, reason: string, now: number) {
+        await this.SourceEvent.updateOne(
+            {
+                _id: new mongoose.Types.ObjectId(eventId),
+                status: { $in: ['pending', 'retry', 'processing'] },
+            },
+            {
+                $set: {
+                    status: 'processing',
+                    claimedAt: now,
+                    nextRetryAt: 0,
+                    lastError: reason,
+                },
+            }
+        );
+    }
+
     async markSkipped(eventId: string, reason: string, now: number) {
         await this.SourceEvent.updateOne(
             { _id: new mongoose.Types.ObjectId(eventId) },
@@ -301,7 +318,36 @@ class MongoExecutionStore implements ExecutionStore {
         this.Execution = getExecutionModel(scopeKey);
     }
 
+    private shouldPreserveExisting(
+        existingStatus: string,
+        nextStatus: string
+    ) {
+        const normalizedExisting = String(existingStatus || '').trim().toLowerCase();
+        const normalizedNext = String(nextStatus || '').trim().toLowerCase();
+        if (!normalizedExisting) {
+            return false;
+        }
+        if (normalizedExisting === 'confirmed') {
+            return normalizedNext !== 'confirmed';
+        }
+        if (normalizedExisting === 'failed' || normalizedExisting === 'skipped') {
+            return normalizedNext === 'submitted' || normalizedNext === 'retry';
+        }
+
+        return false;
+    }
+
     async save(record: WorkflowExecutionRecord) {
+        const existing = await this.Execution.findOne(
+            { sourceEventId: record.sourceEventId },
+            { status: 1 }
+        ).lean<Pick<WorkflowExecutionRecord, 'status'> | null>();
+        if (existing?.status && this.shouldPreserveExisting(existing.status, record.status)) {
+            return (await this.Execution.findOne({
+                sourceEventId: record.sourceEventId,
+            }).lean<WorkflowExecutionRecord>()) as WorkflowExecutionRecord;
+        }
+
         const response = await this.Execution.findOneAndUpdate(
             { sourceEventId: record.sourceEventId },
             { $set: record },
