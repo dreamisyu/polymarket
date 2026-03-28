@@ -67,6 +67,7 @@ jest.mock('@polymarket/clob-client', () => {
             SELL: 'SELL',
         },
         SignatureType: {
+            EOA: 'EOA',
             POLY_PROXY: 'POLY_PROXY',
             POLY_GNOSIS_SAFE: 'POLY_GNOSIS_SAFE',
         },
@@ -198,6 +199,7 @@ const buildLiveConfig = (overrides: Record<string, unknown> = {}) => ({
     maxSlippageBps: 100,
     maxOrderUsdc: 10,
     buyDustResidualMode: 'trim' as const,
+    clobSignatureType: 'SAFE' as const,
     proxyWallet: '0xproxy',
     privateKey: 'a'.repeat(64),
     relayerUrl: 'https://relayer-v2.polymarket.com',
@@ -267,13 +269,26 @@ describe('createLiveClobClient', () => {
         };
         const session = await createLiveClobClient(
             buildLiveConfig({
-                relayerTxType: 'PROXY',
+                clobSignatureType: 'PROXY',
             })
         );
 
         expect(clobClientMock.instances[0]?.createApiKey).toHaveBeenCalledTimes(1);
         expect(session.creds).toEqual(clobClientMock.MockClobClient.createApiKeyResult);
         expect(clobClientMock.instances[1]?.args[4]).toBe('POLY_PROXY');
+    });
+
+    it('EOA 账户不强制要求代理钱包地址', async () => {
+        const session = await createLiveClobClient(
+            buildLiveConfig({
+                clobSignatureType: 'EOA',
+                proxyWallet: undefined,
+            })
+        );
+
+        expect(session.creds).toEqual(clobClientMock.MockClobClient.deriveApiKeyResult);
+        expect(clobClientMock.instances[1]?.args[4]).toBe('EOA');
+        expect(clobClientMock.instances[1]?.args[5]).toBeUndefined();
     });
 });
 

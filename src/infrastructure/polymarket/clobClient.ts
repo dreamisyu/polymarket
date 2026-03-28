@@ -1,6 +1,6 @@
 import { ApiKeyCreds, Chain, ClobClient, SignatureType } from '@polymarket/clob-client';
 import { Wallet, type TypedDataDomain, type TypedDataField } from 'ethers';
-import type { RuntimeConfig } from '../../config/runtimeConfig';
+import type { ClobSignatureType, RuntimeConfig } from '../../config/runtimeConfig';
 
 export interface LiveClobSession {
     client: ClobClient;
@@ -39,23 +39,44 @@ const createSigner = (privateKey: string) => {
 export const createPublicClobClient = (config: Pick<RuntimeConfig, 'clobHttpUrl'>) =>
     new ClobClient(config.clobHttpUrl, Chain.POLYGON, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true);
 
+const resolveSignatureType = (signatureType: ClobSignatureType): SignatureType => {
+    switch (signatureType) {
+        case 'EOA':
+            return SignatureType.EOA;
+        case 'PROXY':
+            return SignatureType.POLY_PROXY;
+        case 'SAFE':
+            return SignatureType.POLY_GNOSIS_SAFE;
+        default:
+            throw new Error(`不支持的 CLOB 签名类型: ${signatureType satisfies never}`);
+    }
+};
+
 export const createLiveClobClient = async (
-    config: Pick<RuntimeConfig, 'clobHttpUrl' | 'proxyWallet' | 'privateKey' | 'relayerTxType'>
+    config: Pick<
+        RuntimeConfig,
+        'clobHttpUrl' | 'proxyWallet' | 'privateKey' | 'clobSignatureType'
+    >
 ): Promise<LiveClobSession> => {
-    if (!config.proxyWallet || !config.privateKey) {
-        throw new Error('live 模式缺少 PROXY_WALLET 或 PRIVATE_KEY');
+    if (!config.privateKey) {
+        throw new Error('live 模式缺少 PRIVATE_KEY');
+    }
+
+    const signatureType = resolveSignatureType(config.clobSignatureType);
+    const funderAddress =
+        signatureType === SignatureType.EOA ? undefined : config.proxyWallet || undefined;
+    if (signatureType !== SignatureType.EOA && !funderAddress) {
+        throw new Error('代理钱包账户缺少 PROXY_WALLET');
     }
 
     const signer = createSigner(config.privateKey);
-    const signatureType =
-        config.relayerTxType === 'PROXY' ? SignatureType.POLY_PROXY : SignatureType.POLY_GNOSIS_SAFE;
     const bootstrapClient = new ClobClient(
         config.clobHttpUrl,
         Chain.POLYGON,
         signer,
         undefined,
         signatureType,
-        config.proxyWallet,
+        funderAddress,
         undefined,
         undefined,
         undefined,
@@ -77,7 +98,7 @@ export const createLiveClobClient = async (
             signer,
             rawCreds,
             signatureType,
-            config.proxyWallet,
+            funderAddress,
             undefined,
             undefined,
             undefined,

@@ -1,6 +1,8 @@
 import { env } from './env';
 import type { RunMode, StrategyKind } from '../domain';
 
+export type ClobSignatureType = 'EOA' | 'PROXY' | 'SAFE';
+
 export interface RuntimeConfig {
     runMode: RunMode;
     strategyKind: StrategyKind;
@@ -52,6 +54,7 @@ export interface RuntimeConfig {
     maxSlippageBps: number;
     maxOrderUsdc: number;
     buyDustResidualMode: 'off' | 'defer' | 'trim';
+    clobSignatureType: ClobSignatureType;
     proxyWallet?: string;
     privateKey?: string;
     relayerUrl?: string;
@@ -81,11 +84,26 @@ const normalizeStrategyKind = (): StrategyKind =>
 
 const resolvePaperInitialBalance = () => env.toNonNegativeNumber('PAPER_INITIAL_BALANCE', 1_000);
 
+const resolveClobSignatureType = (): ClobSignatureType => {
+    const configured = env.readEnv('CLOB_SIGNATURE_TYPE');
+    if (configured) {
+        return env.toChoice('CLOB_SIGNATURE_TYPE', ['EOA', 'PROXY', 'SAFE'] as const);
+    }
+
+    const legacy = env.readEnv('RELAYER_TX_TYPE');
+    if (legacy) {
+        return env.toChoice('RELAYER_TX_TYPE', ['PROXY', 'SAFE'] as const);
+    }
+
+    return 'SAFE';
+};
+
 export const loadRuntimeConfig = (): RuntimeConfig => {
     const runMode = env.toChoice('RUN_MODE', ['live', 'paper'] as const, 'paper');
     const strategyKind = normalizeStrategyKind();
     const sourceWallet = env.requireEnv('SOURCE_WALLET');
     const targetWallet = env.requireEnv('TARGET_WALLET');
+    const clobSignatureType = resolveClobSignatureType();
 
     return {
         runMode,
@@ -161,7 +179,11 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
             ['off', 'defer', 'trim'] as const,
             'trim'
         ),
-        proxyWallet: runMode === 'live' ? env.requireEnv('PROXY_WALLET') : undefined,
+        clobSignatureType,
+        proxyWallet:
+            runMode === 'live' && clobSignatureType !== 'EOA'
+                ? env.requireEnv('PROXY_WALLET')
+                : undefined,
         privateKey: runMode === 'live' ? env.requireEnv('PRIVATE_KEY') : undefined,
         relayerUrl: env.readEnv('RELAYER_URL') || defaultRelayerUrl,
         relayerTxType: env.toChoice('RELAYER_TX_TYPE', ['SAFE', 'PROXY'] as const, 'SAFE'),

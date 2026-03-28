@@ -66,6 +66,7 @@ const buildConfig = (overrides: Partial<Runtime['config']> = {}): Runtime['confi
     maxSlippageBps: 100,
     maxOrderUsdc: 10,
     buyDustResidualMode: 'trim',
+    clobSignatureType: 'SAFE',
     relayerTxType: 'SAFE',
     usdcContractAddress: '0x0000000000000000000000000000000000000001',
     ctfContractAddress: '0x0000000000000000000000000000000000000002',
