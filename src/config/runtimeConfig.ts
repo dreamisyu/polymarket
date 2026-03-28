@@ -26,6 +26,8 @@ export interface RuntimeConfig {
     maxOpenPositions: number;
     maxActiveExposureUsdc: number;
     maxSignalAgeMs?: number;
+    marketWhitelist: string[];
+    minSourceBuyUsdc: number;
     signalMarketScope: 'all' | 'crypto_updown_5m';
     signalWeakThresholdUsdc: number;
     signalNormalThresholdUsdc: number;
@@ -85,6 +87,24 @@ const normalizeStrategyKind = (): StrategyKind =>
 
 const resolvePaperInitialBalance = () => env.toNonNegativeNumber('PAPER_INITIAL_BALANCE', 1_000);
 
+const resolveMarketWhitelist = () => {
+    const raw = env.readEnv('MARKET_WHITELIST');
+    if (!raw) {
+        return [] as string[];
+    }
+
+    const items = Array.from(
+        new Set(
+            raw
+                .split(',')
+                .map((item) => item.trim().toLowerCase())
+                .filter(Boolean)
+        )
+    );
+
+    return items.includes('all') ? [] : items;
+};
+
 const resolveClobSignatureType = (): ClobSignatureType => {
     const configured = env.readEnv('CLOB_SIGNATURE_TYPE');
     if (configured) {
@@ -138,6 +158,8 @@ export const loadRuntimeConfig = (): RuntimeConfig => {
         maxOpenPositions: env.toPositiveNumber('MAX_OPEN_POSITIONS', 20),
         maxActiveExposureUsdc: env.toPositiveNumber('MAX_ACTIVE_EXPOSURE_USDC', 1_000),
         maxSignalAgeMs: env.toNonNegativeNumber('MAX_SIGNAL_AGE_MS', 15_000),
+        marketWhitelist: resolveMarketWhitelist(),
+        minSourceBuyUsdc: env.toNonNegativeNumber('MIN_SOURCE_BUY_USDC', 0),
         signalMarketScope: env.toChoice(
             'SIGNAL_MARKET_SCOPE',
             ['all', 'crypto_updown_5m'] as const,

@@ -37,6 +37,8 @@ const buildConfig = (overrides: Partial<Runtime['config']> = {}): Runtime['confi
     fixedTradeAmountUsdc: 1,
     maxOpenPositions: 4,
     maxActiveExposureUsdc: 10,
+    marketWhitelist: [],
+    minSourceBuyUsdc: 0,
     signalMarketScope: 'all',
     signalWeakThresholdUsdc: 1,
     signalNormalThresholdUsdc: 2,

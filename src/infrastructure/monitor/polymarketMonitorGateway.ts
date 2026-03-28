@@ -7,6 +7,7 @@ import { getUsdcBalance } from '../chain/wallet';
 import { buildTradeSnapshots } from '../../utils/snapshots';
 import { buildActivityKey } from '../../utils/activityKey';
 import { toSafeNumber } from '../../utils/math';
+import { resolveSourceEventBuyFilterRejection } from '../../utils/sourceEventFilters';
 import type { SourceActivityRecord } from '../polymarket/dto';
 import type { LoggerLike, MonitorGateway } from '../runtime/contracts';
 import { getMonitorCursorModel } from '../db/models';
@@ -87,7 +88,11 @@ export class PolymarketMonitorGateway implements MonitorGateway {
         ]);
         const capturedAt = Date.now();
         const snapshots = buildTradeSnapshots(fetchedTrades, positions, balance, capturedAt, this.config);
-        const events = fetchedTrades.map((trade) => {
+        const filterCounts = {
+            marketWhitelist: 0,
+            minSourceBuyUsdc: 0,
+        };
+        const rawEvents = fetchedTrades.map((trade) => {
             const event = mapSourceActivity(
                 {
                     ...trade,
@@ -97,6 +102,19 @@ export class PolymarketMonitorGateway implements MonitorGateway {
             );
             event.sourceWallet = this.config.targetWallet;
             return event;
+        });
+        const events = rawEvents.filter((event) => {
+            const rejection = resolveSourceEventBuyFilterRejection(event, this.config);
+            if (!rejection) {
+                return true;
+            }
+
+            if (rejection.code === 'market_whitelist') {
+                filterCounts.marketWhitelist += 1;
+            } else if (rejection.code === 'min_source_buy_usdc') {
+                filterCounts.minSourceBuyUsdc += 1;
+            }
+            return false;
         });
 
         const lastTrade = fetchedTrades[fetchedTrades.length - 1];
@@ -113,7 +131,7 @@ export class PolymarketMonitorGateway implements MonitorGateway {
         );
 
         this.logger.debug(
-            `监控同步完成 wallet=${this.config.targetWallet} fetched=${events.length} start=${startTimestamp} end=${endTimestamp}`
+            `监控同步完成 wallet=${this.config.targetWallet} fetched=${events.length} raw=${rawEvents.length} filteredByMarketWhitelist=${filterCounts.marketWhitelist} filteredByMinBuy=${filterCounts.minSourceBuyUsdc} start=${startTimestamp} end=${endTimestamp}`
         );
 
         return {

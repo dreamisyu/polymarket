@@ -46,6 +46,8 @@ const buildTestContext = (): NodeContext => ({
             fixedTradeAmountUsdc: 1,
             maxOpenPositions: 4,
             maxActiveExposureUsdc: 10,
+            marketWhitelist: [],
+            minSourceBuyUsdc: 0,
             signalMarketScope: 'all',
             signalWeakThresholdUsdc: 1,
             signalNormalThresholdUsdc: 2,
@@ -273,6 +275,78 @@ describe('PrepareDispatchBundlesNode', () => {
 });
 
 describe('RiskGuardNode', () => {
+    it('市场白名单命中失败时跳过买入信号', async () => {
+        const node = new RiskGuardNode();
+        const ctx = {
+            ...buildTestContext(),
+            runtime: {
+                ...buildTestContext().runtime,
+                config: {
+                    ...buildTestContext().runtime.config,
+                    marketWhitelist: ['crypto_updown_5m'],
+                },
+            },
+            state: {
+                sourceEvent: {
+                    action: 'buy',
+                    timestamp: 1774713000000,
+                    usdcSize: 20,
+                    eventSlug: 'fed-rate-cut-june',
+                    slug: 'fed-rate-cut-june',
+                    title: 'Will the Fed cut rates in June?',
+                },
+                portfolio: {
+                    openPositionCount: 0,
+                    activeExposureUsdc: 0,
+                },
+                localPosition: null,
+                policyTrail: [],
+            },
+        } as unknown as NodeContext;
+
+        const result = await node.doAction(ctx);
+
+        expect(result.status).toBe('skip');
+        expect(result.reason).toBe('市场不在白名单内，已跳过买入信号');
+        expect(ctx.state.policyTrail).toContain('risk:market_whitelist');
+    });
+
+    it('源买入金额过小时跳过买入信号', async () => {
+        const node = new RiskGuardNode();
+        const ctx = {
+            ...buildTestContext(),
+            runtime: {
+                ...buildTestContext().runtime,
+                config: {
+                    ...buildTestContext().runtime.config,
+                    minSourceBuyUsdc: 5,
+                },
+            },
+            state: {
+                sourceEvent: {
+                    action: 'buy',
+                    timestamp: 1774713000000,
+                    usdcSize: 4.2,
+                    eventSlug: 'eth-updown-5m-1774712700',
+                    slug: 'eth-updown-5m-1774712700',
+                    title: 'Ethereum Up or Down - March 28, 11:45AM-11:50AM ET',
+                },
+                portfolio: {
+                    openPositionCount: 0,
+                    activeExposureUsdc: 0,
+                },
+                localPosition: null,
+                policyTrail: [],
+            },
+        } as unknown as NodeContext;
+
+        const result = await node.doAction(ctx);
+
+        expect(result.status).toBe('skip');
+        expect(result.reason).toBe('源买入金额低于最小阈值 5 USDC，已跳过');
+        expect(ctx.state.policyTrail).toContain('risk:min_source_buy_usdc');
+    });
+
     it('信号过期时跳过迟到买单', async () => {
         const node = new RiskGuardNode();
         const ctx = {

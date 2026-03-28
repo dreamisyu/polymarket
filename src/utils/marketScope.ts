@@ -30,16 +30,65 @@ const isFiveMinuteUpdownTitle = (normalizedTitle: string) => {
     return diff === 5;
 };
 
-export const isTradeWithinSignalMarketScope = (trade: { title?: string; slug?: string; eventSlug?: string }) => {
-    const normalizedSlug = String(trade.slug || trade.eventSlug || '').trim().toLowerCase();
-    const normalizedTitle = String(trade.title || '').trim().toLowerCase();
-    const titleFallbackMatched =
-        !normalizedSlug &&
-        (normalizedTitle.includes('bitcoin up or down') ||
-            normalizedTitle.includes('ethereum up or down') ||
-            normalizedTitle.includes('solana up or down') ||
-            normalizedTitle.includes('xrp up or down')) &&
-        isFiveMinuteUpdownTitle(normalizedTitle);
+const cryptoUpdownFiveMinuteSlugPattern = /(?:^|[-_])(btc|eth|sol|xrp|doge)-updown-5m(?:$|[-_])/i;
+const cryptoUpdownFiveMinuteTitlePattern =
+    /(bitcoin|ethereum|solana|xrp|dogecoin)\s+up\s+or\s+down/i;
 
-    return normalizedSlug.includes('btc-updown-5m') || titleFallbackMatched;
+const normalizeMarketText = (value?: string) => String(value || '').trim().toLowerCase();
+
+export const isTradeWithinCryptoUpdownFiveMinuteScope = (trade: {
+    title?: string;
+    slug?: string;
+    eventSlug?: string;
+}) => {
+    const normalizedSlug = normalizeMarketText(trade.slug);
+    const normalizedEventSlug = normalizeMarketText(trade.eventSlug);
+    const normalizedTitle = String(trade.title || '').trim().toLowerCase();
+
+    if (
+        cryptoUpdownFiveMinuteSlugPattern.test(normalizedSlug) ||
+        cryptoUpdownFiveMinuteSlugPattern.test(normalizedEventSlug)
+    ) {
+        return true;
+    }
+
+    return cryptoUpdownFiveMinuteTitlePattern.test(normalizedTitle) && isFiveMinuteUpdownTitle(normalizedTitle);
 };
+
+export const isTradeWithinMarketWhitelist = (
+    trade: { title?: string; slug?: string; eventSlug?: string },
+    marketWhitelist: string[]
+) => {
+    const normalizedRules = Array.from(
+        new Set(
+            marketWhitelist
+                .map((rule) => normalizeMarketText(rule))
+                .filter((rule) => Boolean(rule) && rule !== 'all')
+        )
+    );
+    if (!normalizedRules.length) {
+        return true;
+    }
+
+    const normalizedTitle = normalizeMarketText(trade.title);
+    const normalizedSlug = normalizeMarketText(trade.slug);
+    const normalizedEventSlug = normalizeMarketText(trade.eventSlug);
+
+    return normalizedRules.some((rule) => {
+        if (rule === 'crypto_updown_5m') {
+            return isTradeWithinCryptoUpdownFiveMinuteScope(trade);
+        }
+
+        return (
+            normalizedTitle.includes(rule) ||
+            normalizedSlug.includes(rule) ||
+            normalizedEventSlug.includes(rule)
+        );
+    });
+};
+
+export const isTradeWithinSignalMarketScope = (trade: {
+    title?: string;
+    slug?: string;
+    eventSlug?: string;
+}) => isTradeWithinMarketWhitelist(trade, ['crypto_updown_5m']);

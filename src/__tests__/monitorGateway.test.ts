@@ -53,12 +53,14 @@ const buildConfig = (strategyKind: 'fixed_amount' | 'proportional' | 'signal' = 
         monitorOverlapMs: 1_000,
         activitySyncLimit: 100,
         snapshotStaleAfterMs: 60_000,
+        marketWhitelist: [],
+        minSourceBuyUsdc: 0,
         dataApiUrl: 'https://data-api.polymarket.com',
         rpcUrl: 'https://polygon.drpc.org',
         usdcContractAddress: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
-    }) as never;
+    });
 
-const buildActivity = (): SourceActivityRecord => ({
+const buildActivity = (overrides: Partial<SourceActivityRecord> = {}): SourceActivityRecord => ({
     activityKey: 'activity-1',
     proxyWallet: '0xtarget',
     timestamp: 1_774_709_615,
@@ -75,6 +77,7 @@ const buildActivity = (): SourceActivityRecord => ({
     price: 0.42,
     size: 10,
     usdcSize: 4.2,
+    ...overrides,
 });
 
 describe('PolymarketMonitorGateway', () => {
@@ -104,7 +107,7 @@ describe('PolymarketMonitorGateway', () => {
         getUsdcBalance.mockRejectedValueOnce(new Error('rpc down'));
 
         const gateway = new PolymarketMonitorGateway({
-            config: buildConfig('fixed_amount'),
+            config: buildConfig('fixed_amount') as never,
             logger: logger as never,
         });
 
@@ -123,11 +126,72 @@ describe('PolymarketMonitorGateway', () => {
         );
     });
 
+    it('市场白名单会过滤掉不在范围内的买入事件', async () => {
+        fetchSourceActivities.mockResolvedValue([
+            buildActivity({
+                activityKey: 'activity-crypto-5m',
+                slug: 'eth-updown-5m-1774712700',
+                eventSlug: 'eth-updown-5m-1774712700',
+                title: 'Ethereum Up or Down - March 28, 11:45AM-11:50AM ET',
+            }),
+            buildActivity({
+                activityKey: 'activity-other',
+                slug: 'fomc-rate-cut-june',
+                eventSlug: 'fomc-rate-cut-june',
+                title: 'Will the Fed cut rates in June?',
+            }),
+        ]);
+
+        const gateway = new PolymarketMonitorGateway({
+            config: {
+                ...buildConfig(),
+                marketWhitelist: ['crypto_updown_5m'],
+            } as never,
+            logger: logger as never,
+        });
+
+        const result = await gateway.syncOnce();
+
+        expect(result.events).toHaveLength(1);
+        expect(result.events[0]?.activityKey).toBe('activity-crypto-5m');
+        expect(logger.debug).toHaveBeenCalledWith(
+            expect.stringContaining('filteredByMarketWhitelist=1')
+        );
+    });
+
+    it('最小源买入金额会过滤掉过小的买入事件', async () => {
+        fetchSourceActivities.mockResolvedValue([
+            buildActivity({
+                activityKey: 'activity-small-buy',
+                usdcSize: 4.2,
+            }),
+            buildActivity({
+                activityKey: 'activity-sell',
+                side: 'SELL',
+                usdcSize: 1,
+            }),
+        ]);
+
+        const gateway = new PolymarketMonitorGateway({
+            config: {
+                ...buildConfig(),
+                minSourceBuyUsdc: 5,
+            } as never,
+            logger: logger as never,
+        });
+
+        const result = await gateway.syncOnce();
+
+        expect(result.events).toHaveLength(1);
+        expect(result.events[0]?.activityKey).toBe('activity-sell');
+        expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining('filteredByMinBuy=1'));
+    });
+
     it('proportional 策略在目标钱包余额读取失败时仍会抛错', async () => {
         getUsdcBalance.mockRejectedValueOnce(new Error('rpc down'));
 
         const gateway = new PolymarketMonitorGateway({
-            config: buildConfig('proportional'),
+            config: buildConfig('proportional') as never,
             logger: logger as never,
         });
 

@@ -108,7 +108,7 @@ export const computeSignalDecision = (
     if (config.signalMarketScope === 'crypto_updown_5m' && !isTradeWithinSignalMarketScope(event)) {
         return {
             status: 'skip',
-            reason: '当前信号策略仅跟 BTC/ETH 5 分钟 Up/Down 市场',
+            reason: '当前信号策略仅跟加密货币 5 分钟 Up/Down 市场',
         };
     }
 

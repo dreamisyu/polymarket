@@ -170,6 +170,8 @@ const buildLiveConfig = (overrides: Record<string, unknown> = {}) => ({
     fixedTradeAmountUsdc: 1.2,
     maxOpenPositions: 4,
     maxActiveExposureUsdc: 20,
+    marketWhitelist: [],
+    minSourceBuyUsdc: 0,
     signalMarketScope: 'all' as const,
     signalWeakThresholdUsdc: 1,
     signalNormalThresholdUsdc: 2,
