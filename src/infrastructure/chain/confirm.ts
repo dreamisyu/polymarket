@@ -1,6 +1,7 @@
 import type { RuntimeConfig } from '../../config/runtimeConfig';
 import { createRpcProvider } from './wallet';
 import { sleep } from '../../utils/sleep';
+import { withRpcTimeout } from './rpc';
 
 export const confirmTransactionHashes = async (
     transactionHashes: string[],
@@ -22,7 +23,15 @@ export const confirmTransactionHashes = async (
     while (Date.now() - startedAt < timeoutMs) {
         let confirmedCount = 0;
         for (const hash of uniqueHashes) {
-            const receipt = await provider.getTransactionReceipt(hash);
+            let receipt;
+            try {
+                receipt = await withRpcTimeout(
+                    provider.getTransactionReceipt(hash),
+                    `查询交易回执 hash=${hash}`
+                );
+            } catch {
+                continue;
+            }
             if (!receipt) {
                 continue;
             }
@@ -34,7 +43,15 @@ export const confirmTransactionHashes = async (
                 };
             }
 
-            const confirmations = await receipt.confirmations();
+            let confirmations = 0;
+            try {
+                confirmations = await withRpcTimeout(
+                    receipt.confirmations(),
+                    `查询交易确认数 hash=${hash}`
+                );
+            } catch {
+                continue;
+            }
             if (confirmations >= config.orderConfirmationBlocks) {
                 confirmedCount += 1;
             }

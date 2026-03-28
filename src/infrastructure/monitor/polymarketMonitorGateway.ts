@@ -129,7 +129,23 @@ export class PolymarketMonitorGateway implements MonitorGateway {
             return 0;
         }
 
-        return getUsdcBalance(this.config.targetWallet, this.config);
+        try {
+            return await getUsdcBalance(this.config.targetWallet, this.config);
+        } catch (error) {
+            if (this.config.strategyKind === 'proportional') {
+                throw error;
+            }
+
+            this.logger.warn(
+                {
+                    err: error,
+                    wallet: this.config.targetWallet,
+                    strategyKind: this.config.strategyKind,
+                },
+                '监控阶段读取目标钱包 USDC 余额失败，已降级为 PARTIAL 快照'
+            );
+            return null;
+        }
     }
 
     private async fetchActivityWindow(startTimestamp: number, endTimestamp: number) {

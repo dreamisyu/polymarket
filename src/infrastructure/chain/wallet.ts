@@ -3,6 +3,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { type Address, type Hex, createWalletClient, http } from 'viem';
 import { polygon } from 'viem/chains';
 import type { RuntimeConfig } from '../../config/runtimeConfig';
+import { withRpcTimeout } from './rpc';
 
 const usdcAbi = ['function balanceOf(address owner) view returns (uint256)'];
 
@@ -17,7 +18,10 @@ export const getUsdcBalance = async (
 ) => {
     const provider = createRpcProvider(config);
     const contract = new Contract(config.usdcContractAddress, usdcAbi, provider);
-    const balance = await contract.balanceOf(address);
+    const balance = await withRpcTimeout(
+        contract.balanceOf(address),
+        `读取 USDC 余额 address=${address}`
+    );
     return Number.parseFloat(formatUnits(balance, 6));
 };
 
