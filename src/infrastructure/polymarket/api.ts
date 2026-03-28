@@ -24,6 +24,7 @@ export const fetchSourceActivities = async (
         start: String(params.start),
         end: String(params.end),
         limit: String(params.limit),
+        sortBy: 'TIMESTAMP',
         sortDirection: 'ASC',
     });
     return fetchJson<SourceActivityRecord[]>(`${config.dataApiUrl.replace(/\/+$/, '')}/activity?${search.toString()}`);

@@ -1,4 +1,3 @@
-import { sleep } from '../utils/sleep';
 import { NodeChainBuilder } from '../domain/nodes/kernel/NodeChainBuilder';
 import { NodeRegistry } from '../domain/nodes/kernel/NodeRegistry';
 import { NodeWorkflowEngine } from '../domain/nodes/kernel/NodeWorkflowEngine';
@@ -14,6 +13,7 @@ import { createStrategy } from '../domain/strategy/createStrategy';
 import type { CopyTradeWorkflowState } from '../domain/strategy/workflowState';
 import type { StrategyBuildResult } from '../domain/strategy/types';
 import type { Runtime } from '../infrastructure/runtime/contracts';
+import { createLoopWorker } from './loopWorker';
 
 export interface WorkflowWorker {
     name: string;
@@ -47,20 +47,6 @@ const buildContext = <TState extends Record<string, unknown>>(
     state,
     startedAt: Date.now(),
     now: () => Date.now(),
-});
-
-const createLoopWorker = (params: {
-    name: string;
-    intervalMs: number;
-    runOnce: () => Promise<void>;
-}) => ({
-    name: params.name,
-    run: async () => {
-        while (true) {
-            await params.runOnce();
-            await sleep(params.intervalMs);
-        }
-    },
 });
 
 export const createApp = (runtime: Runtime): App => {
@@ -123,6 +109,7 @@ export const createApp = (runtime: Runtime): App => {
             createLoopWorker({
                 name: '监控分发工作流',
                 intervalMs: runtime.config.monitorIntervalMs,
+                logger: runtime.logger,
                 runOnce: async () => {
                     await engine.run(
                         buildContext(runtime, 'monitor', {} as MonitorWorkflowState),
@@ -133,6 +120,7 @@ export const createApp = (runtime: Runtime): App => {
             createLoopWorker({
                 name: '结算工作流',
                 intervalMs: runtime.config.settlementIntervalMs,
+                logger: runtime.logger,
                 runOnce: async () => {
                     await engine.run(buildContext(runtime, 'settlement', {}), settlementWorkflow);
                 },

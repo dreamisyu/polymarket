@@ -10,7 +10,7 @@ const startWorker = (
     run: () => Promise<void>
 ) => {
     run().catch((error) => {
-        logger.error(`${name} 已退出`, error);
+        logger.error({ err: error }, `${name} 已退出`);
         process.exit(1);
     });
 };
