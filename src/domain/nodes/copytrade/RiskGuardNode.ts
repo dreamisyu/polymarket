@@ -2,6 +2,7 @@ import type { NodeContext } from '../kernel/NodeContext';
 import type { NodeResult } from '../kernel/NodeResult';
 import type { CopyTradeWorkflowState } from '../../strategy/workflowState';
 import { CopyTradeNode } from './CopyTradeNode';
+import { isMarketWindowClosed } from '../../../utils/marketWindow';
 
 export class RiskGuardNode extends CopyTradeNode {
     constructor() {
@@ -18,6 +19,22 @@ export class RiskGuardNode extends CopyTradeNode {
 
         if (event.action !== 'buy') {
             return this.success();
+        }
+
+        if (isMarketWindowClosed(event, ctx.now())) {
+            ctx.state.executionResult = {
+                status: 'skipped',
+                reason: '市场交易窗口已结束，已跳过迟到买单',
+                requestedUsdc: 0,
+                requestedSize: 0,
+                executedUsdc: 0,
+                executedSize: 0,
+                executionPrice: 0,
+                orderIds: [],
+                transactionHashes: [],
+            };
+            ctx.state.policyTrail = [...(ctx.state.policyTrail || []), 'risk:market_window_closed'];
+            return this.skip(ctx.state.executionResult.reason, 'copytrade.persist');
         }
 
         if (
