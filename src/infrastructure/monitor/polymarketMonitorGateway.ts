@@ -131,7 +131,7 @@ export class PolymarketMonitorGateway implements MonitorGateway {
         );
 
         this.logger.debug(
-            `监控同步完成 wallet=${this.config.targetWallet} fetched=${events.length} raw=${rawEvents.length} filteredByMarketWhitelist=${filterCounts.marketWhitelist} filteredByMinBuy=${filterCounts.minSourceBuyUsdc} start=${startTimestamp} end=${endTimestamp}`
+            `监控同步完成 fetched=${events.length} raw=${rawEvents.length}  start=${startTimestamp} end=${endTimestamp}`
         );
 
         return {

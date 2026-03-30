@@ -30,9 +30,9 @@ const isFiveMinuteUpdownTitle = (normalizedTitle: string) => {
     return diff === 5;
 };
 
-const cryptoUpdownFiveMinuteSlugPattern = /(?:^|[-_])(btc|eth|sol|xrp|doge)-updown-5m(?:$|[-_])/i;
+const cryptoUpdownFiveMinuteSlugPattern = /(?:^|[-_])(btc)-updown-5m(?:$|[-_])/i;
 const cryptoUpdownFiveMinuteTitlePattern =
-    /(bitcoin|ethereum|solana|xrp|dogecoin)\s+up\s+or\s+down/i;
+    /(bitcoin)\s+up\s+or\s+down/i;
 
 const normalizeMarketText = (value?: string) => String(value || '').trim().toLowerCase();
 
