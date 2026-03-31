@@ -1,7 +1,6 @@
-import { main } from './app/main';
-import { createLogger } from './utils/logger';
-
-const logger = createLogger('app');
+import { createApplicationContext } from '@bootstrap/applicationContext';
+import { loadAppConfig } from '@config/appConfig';
+import { createLoggerFactory, type Logger } from '@shared/logger';
 
 const EXIT_AFTER_SECONDS_FLAGS = ['--exit-after-seconds', '--run-seconds'] as const;
 
@@ -46,24 +45,43 @@ const getExitAfterSeconds = (args: string[]) => {
     return seconds;
 };
 
-const scheduleAutoExit = (seconds: number) => {
+const createBootstrapLogger = (): Logger | null => {
+    try {
+        return createLoggerFactory(loadAppConfig()).createLogger('bootstrap');
+    } catch {
+        return null;
+    }
+};
+
+const scheduleAutoExit = (logger: Logger, seconds: number) => {
     logger.info({ seconds }, '已启用自动结束计时');
-    setTimeout(() => {
-        logger.info({ seconds }, '达到自动结束时间，进程退出');
-        process.exit(0);
-    }, Math.floor(seconds * 1000));
+    setTimeout(
+        () => {
+            logger.info({ seconds }, '达到自动结束时间，进程退出');
+            process.exit(0);
+        },
+        Math.floor(seconds * 1000)
+    );
 };
 
 const run = async () => {
     const exitAfterSeconds = getExitAfterSeconds(process.argv.slice(2));
-    await main();
+    const applicationContext = await createApplicationContext();
+    const appLogger = applicationContext.container.resolve<Logger>('appLogger');
+
+    await applicationContext.app.start();
 
     if (exitAfterSeconds !== undefined) {
-        scheduleAutoExit(exitAfterSeconds);
+        scheduleAutoExit(appLogger, exitAfterSeconds);
     }
 };
 
 void run().catch((error) => {
-    logger.error('启动失败', error);
+    const logger = createBootstrapLogger();
+    if (logger) {
+        logger.error({ err: error }, '启动失败');
+    } else {
+        console.error('启动失败', error);
+    }
     process.exit(1);
 });

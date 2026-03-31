@@ -4,18 +4,31 @@
         "lib": ["ES2022"],
         "moduleResolution": "node",
         "rootDir": "./src",
+        "baseUrl": "./src",
+        "paths": {
+            "@/*": ["*"],
+            "@application/*": ["application/*"],
+            "@bootstrap/*": ["bootstrap/*"],
+            "@config/*": ["config/*"],
+            "@domain": ["domain/index.ts"],
+            "@domain/*": ["domain/*"],
+            "@infrastructure/*": ["infrastructure/*"],
+            "@shared/*": ["utils/*"]
+        },
         "outDir": "./dist",
-        "types": ["node"],
+        "types": ["node", "jest"],
         "sourceMap": true,
         "esModuleInterop": true,
         "allowSyntheticDefaultImports": true,
         "resolveJsonModule": true,
+        "isolatedModules": true,
         "strict": false,
+        "ignoreDeprecations": "6.0",
         "forceConsistentCasingInFileNames": true,
         "skipLibCheck": true,
         "noEmitOnError": true,
         "incremental": true,
         "tsBuildInfoFile": "./tsconfig.tsbuildinfo"
     },
-    "include": ["src/**/*.ts"],
+    "include": ["src/**/*.ts"]
 }

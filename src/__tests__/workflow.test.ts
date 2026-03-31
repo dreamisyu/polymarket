@@ -1,14 +1,15 @@
 import { describe, expect, it, jest } from '@jest/globals';
-import { BaseNode } from '../domain/nodes/kernel/BaseNode';
-import { NodeChainBuilder } from '../domain/nodes/kernel/NodeChainBuilder';
-import type { NodeContext } from '../domain/nodes/kernel/NodeContext';
-import type { NodeResult } from '../domain/nodes/kernel/NodeResult';
-import { NodeRegistry } from '../domain/nodes/kernel/NodeRegistry';
-import { NodeWorkflowEngine } from '../domain/nodes/kernel/NodeWorkflowEngine';
-import { RiskGuardNode } from '../domain/nodes/copytrade/RiskGuardNode';
-import { DispatchCopyTradeNode } from '../domain/nodes/monitor/DispatchCopyTradeNode';
-import { PrepareDispatchBundlesNode } from '../domain/nodes/monitor/PrepareDispatchBundlesNode';
-import { buildCopyTradeDispatchItems } from '../utils/copytradeDispatch';
+import { BaseNode } from '@domain/nodes/kernel/BaseNode';
+import { NodeChainBuilder } from '@domain/nodes/kernel/NodeChainBuilder';
+import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
+import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
+import { NodeRegistry } from '@domain/nodes/kernel/NodeRegistry';
+import { NodeWorkflowEngine } from '@domain/nodes/kernel/NodeWorkflowEngine';
+import { RiskGuardNode } from '@domain/nodes/copytrade/RiskGuardNode';
+import { DispatchCopyTradeNode } from '@domain/nodes/monitor/DispatchCopyTradeNode';
+import { PrepareDispatchBundlesNode } from '@domain/nodes/monitor/PrepareDispatchBundlesNode';
+import { buildCopyTradeDispatchItems } from '@shared/copytradeDispatch';
+import { buildTestConfig } from '@/__tests__/testFactories';
 
 class TestNode extends BaseNode {
     private readonly handler: (ctx: NodeContext) => Promise<NodeResult>;
@@ -29,73 +30,17 @@ const buildTestContext = (): NodeContext => ({
     runMode: 'paper',
     strategyKind: 'fixed_amount',
     runtime: {
-        config: {
-            runMode: 'paper',
-            strategyKind: 'fixed_amount',
-            sourceWallet: 'source',
-            targetWallet: 'target',
-            mongoUri: 'mongodb://localhost/test',
-            scopeKey: 'scope',
-            monitorIntervalMs: 1000,
-            monitorInitialLookbackMs: 1000,
-            monitorOverlapMs: 1000,
-            activitySyncLimit: 100,
-            activityAdjacentMergeWindowMs: 1000,
-            snapshotStaleAfterMs: 1000,
-            settlementIntervalMs: 1000,
-            fixedTradeAmountUsdc: 1,
-            maxOpenPositions: 4,
-            maxActiveExposureUsdc: 10,
-            marketWhitelist: [],
-            minSourceBuyUsdc: 0,
-            signalMarketScope: 'all',
-            signalWeakThresholdUsdc: 1,
-            signalNormalThresholdUsdc: 2,
-            signalStrongThresholdUsdc: 3,
-            signalWeakTicketUsdc: 1,
-            signalNormalTicketUsdc: 2,
-            signalStrongTicketUsdc: 3,
-            maxRetryCount: 3,
-            retryBackoffMs: 1000,
-            copytradeDispatchConcurrency: 2,
-            copytradeProcessingLeaseMs: 300_000,
-            clobHttpUrl: 'https://clob.polymarket.com',
-            clobWsUrl: 'wss://ws-subscriptions-clob.polymarket.com/ws/market',
-            userWsUrl: 'wss://ws-subscriptions-clob.polymarket.com/ws/user',
-            dataApiUrl: 'https://data-api.polymarket.com',
-            gammaApiUrl: 'https://gamma-api.polymarket.com',
-            rpcUrl: 'https://polygon.drpc.org',
-            settlementMaxTasksPerRun: 8,
-            marketWsReconnectMs: 1000,
-            userWsReconnectMs: 1000,
-            wsHeartbeatMs: 10_000,
-            marketBookStaleMs: 2500,
-            marketWsBootstrapWaitMs: 750,
-            orderConfirmationTimeoutMs: 1000,
-            orderConfirmationPollMs: 1000,
-            orderConfirmationBlocks: 1,
-            liveConfirmTimeoutMs: 1000,
-            liveReconcileAfterTimeoutMs: 1000,
-            liveOrderMinIntervalMs: 100,
-            liveSettlementOnchainRedeemEnabled: true,
-            maxSlippageBps: 100,
-            maxOrderUsdc: 10,
-            buyDustResidualMode: 'trim',
-            clobSignatureType: 'SAFE',
-            relayerTxType: 'SAFE',
-            usdcContractAddress: '0x0000000000000000000000000000000000000001',
-            ctfContractAddress: '0x0000000000000000000000000000000000000002',
+        config: buildTestConfig({
             autoRedeemEnabled: false,
-            autoRedeemIntervalMs: 1000,
             autoRedeemMaxConditionsPerRun: 1,
-            paperInitialBalance: 1000,
-        },
+        }),
         logger: {
             debug: jest.fn(),
             info: jest.fn(),
             warn: jest.fn(),
             error: jest.fn(),
         } as never,
+        workflowEngine: {} as never,
         stores: {
             sourceEvents: {} as never,
             executions: {} as never,
@@ -193,8 +138,8 @@ describe('DispatchCopyTradeNode', () => {
     it('只异步派发已准备好的 dispatch items', async () => {
         const runDetached = jest.fn();
         const node = new DispatchCopyTradeNode({
-            engine: { runDetached } as unknown as NodeWorkflowEngine,
-            workflow: { headNodeId: 'copytrade.context', transitions: new Map() },
+            resolveEngine: () => ({ runDetached }) as unknown as NodeWorkflowEngine,
+            resolveWorkflow: () => ({ headNodeId: 'copytrade.context', transitions: new Map() }),
             buildCopyTradeContext: (dispatchItem) =>
                 ({
                     ...buildTestContext(),
@@ -267,10 +212,14 @@ describe('PrepareDispatchBundlesNode', () => {
         const result = await node.doAction(ctx);
 
         expect(result.status).toBe('success');
-        expect(claimDueRetries).toHaveBeenCalledWith(expect.any(Number), 100, {
-            processingLeaseMs: 300_000,
-            maxRetryCount: 3,
-        });
+        expect((claimDueRetries as jest.Mock).mock.calls[0]).toEqual([
+            expect.any(Number),
+            100,
+            {
+                processingLeaseMs: 300_000,
+                maxRetryCount: 3,
+            },
+        ]);
     });
 });
 

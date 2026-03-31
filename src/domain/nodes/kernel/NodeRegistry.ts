@@ -1,4 +1,4 @@
-import type { Node } from './Node';
+import type { Node } from '@domain/nodes/kernel/Node';
 
 export class NodeRegistry {
     private readonly nodes = new Map<string, Node>();

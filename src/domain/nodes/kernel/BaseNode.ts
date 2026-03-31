@@ -1,10 +1,10 @@
-import type { NodeContext } from './NodeContext';
-import type { Node } from './Node';
-import type { NodeResult, NodeRoute } from './NodeResult';
+import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
+import type { Node } from '@domain/nodes/kernel/Node';
+import type { NodeResult, NodeRoute } from '@domain/nodes/kernel/NodeResult';
 
-export abstract class BaseNode<TState extends Record<string, unknown> = Record<string, unknown>>
-    implements Node<TState>
-{
+export abstract class BaseNode<
+    TState extends Record<string, unknown> = Record<string, unknown>,
+> implements Node<TState> {
     readonly id: string;
 
     constructor(id: string) {

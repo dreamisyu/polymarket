@@ -1,9 +1,9 @@
-import type { NodeContext } from '../kernel/NodeContext';
-import type { NodeResult } from '../kernel/NodeResult';
-import type { CopyTradeWorkflowState } from '../../strategy/workflowState';
-import { resolveFixedAmountBundleExecution } from '../../../utils/copytradeDispatch';
-import { buildChunkExecutionPlan } from '../../../utils/executionPlanning';
-import { CopyTradeNode } from './CopyTradeNode';
+import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
+import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
+import type { CopyTradeWorkflowState } from '@domain/strategy/workflowState';
+import { resolveFixedAmountBundleExecution } from '@shared/copytradeDispatch';
+import { buildChunkExecutionPlan } from '@shared/executionPlanning';
+import { CopyTradeNode } from '@domain/nodes/copytrade/CopyTradeNode';
 
 export class TradePlanningNode extends CopyTradeNode {
     constructor() {

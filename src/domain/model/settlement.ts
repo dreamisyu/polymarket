@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
-import type { SettlementTaskStatus } from '../value-objects/enums';
-import type { PositionSnapshot } from './portfolio';
+import type { SettlementTaskStatus } from '@domain/value-objects/enums';
+import type { PositionSnapshot } from '@domain/model/portfolio';
 
 export interface SettlementTask {
     _id?: mongoose.Types.ObjectId;

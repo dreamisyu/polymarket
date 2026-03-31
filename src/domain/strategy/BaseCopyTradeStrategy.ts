@@ -1,42 +1,22 @@
-import { NodeChainBuilder } from '../nodes/kernel/NodeChainBuilder';
-import type { NodeRegistry } from '../nodes/kernel/NodeRegistry';
-import { ActionRouterNode } from '../nodes/copytrade/ActionRouterNode';
-import { ExecuteTradeNode } from '../nodes/copytrade/ExecuteTradeNode';
-import { LoadTradingContextNode } from '../nodes/copytrade/LoadTradingContextNode';
-import { MergeExecuteNode } from '../nodes/copytrade/MergeExecuteNode';
-import { MergePlanningNode } from '../nodes/copytrade/MergePlanningNode';
-import { PersistExecutionNode } from '../nodes/copytrade/PersistExecutionNode';
-import { RedeemForwardNode } from '../nodes/copytrade/RedeemForwardNode';
-import { RiskGuardNode } from '../nodes/copytrade/RiskGuardNode';
-import { TradePlanningNode } from '../nodes/copytrade/TradePlanningNode';
-import type { Strategy, StrategyBuildResult, StrategyExtensionDefinition } from './types';
-import { applyStrategyExtensions } from './types';
+import { NodeChainBuilder } from '@domain/nodes/kernel/NodeChainBuilder';
+import type {
+    Strategy,
+    StrategyBuildResult,
+    StrategyExtensionDefinition,
+} from '@domain/strategy/types';
+import { applyStrategyExtensions } from '@domain/strategy/types';
 
 export abstract class BaseCopyTradeStrategy implements Strategy {
     abstract readonly name: StrategyBuildResult['strategyKind'];
+    abstract readonly entryNodeId: string;
     private readonly extensions: StrategyExtensionDefinition[];
 
     constructor(extensions: StrategyExtensionDefinition[] = []) {
         this.extensions = extensions;
     }
 
-    protected registerCommonNodes(registry: NodeRegistry, strategyEntryNodeId: string) {
-        registry.register(new ActionRouterNode(strategyEntryNodeId));
-        registry.register(new LoadTradingContextNode());
-        registry.register(new RiskGuardNode());
-        registry.register(new TradePlanningNode());
-        registry.register(new ExecuteTradeNode());
-        registry.register(new MergePlanningNode());
-        registry.register(new MergeExecuteNode());
-        registry.register(new RedeemForwardNode());
-        registry.register(new PersistExecutionNode());
-    }
-
-    protected abstract registerStrategyNodes(registry: NodeRegistry): string;
-
-    build(registry: NodeRegistry): StrategyBuildResult {
-        const sizingNodeId = this.registerStrategyNodes(registry);
-        this.registerCommonNodes(registry, sizingNodeId);
+    build(): StrategyBuildResult {
+        const sizingNodeId = this.entryNodeId;
         const builder = new NodeChainBuilder()
             .append('copytrade.context')
             .append('copytrade.action-router')
@@ -77,6 +57,7 @@ export abstract class BaseCopyTradeStrategy implements Strategy {
         return {
             strategyKind: this.name,
             headNodeId: workflow.headNodeId,
+            entryNodeId: this.entryNodeId,
             workflow,
         };
     }

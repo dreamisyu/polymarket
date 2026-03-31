@@ -14,7 +14,8 @@ const ISSUE_RULES = [
     {
         id: 'monitor_sync',
         label: '监控同步异常',
-        pattern: /活动接口不可用|同步活动失败|fetch.*activity|cursor|分页|monitor.*error|monitor.*warn/i,
+        pattern:
+            /活动接口不可用|同步活动失败|fetch.*activity|cursor|分页|monitor.*error|monitor.*warn/i,
         suggestion: '监控链路出现抖动，建议单独监控 activity 拉取耗时、分页推进与失败预算。',
     },
     {
@@ -276,9 +277,7 @@ const summarize = (lines, top) => {
         }
 
         const message = String(payload?.msg || payload?.message || normalizedRawLine).trim();
-        const merged = payload
-            ? `${normalizedRawLine} ${message}`
-            : normalizedRawLine;
+        const merged = payload ? `${normalizedRawLine} ${message}` : normalizedRawLine;
         const level = detectLevel(payload, merged);
         const issueId = classifyIssue(merged);
         const scope = extractScope(payload, merged);
@@ -395,14 +394,42 @@ const renderText = (result, inputSource) => {
     lines.push(`- 输入源: ${inputSource}`);
     lines.push(`- 总行数: ${result.totalLines}`);
     lines.push(`- JSON 行数: ${result.parsedJsonLines}`);
-    lines.push(`- error / warn: ${result.errorCount} (${formatPct(result.errorPct)}) / ${result.warnCount} (${formatPct(result.warnPct)})`);
+    lines.push(
+        `- error / warn: ${result.errorCount} (${formatPct(result.errorPct)}) / ${result.warnCount} (${formatPct(result.warnPct)})`
+    );
 
     lines.push('');
-    lines.push(...renderTopItems('问题分类', result.issueCounts, (item) => `${item.label}: ${item.count} (${formatPct(item.pct)})`));
-    lines.push(...renderTopItems('热点 scope', result.scopeCounts, (item) => `${item.scope}: ${item.count}`));
-    lines.push(...renderTopItems('高频签名（warn+error）', result.signatureCounts, (item) => `${item.count} 次 | ${item.signature}`));
-    lines.push(...renderTopItems('热点 condition', result.hotConditions, (item) => `${item.conditionId}: ${item.count}`));
-    lines.push(...renderTopItems('热点 asset', result.hotAssets, (item) => `${item.asset}: ${item.count}`));
+    lines.push(
+        ...renderTopItems(
+            '问题分类',
+            result.issueCounts,
+            (item) => `${item.label}: ${item.count} (${formatPct(item.pct)})`
+        )
+    );
+    lines.push(
+        ...renderTopItems(
+            '热点 scope',
+            result.scopeCounts,
+            (item) => `${item.scope}: ${item.count}`
+        )
+    );
+    lines.push(
+        ...renderTopItems(
+            '高频签名（warn+error）',
+            result.signatureCounts,
+            (item) => `${item.count} 次 | ${item.signature}`
+        )
+    );
+    lines.push(
+        ...renderTopItems(
+            '热点 condition',
+            result.hotConditions,
+            (item) => `${item.conditionId}: ${item.count}`
+        )
+    );
+    lines.push(
+        ...renderTopItems('热点 asset', result.hotAssets, (item) => `${item.asset}: ${item.count}`)
+    );
 
     lines.push('');
     lines.push('建议');

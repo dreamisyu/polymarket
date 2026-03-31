@@ -1,5 +1,5 @@
 import { describe, expect, it, jest } from '@jest/globals';
-import { fetchSourceActivities } from '../infrastructure/polymarket/api';
+import { fetchSourceActivities } from '@infrastructure/polymarket/api';
 
 jest.mock('../infrastructure/http/fetchJson', () => ({
     __esModule: true,
@@ -8,7 +8,12 @@ jest.mock('../infrastructure/http/fetchJson', () => ({
 
 const { fetchJson } = jest.requireMock('../infrastructure/http/fetchJson') as {
     fetchJson: jest.MockedFunction<
-        <T>(url: string, init?: RequestInit, retries?: number, delayMs?: number) => Promise<T | null>
+        <T>(
+            url: string,
+            init?: RequestInit,
+            retries?: number,
+            delayMs?: number
+        ) => Promise<T | null>
     >;
 };
 

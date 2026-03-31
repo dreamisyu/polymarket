@@ -2,15 +2,16 @@ import { Contract, JsonRpcProvider, formatUnits } from 'ethers';
 import { privateKeyToAccount } from 'viem/accounts';
 import { type Address, type Hex, createWalletClient, http } from 'viem';
 import { polygon } from 'viem/chains';
-import type { RuntimeConfig } from '../../config/runtimeConfig';
-import { withRpcTimeout } from './rpc';
+import type { RuntimeConfig } from '@config/runtimeConfig';
+import { withRpcTimeout } from '@infrastructure/chain/rpc';
 
 const usdcAbi = ['function balanceOf(address owner) view returns (uint256)'];
 
 const normalizePrivateKey = (value: string): Hex =>
     (value.startsWith('0x') ? value : `0x${value}`) as Hex;
 
-export const createRpcProvider = (config: Pick<RuntimeConfig, 'rpcUrl'>) => new JsonRpcProvider(config.rpcUrl);
+export const createRpcProvider = (config: Pick<RuntimeConfig, 'rpcUrl'>) =>
+    new JsonRpcProvider(config.rpcUrl);
 
 export const getUsdcBalance = async (
     address: string,
@@ -25,9 +26,7 @@ export const getUsdcBalance = async (
     return Number.parseFloat(formatUnits(balance, 6));
 };
 
-export const createWalletWriter = (
-    config: Pick<RuntimeConfig, 'privateKey' | 'rpcUrl'>
-) => {
+export const createWalletWriter = (config: Pick<RuntimeConfig, 'privateKey' | 'rpcUrl'>) => {
     if (!config.privateKey) {
         throw new Error('缺少 PRIVATE_KEY');
     }

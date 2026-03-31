@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
-import type { PortfolioSnapshot, PositionSnapshot, SettlementTask } from '../domain';
-import type { NodeContext } from '../domain/nodes/kernel/NodeContext';
-import { SettlementSweepNode } from '../domain/nodes/settlement/SettlementSweepNode';
+import type { PortfolioSnapshot, PositionSnapshot, SettlementTask } from '@domain';
+import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
+import { SettlementSweepNode } from '@domain/nodes/settlement/SettlementSweepNode';
+import { buildTestConfig } from '@/__tests__/testFactories';
 import type {
     LedgerStore,
     Runtime,
@@ -9,74 +10,19 @@ import type {
     SettlementTaskStore,
     SourceEventStore,
     TradingGateway,
-} from '../infrastructure/runtime/contracts';
-import * as resolutionUtils from '../utils/resolution';
+} from '@infrastructure/runtime/contracts';
+import * as resolutionUtils from '@shared/resolution';
 
 const fetchMarketResolutionSpy = jest.spyOn(resolutionUtils, 'fetchMarketResolution');
 const isResolvedMarketSpy = jest.spyOn(resolutionUtils, 'isResolvedMarket');
 
-const buildConfig = (overrides: Partial<Runtime['config']> = {}): Runtime['config'] => ({
-    runMode: 'paper',
-    strategyKind: 'fixed_amount',
-    sourceWallet: 'source',
-    targetWallet: 'target',
-    mongoUri: 'mongodb://localhost/test',
-    scopeKey: 'scope',
-    monitorIntervalMs: 1000,
-    monitorInitialLookbackMs: 1000,
-    monitorOverlapMs: 1000,
-    activitySyncLimit: 100,
-    activityAdjacentMergeWindowMs: 1000,
-    snapshotStaleAfterMs: 1000,
-    retryBackoffMs: 1000,
-    maxRetryCount: 3,
-    copytradeDispatchConcurrency: 2,
-    copytradeProcessingLeaseMs: 300_000,
-    settlementIntervalMs: 1000,
-    settlementMaxTasksPerRun: 3,
-    fixedTradeAmountUsdc: 1,
-    maxOpenPositions: 4,
-    maxActiveExposureUsdc: 10,
-    marketWhitelist: [],
-    minSourceBuyUsdc: 0,
-    signalMarketScope: 'all',
-    signalWeakThresholdUsdc: 1,
-    signalNormalThresholdUsdc: 2,
-    signalStrongThresholdUsdc: 3,
-    signalWeakTicketUsdc: 1,
-    signalNormalTicketUsdc: 2,
-    signalStrongTicketUsdc: 3,
-    paperInitialBalance: 1000,
-    clobHttpUrl: 'https://clob.polymarket.com',
-    clobWsUrl: 'wss://ws-subscriptions-clob.polymarket.com/ws/market',
-    userWsUrl: 'wss://ws-subscriptions-clob.polymarket.com/ws/user',
-    dataApiUrl: 'https://data-api.polymarket.com',
-    gammaApiUrl: 'https://gamma-api.polymarket.com',
-    rpcUrl: 'https://polygon.drpc.org',
-    marketWsReconnectMs: 1000,
-    userWsReconnectMs: 1000,
-    wsHeartbeatMs: 10_000,
-    marketBookStaleMs: 2500,
-    marketWsBootstrapWaitMs: 750,
-    orderConfirmationTimeoutMs: 1000,
-    orderConfirmationPollMs: 1000,
-    orderConfirmationBlocks: 1,
-    liveConfirmTimeoutMs: 1000,
-    liveReconcileAfterTimeoutMs: 1000,
-    liveOrderMinIntervalMs: 100,
-    liveSettlementOnchainRedeemEnabled: true,
-    maxSlippageBps: 100,
-    maxOrderUsdc: 10,
-    buyDustResidualMode: 'trim',
-    clobSignatureType: 'SAFE',
-    relayerTxType: 'SAFE',
-    usdcContractAddress: '0x0000000000000000000000000000000000000001',
-    ctfContractAddress: '0x0000000000000000000000000000000000000002',
-    autoRedeemEnabled: true,
-    autoRedeemIntervalMs: 1000,
-    autoRedeemMaxConditionsPerRun: 1,
-    ...overrides,
-});
+const buildConfig = (overrides: Partial<Runtime['config']> = {}): Runtime['config'] =>
+    buildTestConfig({
+        settlementMaxTasksPerRun: 3,
+        autoRedeemEnabled: true,
+        autoRedeemMaxConditionsPerRun: 1,
+        ...overrides,
+    });
 
 const createSourceEventStore = (overrides: Partial<SourceEventStore> = {}): SourceEventStore => ({
     upsertMany: jest.fn(async () => []),
@@ -192,6 +138,7 @@ const buildRuntime = (
             warn: jest.fn(),
             error: jest.fn(),
         } as never,
+        workflowEngine: {} as never,
         stores: {
             sourceEvents,
             executions: {

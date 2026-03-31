@@ -1,6 +1,6 @@
 import { ApiKeyCreds, Chain, ClobClient, SignatureType } from '@polymarket/clob-client';
 import { Wallet, type TypedDataDomain, type TypedDataField } from 'ethers';
-import type { ClobSignatureType, RuntimeConfig } from '../../config/runtimeConfig';
+import type { ClobSignatureType, RuntimeConfig } from '@config/runtimeConfig';
 
 export interface LiveClobSession {
     client: ClobClient;
@@ -37,7 +37,21 @@ const createSigner = (privateKey: string) => {
 };
 
 export const createPublicClobClient = (config: Pick<RuntimeConfig, 'clobHttpUrl'>) =>
-    new ClobClient(config.clobHttpUrl, Chain.POLYGON, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true);
+    new ClobClient(
+        config.clobHttpUrl,
+        Chain.POLYGON,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true
+    );
 
 const resolveSignatureType = (signatureType: ClobSignatureType): SignatureType => {
     switch (signatureType) {
@@ -53,10 +67,7 @@ const resolveSignatureType = (signatureType: ClobSignatureType): SignatureType =
 };
 
 export const createLiveClobClient = async (
-    config: Pick<
-        RuntimeConfig,
-        'clobHttpUrl' | 'proxyWallet' | 'privateKey' | 'clobSignatureType'
-    >
+    config: Pick<RuntimeConfig, 'clobHttpUrl' | 'proxyWallet' | 'privateKey' | 'clobSignatureType'>
 ): Promise<LiveClobSession> => {
     if (!config.privateKey) {
         throw new Error('live 模式缺少 PRIVATE_KEY');
@@ -86,7 +97,9 @@ export const createLiveClobClient = async (
         true
     );
     const derivedCreds = await bootstrapClient.deriveApiKey();
-    const rawCreds = isValidApiKeyCreds(derivedCreds) ? derivedCreds : await bootstrapClient.createApiKey();
+    const rawCreds = isValidApiKeyCreds(derivedCreds)
+        ? derivedCreds
+        : await bootstrapClient.createApiKey();
     if (!isValidApiKeyCreds(rawCreds)) {
         throw new Error('创建或派生 CLOB API Key 失败');
     }

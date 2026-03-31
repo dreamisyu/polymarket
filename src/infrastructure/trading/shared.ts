@@ -1,7 +1,12 @@
-import type { ConditionPositionSnapshot, PortfolioSnapshot, PositionSnapshot, SourceTradeEvent } from '../../domain';
-import type { UserPositionRecord } from '../polymarket/dto';
-import { buildConditionOutcomeKey, computeConditionMergeableSize } from '../../utils/conditionMath';
-import { normalizeOutcomeLabel } from '../../utils/resolution';
+import type {
+    ConditionPositionSnapshot,
+    PortfolioSnapshot,
+    PositionSnapshot,
+    SourceTradeEvent,
+} from '@domain';
+import type { UserPositionRecord } from '@infrastructure/polymarket/dto';
+import { buildConditionOutcomeKey, computeConditionMergeableSize } from '@shared/conditionMath';
+import { normalizeOutcomeLabel } from '@shared/resolution';
 
 const epsilon = 1e-8;
 
@@ -14,13 +19,17 @@ export const mapUserPosition = (position: UserPositionRecord): PositionSnapshot 
     avgPrice: Math.max(Number(position.avgPrice) || 0, 0),
     marketPrice: Math.max(Number(position.curPrice) || 0, 0),
     marketValue: Math.max(Number(position.currentValue) || 0, 0),
-    costBasis: Math.max(Number(position.avgPrice) || 0, 0) * Math.max(Number(position.size) || 0, 0),
+    costBasis:
+        Math.max(Number(position.avgPrice) || 0, 0) * Math.max(Number(position.size) || 0, 0),
     realizedPnl: Number(position.realizedPnl) || 0,
     redeemable: Boolean(position.redeemable),
     lastUpdatedAt: Date.now(),
 });
 
-export const findMatchingPosition = (positions: UserPositionRecord[], event: SourceTradeEvent): UserPositionRecord | undefined =>
+export const findMatchingPosition = (
+    positions: UserPositionRecord[],
+    event: SourceTradeEvent
+): UserPositionRecord | undefined =>
     positions.find((position) => position.asset === event.asset) ||
     positions.find(
         (position) =>
@@ -34,8 +43,13 @@ export const findMatchingPosition = (positions: UserPositionRecord[], event: Sou
                 normalizeOutcomeLabel(String(event.outcome || ''))
     );
 
-export const buildConditionPositionSnapshot = (positions: PositionSnapshot[], conditionId: string): ConditionPositionSnapshot => {
-    const targetPositions = positions.filter((position) => position.conditionId === conditionId && position.size > epsilon);
+export const buildConditionPositionSnapshot = (
+    positions: PositionSnapshot[],
+    conditionId: string
+): ConditionPositionSnapshot => {
+    const targetPositions = positions.filter(
+        (position) => position.conditionId === conditionId && position.size > epsilon
+    );
     const sizeByOutcome = new Map<string, number>();
     const outcomeKeys: string[] = [];
 

@@ -249,38 +249,104 @@ const renderSummaryText = (summary) => {
     lines.push('');
     lines.push('入口队列');
     lines.push(`- source_events 文档: ${formatCount(summary.source.total)}`);
-    lines.push(`- 队列积压(pending+processing+retry): ${formatCount(summary.source.queueCount)} (${formatPct(summary.source.queuePct)})`);
-    lines.push(`- 队列年龄 P50 / P90: ${formatLatencyMinutes(summary.source.queueAgeP50Minutes)} / ${formatLatencyMinutes(summary.source.queueAgeP90Minutes)}`);
-    lines.push(`- EXECUTE 终态无 execution 记录: ${formatCount(summary.source.terminalWithoutExecutionCount)}`);
-    lines.push(...renderTopItems('Source 状态分布', summary.source.statusCounts, (item) => `${item.key}: ${item.value}`));
-    lines.push(...renderTopItems('Source 失败原因', summary.source.topErrors, (item) => `${item.reason}: ${item.count}`));
-    lines.push(...renderTopItems('队列热点条件', summary.source.queueTopConditions, (item) => `${item.conditionId}: ${item.count} 条，${formatUsd(item.usdc)}`));
+    lines.push(
+        `- 队列积压(pending+processing+retry): ${formatCount(summary.source.queueCount)} (${formatPct(summary.source.queuePct)})`
+    );
+    lines.push(
+        `- 队列年龄 P50 / P90: ${formatLatencyMinutes(summary.source.queueAgeP50Minutes)} / ${formatLatencyMinutes(summary.source.queueAgeP90Minutes)}`
+    );
+    lines.push(
+        `- EXECUTE 终态无 execution 记录: ${formatCount(summary.source.terminalWithoutExecutionCount)}`
+    );
+    lines.push(
+        ...renderTopItems(
+            'Source 状态分布',
+            summary.source.statusCounts,
+            (item) => `${item.key}: ${item.value}`
+        )
+    );
+    lines.push(
+        ...renderTopItems(
+            'Source 失败原因',
+            summary.source.topErrors,
+            (item) => `${item.reason}: ${item.count}`
+        )
+    );
+    lines.push(
+        ...renderTopItems(
+            '队列热点条件',
+            summary.source.queueTopConditions,
+            (item) => `${item.conditionId}: ${item.count} 条，${formatUsd(item.usdc)}`
+        )
+    );
 
     lines.push('');
     lines.push('执行漏斗');
     lines.push(`- executions 文档: ${formatCount(summary.execution.total)}`);
-    lines.push(`- 请求 / 实际成交: ${formatUsd(summary.execution.requestedUsdc)} / ${formatUsd(summary.execution.executedUsdc)}`);
+    lines.push(
+        `- 请求 / 实际成交: ${formatUsd(summary.execution.requestedUsdc)} / ${formatUsd(summary.execution.executedUsdc)}`
+    );
     lines.push(`- 成交兑现率: ${formatPct(summary.execution.fulfillmentPct)}`);
     lines.push(`- 失败+重试占比: ${formatPct(summary.execution.failRetryPct)}`);
-    lines.push(...renderTopItems('Execution 状态分布', summary.execution.statusCounts, (item) => `${item.key}: ${item.value}`));
-    lines.push(...renderTopItems('Execution 原因 Top', summary.execution.topReasons, (item) => `${item.reason}: ${item.count}`));
-    lines.push(...renderTopItems('策略轨迹 Top', summary.execution.policyTrailCounts, (item) => `${item.key}: ${item.value}`));
+    lines.push(
+        ...renderTopItems(
+            'Execution 状态分布',
+            summary.execution.statusCounts,
+            (item) => `${item.key}: ${item.value}`
+        )
+    );
+    lines.push(
+        ...renderTopItems(
+            'Execution 原因 Top',
+            summary.execution.topReasons,
+            (item) => `${item.reason}: ${item.count}`
+        )
+    );
+    lines.push(
+        ...renderTopItems(
+            '策略轨迹 Top',
+            summary.execution.policyTrailCounts,
+            (item) => `${item.key}: ${item.value}`
+        )
+    );
 
     lines.push('');
     lines.push('结算与持仓');
     lines.push(`- settlement_tasks 文档: ${formatCount(summary.settlement.total)}`);
     lines.push(`- 到期未处理任务: ${formatCount(summary.settlement.overdueCount)}`);
     lines.push(`- 平均重试次数: ${summary.settlement.avgRetryCount.toFixed(2)}`);
-    lines.push(`- 当前 open positions: ${formatCount(summary.positions.openCount)}（redeemable: ${formatCount(summary.positions.redeemableCount)}）`);
-    lines.push(`- 最新组合权益 / 现金: ${formatUsd(summary.portfolio.totalEquity)} / ${formatUsd(summary.portfolio.cashBalance)}`);
-    lines.push(...renderTopItems('Settlement 状态分布', summary.settlement.statusCounts, (item) => `${item.key}: ${item.value}`));
-    lines.push(...renderTopItems('Settlement 原因 Top', summary.settlement.topReasons, (item) => `${item.reason}: ${item.count}`));
+    lines.push(
+        `- 当前 open positions: ${formatCount(summary.positions.openCount)}（redeemable: ${formatCount(summary.positions.redeemableCount)}）`
+    );
+    lines.push(
+        `- 最新组合权益 / 现金: ${formatUsd(summary.portfolio.totalEquity)} / ${formatUsd(summary.portfolio.cashBalance)}`
+    );
+    lines.push(
+        ...renderTopItems(
+            'Settlement 状态分布',
+            summary.settlement.statusCounts,
+            (item) => `${item.key}: ${item.value}`
+        )
+    );
+    lines.push(
+        ...renderTopItems(
+            'Settlement 原因 Top',
+            summary.settlement.topReasons,
+            (item) => `${item.reason}: ${item.count}`
+        )
+    );
 
     lines.push('');
     lines.push('索引检查');
-    lines.push(`- source_events 缺失索引: ${summary.indexHealth.sourceMissing.length > 0 ? summary.indexHealth.sourceMissing.join('；') : '无'}`);
-    lines.push(`- executions 缺失索引: ${summary.indexHealth.executionMissing.length > 0 ? summary.indexHealth.executionMissing.join('；') : '无'}`);
-    lines.push(`- settlement_tasks 缺失索引: ${summary.indexHealth.settlementMissing.length > 0 ? summary.indexHealth.settlementMissing.join('；') : '无'}`);
+    lines.push(
+        `- source_events 缺失索引: ${summary.indexHealth.sourceMissing.length > 0 ? summary.indexHealth.sourceMissing.join('；') : '无'}`
+    );
+    lines.push(
+        `- executions 缺失索引: ${summary.indexHealth.executionMissing.length > 0 ? summary.indexHealth.executionMissing.join('；') : '无'}`
+    );
+    lines.push(
+        `- settlement_tasks 缺失索引: ${summary.indexHealth.settlementMissing.length > 0 ? summary.indexHealth.settlementMissing.join('；') : '无'}`
+    );
 
     lines.push('');
     lines.push('建议');
@@ -359,28 +425,36 @@ const run = async () => {
                     winnerOutcome: 1,
                 },
             }),
-            fetchCollectionDocs(collections.positions, {}, {
-                projection: {
-                    asset: 1,
-                    conditionId: 1,
-                    size: 1,
-                    marketValue: 1,
-                    costBasis: 1,
-                    redeemable: 1,
-                    lastUpdatedAt: 1,
-                },
-            }),
-            fetchSingleDoc(collections.portfolios, {}, {
-                sort: { updatedAt: -1 },
-                projection: {
-                    cashBalance: 1,
-                    totalEquity: 1,
-                    activeExposureUsdc: 1,
-                    openPositionCount: 1,
-                    positionsMarketValue: 1,
-                    realizedPnl: 1,
-                },
-            }),
+            fetchCollectionDocs(
+                collections.positions,
+                {},
+                {
+                    projection: {
+                        asset: 1,
+                        conditionId: 1,
+                        size: 1,
+                        marketValue: 1,
+                        costBasis: 1,
+                        redeemable: 1,
+                        lastUpdatedAt: 1,
+                    },
+                }
+            ),
+            fetchSingleDoc(
+                collections.portfolios,
+                {},
+                {
+                    sort: { updatedAt: -1 },
+                    projection: {
+                        cashBalance: 1,
+                        totalEquity: 1,
+                        activeExposureUsdc: 1,
+                        openPositionCount: 1,
+                        positionsMarketValue: 1,
+                        realizedPnl: 1,
+                    },
+                }
+            ),
             (async () => {
                 const collection = await getCollectionIfExists(collections.sourceEvents);
                 return collection ? collection.indexes() : [];
@@ -397,7 +471,9 @@ const run = async () => {
 
         const now = Date.now();
 
-        const sourceStatusMap = countBy(sourceEvents, (item) => normalizeText(item?.status, 'pending'));
+        const sourceStatusMap = countBy(sourceEvents, (item) =>
+            normalizeText(item?.status, 'pending')
+        );
         const sourceQueueEvents = sourceEvents.filter((item) =>
             SOURCE_QUEUE_STATUSES.has(normalizeText(item?.status, 'pending').toLowerCase())
         );
@@ -406,9 +482,7 @@ const run = async () => {
             .filter((value) => Number.isFinite(value) && value > 0);
 
         const executionBySourceEventId = new Set(
-            executions
-                .map((item) => normalizeText(item?.sourceEventId, ''))
-                .filter(Boolean)
+            executions.map((item) => normalizeText(item?.sourceEventId, '')).filter(Boolean)
         );
 
         const terminalExecuteWithoutExecution = sourceEvents.filter((item) => {
@@ -429,7 +503,9 @@ const run = async () => {
             return !executionBySourceEventId.has(sourceEventId);
         });
 
-        const executionStatusMap = countBy(executions, (item) => normalizeText(item?.status, 'unknown'));
+        const executionStatusMap = countBy(executions, (item) =>
+            normalizeText(item?.status, 'unknown')
+        );
         const executionFailRetryCount = executions.filter((item) => {
             const status = normalizeText(item?.status, 'unknown').toLowerCase();
             return status === 'failed' || status === 'retry';
@@ -437,7 +513,9 @@ const run = async () => {
         const executionRequestedUsdc = sumBy(executions, (item) => item?.requestedUsdc);
         const executionExecutedUsdc = sumBy(executions, (item) => item?.executedUsdc);
 
-        const settlementStatusMap = countBy(settlementTasks, (item) => normalizeText(item?.status, 'pending'));
+        const settlementStatusMap = countBy(settlementTasks, (item) =>
+            normalizeText(item?.status, 'pending')
+        );
         const settlementOverdueCount = settlementTasks.filter((item) => {
             const status = normalizeText(item?.status, 'pending').toLowerCase();
             if (status === 'settled' || status === 'closed') {
@@ -551,14 +629,17 @@ const run = async () => {
                 overdueCount: settlementOverdueCount,
                 avgRetryCount:
                     settlementTasks.length > 0
-                        ? sumBy(settlementTasks, (item) => item?.retryCount) / settlementTasks.length
+                        ? sumBy(settlementTasks, (item) => item?.retryCount) /
+                          settlementTasks.length
                         : 0,
                 statusCounts: takeTopEntries(settlementStatusMap, argv.top).map(([key, value]) => ({
                     key,
                     value,
                 })),
                 topReasons: buildTopReasonItems(settlementTasks, (item) => item?.reason, argv.top),
-                winnerKnownCount: settlementTasks.filter((item) => normalizeText(item?.winnerOutcome, '')).length,
+                winnerKnownCount: settlementTasks.filter((item) =>
+                    normalizeText(item?.winnerOutcome, '')
+                ).length,
             },
             positions: {
                 total: positions.length,
@@ -610,7 +691,10 @@ const run = async () => {
         );
         pushSuggestion(
             summary.suggestions,
-            sourceMissingIndexes.length + executionMissingIndexes.length + settlementMissingIndexes.length > 0,
+            sourceMissingIndexes.length +
+                executionMissingIndexes.length +
+                settlementMissingIndexes.length >
+                0,
             '检测到缺失索引，建议先补齐索引再继续压测，否则会放大队列积压与重试成本。'
         );
 

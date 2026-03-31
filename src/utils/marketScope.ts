@@ -5,7 +5,9 @@ const parseClockMinutes = (hourText: string, minuteText: string, meridiemText: s
         return Number.NaN;
     }
 
-    const meridiem = String(meridiemText || '').trim().toLowerCase();
+    const meridiem = String(meridiemText || '')
+        .trim()
+        .toLowerCase();
     let normalizedHour = hour % 12;
     if (meridiem === 'pm') {
         normalizedHour += 12;
@@ -15,7 +17,9 @@ const parseClockMinutes = (hourText: string, minuteText: string, meridiemText: s
 };
 
 const isFiveMinuteUpdownTitle = (normalizedTitle: string) => {
-    const match = normalizedTitle.match(/(\d{1,2}):(\d{2})(am|pm)\s*-\s*(\d{1,2}):(\d{2})(am|pm)\s*et/i);
+    const match = normalizedTitle.match(
+        /(\d{1,2}):(\d{2})(am|pm)\s*-\s*(\d{1,2}):(\d{2})(am|pm)\s*et/i
+    );
     if (!match) {
         return false;
     }
@@ -26,15 +30,20 @@ const isFiveMinuteUpdownTitle = (normalizedTitle: string) => {
         return false;
     }
 
-    const diff = endMinutes >= startMinutes ? endMinutes - startMinutes : endMinutes + 24 * 60 - startMinutes;
+    const diff =
+        endMinutes >= startMinutes
+            ? endMinutes - startMinutes
+            : endMinutes + 24 * 60 - startMinutes;
     return diff === 5;
 };
 
-const cryptoUpdownFiveMinuteSlugPattern = /(?:^|[-_])(btc)-updown-5m(?:$|[-_])/i;
-const cryptoUpdownFiveMinuteTitlePattern =
-    /(bitcoin)\s+up\s+or\s+down/i;
+const cryptoUpdownFiveMinuteSlugPattern = /(?:^|[-_])(btc|eth)-updown-5m(?:$|[-_])/i;
+const cryptoUpdownFiveMinuteTitlePattern = /(bitcoin|ethereum)\s+up\s+or\s+down/i;
 
-const normalizeMarketText = (value?: string) => String(value || '').trim().toLowerCase();
+const normalizeMarketText = (value?: string) =>
+    String(value || '')
+        .trim()
+        .toLowerCase();
 
 export const isTradeWithinCryptoUpdownFiveMinuteScope = (trade: {
     title?: string;
@@ -43,7 +52,9 @@ export const isTradeWithinCryptoUpdownFiveMinuteScope = (trade: {
 }) => {
     const normalizedSlug = normalizeMarketText(trade.slug);
     const normalizedEventSlug = normalizeMarketText(trade.eventSlug);
-    const normalizedTitle = String(trade.title || '').trim().toLowerCase();
+    const normalizedTitle = String(trade.title || '')
+        .trim()
+        .toLowerCase();
 
     if (
         cryptoUpdownFiveMinuteSlugPattern.test(normalizedSlug) ||
@@ -52,7 +63,10 @@ export const isTradeWithinCryptoUpdownFiveMinuteScope = (trade: {
         return true;
     }
 
-    return cryptoUpdownFiveMinuteTitlePattern.test(normalizedTitle) && isFiveMinuteUpdownTitle(normalizedTitle);
+    return (
+        cryptoUpdownFiveMinuteTitlePattern.test(normalizedTitle) &&
+        isFiveMinuteUpdownTitle(normalizedTitle)
+    );
 };
 
 export const isTradeWithinMarketWhitelist = (

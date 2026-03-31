@@ -1,5 +1,5 @@
-import { sleep } from '../utils/sleep';
-import type { LoggerLike } from '../infrastructure/runtime/contracts';
+import { sleep } from '@shared/sleep';
+import type { Logger } from '@shared/logger';
 
 export interface WorkflowWorker {
     name: string;
@@ -9,7 +9,7 @@ export interface WorkflowWorker {
 export const createLoopWorker = (params: {
     name: string;
     intervalMs: number;
-    logger: LoggerLike;
+    logger: Logger;
     runOnce: () => Promise<void>;
 }): WorkflowWorker => ({
     name: params.name,
@@ -18,7 +18,10 @@ export const createLoopWorker = (params: {
             try {
                 await params.runOnce();
             } catch (error) {
-                params.logger.error({ err: error }, `${params.name} 单轮执行失败，将在下个周期重试`);
+                params.logger.error(
+                    { err: error },
+                    `${params.name} 单轮执行失败，将在下个周期重试`
+                );
             }
             await sleep(params.intervalMs);
         }

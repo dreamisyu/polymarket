@@ -24,10 +24,8 @@ const normalizeStrategyKind = (value) => {
 };
 
 export const resolveScopeRuntime = (params = {}) => {
-    const explicitScopeKey = String(params.scopeKey || readEnv('SCOPE_KEY') || '')
-        .trim();
-    const sourceWalletInput = String(params.sourceWallet || readEnv('SOURCE_WALLET') || '')
-        .trim();
+    const explicitScopeKey = String(params.scopeKey || readEnv('SCOPE_KEY') || '').trim();
+    const sourceWalletInput = String(params.sourceWallet || readEnv('SOURCE_WALLET') || '').trim();
     const targetWalletInput = String(
         params.targetWallet || readEnv('TARGET_WALLET', 'USER_ADDRESS') || ''
     ).trim();

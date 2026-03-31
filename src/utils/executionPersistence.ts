@@ -7,8 +7,8 @@ import type {
     WorkflowExecutionStatus,
     SourceTradeEvent,
 } from '../domain';
-import { countFixedAmountTrades, isAggregatedBuyBundle } from './copytradeDispatch';
-import { computeRetryDelayMs } from './retry';
+import { countFixedAmountTrades, isAggregatedBuyBundle } from '@shared/copytradeDispatch';
+import { computeRetryDelayMs } from '@shared/retry';
 
 export interface EventPersistencePlan {
     event: SourceTradeEvent;
@@ -142,7 +142,8 @@ const buildFixedAmountBundlePlans = (
     const perTradeSize = result.executionPrice > 0 ? perTradeUsdc / result.executionPrice : 0;
     const metadata = result.metadata || {};
     const plannedCount = clampCount(
-        Number(metadata.bundlePlannedCount) || countFixedAmountTrades(result.requestedUsdc, perTradeUsdc),
+        Number(metadata.bundlePlannedCount) ||
+            countFixedAmountTrades(result.requestedUsdc, perTradeUsdc),
         sourceEvents.length
     );
     const submittedCount =
@@ -274,29 +275,30 @@ export const buildExecutionRecord = (params: {
     plan: EventPersistencePlan;
     note?: string;
     policyTrail?: string[];
-}) => ({
-    workflowId: params.workflowId,
-    strategyKind: params.strategyKind,
-    runMode: params.runMode,
-    sourceEventId: new mongoose.Types.ObjectId(String(params.plan.event._id)),
-    sourceWallet: params.plan.event.sourceWallet,
-    activityKey: params.plan.event.activityKey,
-    conditionId: params.plan.event.conditionId,
-    asset: params.plan.event.asset,
-    side: params.plan.event.side,
-    action: params.plan.event.action,
-    status: params.plan.status,
-    requestedUsdc: params.plan.requestedUsdc,
-    requestedSize: params.plan.requestedSize,
-    executedUsdc: params.plan.executedUsdc,
-    executedSize: params.plan.executedSize,
-    executionPrice: params.result.executionPrice || 0,
-    orderIds: params.result.orderIds || [],
-    transactionHashes: params.result.transactionHashes || [],
-    reason: params.plan.reason,
-    note: params.note || '',
-    policyTrail: params.policyTrail || [],
-    matchedAt: params.result.matchedAt,
-    minedAt: params.result.minedAt,
-    confirmedAt: params.result.confirmedAt,
-}) satisfies WorkflowExecutionRecord;
+}) =>
+    ({
+        workflowId: params.workflowId,
+        strategyKind: params.strategyKind,
+        runMode: params.runMode,
+        sourceEventId: new mongoose.Types.ObjectId(String(params.plan.event._id)),
+        sourceWallet: params.plan.event.sourceWallet,
+        activityKey: params.plan.event.activityKey,
+        conditionId: params.plan.event.conditionId,
+        asset: params.plan.event.asset,
+        side: params.plan.event.side,
+        action: params.plan.event.action,
+        status: params.plan.status,
+        requestedUsdc: params.plan.requestedUsdc,
+        requestedSize: params.plan.requestedSize,
+        executedUsdc: params.plan.executedUsdc,
+        executedSize: params.plan.executedSize,
+        executionPrice: params.result.executionPrice || 0,
+        orderIds: params.result.orderIds || [],
+        transactionHashes: params.result.transactionHashes || [],
+        reason: params.plan.reason,
+        note: params.note || '',
+        policyTrail: params.policyTrail || [],
+        matchedAt: params.result.matchedAt,
+        minedAt: params.result.minedAt,
+        confirmedAt: params.result.confirmedAt,
+    }) satisfies WorkflowExecutionRecord;

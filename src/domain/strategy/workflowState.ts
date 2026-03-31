@@ -7,7 +7,7 @@ import type {
     StrategySizingDecision,
     TradeExecutionResult,
 } from '..';
-import type { MarketBookSnapshot } from '../../utils/executionPlanning';
+import type { MarketBookSnapshot } from '@shared/executionPlanning';
 
 export interface CopyTradeWorkflowState extends Record<string, unknown> {
     sourceEvent?: SourceTradeEvent | null;

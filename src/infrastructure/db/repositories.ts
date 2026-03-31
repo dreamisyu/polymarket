@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import type { RuntimeConfig } from '../../config/runtimeConfig';
+import type { RuntimeConfig } from '@config/runtimeConfig';
 import type {
     PortfolioSnapshot,
     PositionSnapshot,
@@ -318,12 +318,13 @@ class MongoExecutionStore implements ExecutionStore {
         this.Execution = getExecutionModel(scopeKey);
     }
 
-    private shouldPreserveExisting(
-        existingStatus: string,
-        nextStatus: string
-    ) {
-        const normalizedExisting = String(existingStatus || '').trim().toLowerCase();
-        const normalizedNext = String(nextStatus || '').trim().toLowerCase();
+    private shouldPreserveExisting(existingStatus: string, nextStatus: string) {
+        const normalizedExisting = String(existingStatus || '')
+            .trim()
+            .toLowerCase();
+        const normalizedNext = String(nextStatus || '')
+            .trim()
+            .toLowerCase();
         if (!normalizedExisting) {
             return false;
         }

@@ -1,6 +1,6 @@
 import type { ApiKeyCreds } from '@polymarket/clob-client';
-import type { RuntimeConfig } from '../../config/runtimeConfig';
-import type { LoggerLike } from '../runtime/contracts';
+import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { LoggerLike } from '@infrastructure/runtime/contracts';
 
 interface RuntimeWebSocket {
     readyState: number;
@@ -141,7 +141,10 @@ const buildAggregateStatus = (states: OrderLifecycleState[]) => {
     };
 };
 
-const safeInvoke = async (callback: (() => void | Promise<void>) | undefined, logger: LoggerLike) => {
+const safeInvoke = async (
+    callback: (() => void | Promise<void>) | undefined,
+    logger: LoggerLike
+) => {
     if (!callback) {
         return;
     }
@@ -201,7 +204,10 @@ export class PolymarketUserExecutionFeed implements UserExecutionFeed {
     private opening = false;
 
     constructor(params: {
-        config: Pick<RuntimeConfig, 'userWsUrl' | 'userWsReconnectMs' | 'wsHeartbeatMs' | 'liveConfirmTimeoutMs'>;
+        config: Pick<
+            RuntimeConfig,
+            'userWsUrl' | 'userWsReconnectMs' | 'wsHeartbeatMs' | 'liveConfirmTimeoutMs'
+        >;
         logger: LoggerLike;
         creds: ApiKeyCreds;
     }) {
@@ -278,7 +284,8 @@ export class PolymarketUserExecutionFeed implements UserExecutionFeed {
 
             this.waiters.add(waiter);
             for (const orderId of waiter.orderIds) {
-                const orderWaiters = this.waitersByOrderId.get(orderId) || new Set<UserChannelWaiter>();
+                const orderWaiters =
+                    this.waitersByOrderId.get(orderId) || new Set<UserChannelWaiter>();
                 orderWaiters.add(waiter);
                 this.waitersByOrderId.set(orderId, orderWaiters);
             }
@@ -402,7 +409,11 @@ export class PolymarketUserExecutionFeed implements UserExecutionFeed {
         );
     }
 
-    private updateOrderState(orderId: string, status: UserExecutionStatus, message: UserTradeMessage) {
+    private updateOrderState(
+        orderId: string,
+        status: UserExecutionStatus,
+        message: UserTradeMessage
+    ) {
         const updatedAt = normalizeTimestamp(message.last_update || message.timestamp, Date.now());
         const existingState = this.orderStates.get(orderId);
         const nextState: OrderLifecycleState = {

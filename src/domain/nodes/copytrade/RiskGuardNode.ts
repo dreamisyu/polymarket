@@ -1,9 +1,9 @@
-import type { NodeContext } from '../kernel/NodeContext';
-import type { NodeResult } from '../kernel/NodeResult';
-import type { CopyTradeWorkflowState } from '../../strategy/workflowState';
-import { CopyTradeNode } from './CopyTradeNode';
-import { isMarketWindowClosed } from '../../../utils/marketWindow';
-import { resolveSourceEventBuyFilterRejection } from '../../../utils/sourceEventFilters';
+import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
+import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
+import type { CopyTradeWorkflowState } from '@domain/strategy/workflowState';
+import { CopyTradeNode } from '@domain/nodes/copytrade/CopyTradeNode';
+import { isMarketWindowClosed } from '@shared/marketWindow';
+import { resolveSourceEventBuyFilterRejection } from '@shared/sourceEventFilters';
 
 export class RiskGuardNode extends CopyTradeNode {
     constructor() {
@@ -34,7 +34,10 @@ export class RiskGuardNode extends CopyTradeNode {
             transactionHashes: [],
         });
 
-        const sourceFilterRejection = resolveSourceEventBuyFilterRejection(event, ctx.runtime.config);
+        const sourceFilterRejection = resolveSourceEventBuyFilterRejection(
+            event,
+            ctx.runtime.config
+        );
         if (sourceFilterRejection) {
             ctx.state.executionResult = buildSkipExecutionResult(sourceFilterRejection.reason);
             ctx.state.policyTrail = [
@@ -55,15 +58,13 @@ export class RiskGuardNode extends CopyTradeNode {
         }
 
         if (isMarketWindowClosed(event, ctx.now())) {
-            ctx.state.executionResult = buildSkipExecutionResult('市场交易窗口已结束，已跳过迟到买单');
+            ctx.state.executionResult =
+                buildSkipExecutionResult('市场交易窗口已结束，已跳过迟到买单');
             ctx.state.policyTrail = [...(ctx.state.policyTrail || []), 'risk:market_window_closed'];
             return this.skip(ctx.state.executionResult.reason, 'copytrade.persist');
         }
 
-        if (
-            !localPosition &&
-            portfolio.openPositionCount >= ctx.runtime.config.maxOpenPositions
-        ) {
+        if (!localPosition && portfolio.openPositionCount >= ctx.runtime.config.maxOpenPositions) {
             ctx.state.executionResult = buildSkipExecutionResult(
                 `已达到最大持仓数 ${ctx.runtime.config.maxOpenPositions}`
             );

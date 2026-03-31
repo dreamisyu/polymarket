@@ -3,17 +3,7 @@ import path from 'node:path';
 
 const SOURCE_ROOT = path.resolve('src');
 const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts'];
-const RESOLVE_EXTENSIONS = [
-    '',
-    '.ts',
-    '.tsx',
-    '.mts',
-    '.cts',
-    '.js',
-    '.mjs',
-    '.cjs',
-    '.json',
-];
+const RESOLVE_EXTENSIONS = ['', '.ts', '.tsx', '.mts', '.cts', '.js', '.mjs', '.cjs', '.json'];
 
 const collectSourceFiles = (rootDir) => {
     const files = [];

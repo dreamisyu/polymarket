@@ -1,6 +1,6 @@
-import type { RuntimeConfig } from '../config/runtimeConfig';
-import type { SourceTradeEvent } from '../domain';
-import { isTradeWithinMarketWhitelist } from './marketScope';
+import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { SourceTradeEvent } from '@domain';
+import { isTradeWithinMarketWhitelist } from '@shared/marketScope';
 
 export type SourceEventBuyFilterCode = 'market_whitelist' | 'min_source_buy_usdc';
 

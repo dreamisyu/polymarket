@@ -1,7 +1,7 @@
-import type { NodeRegistry } from './NodeRegistry';
-import type { NodeContext } from './NodeContext';
-import type { NodeWorkflowDefinition } from './NodeChainBuilder';
-import type { NodeResult } from './NodeResult';
+import type { NodeRegistry } from '@domain/nodes/kernel/NodeRegistry';
+import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
+import type { NodeWorkflowDefinition } from '@domain/nodes/kernel/NodeChainBuilder';
+import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
 
 export interface WorkflowRunSummary {
     lastNodeId: string | null;

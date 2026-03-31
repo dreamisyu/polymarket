@@ -1,5 +1,5 @@
-import { createLogger } from '../../utils/logger';
-import { runWithRetry } from '../../utils/retry';
+import { createLogger } from '@shared/logger';
+import { runWithRetry } from '@shared/retry';
 
 const logger = createLogger('http');
 const requestTimeoutMs = 10_000;

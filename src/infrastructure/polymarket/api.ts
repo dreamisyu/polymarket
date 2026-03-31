@@ -1,6 +1,6 @@
-import type { RuntimeConfig } from '../../config/runtimeConfig';
-import type { SourceActivityRecord, UserPositionRecord } from './dto';
-import { fetchJson } from '../http/fetchJson';
+import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { SourceActivityRecord, UserPositionRecord } from '@infrastructure/polymarket/dto';
+import { fetchJson } from '@infrastructure/http/fetchJson';
 
 export interface OrderBookRecord {
     market?: string;
@@ -27,10 +27,15 @@ export const fetchSourceActivities = async (
         sortBy: 'TIMESTAMP',
         sortDirection: 'ASC',
     });
-    return fetchJson<SourceActivityRecord[]>(`${config.dataApiUrl.replace(/\/+$/, '')}/activity?${search.toString()}`);
+    return fetchJson<SourceActivityRecord[]>(
+        `${config.dataApiUrl.replace(/\/+$/, '')}/activity?${search.toString()}`
+    );
 };
 
 export const fetchUserPositions = async (
     wallet: string,
     config: Pick<RuntimeConfig, 'dataApiUrl'>
-) => fetchJson<UserPositionRecord[]>(`${config.dataApiUrl.replace(/\/+$/, '')}/positions?user=${encodeURIComponent(wallet)}&sizeThreshold=0`);
+) =>
+    fetchJson<UserPositionRecord[]>(
+        `${config.dataApiUrl.replace(/\/+$/, '')}/positions?user=${encodeURIComponent(wallet)}&sizeThreshold=0`
+    );

@@ -1,11 +1,11 @@
-import type { NodeContext } from '../kernel/NodeContext';
-import type { NodeResult } from '../kernel/NodeResult';
-import type { NodeWorkflowEngine } from '../kernel/NodeWorkflowEngine';
-import type { NodeWorkflowDefinition } from '../kernel/NodeChainBuilder';
-import type { CopyTradeDispatchItem } from '../..';
-import type { MonitorWorkflowState } from './workflowState';
-import type { CopyTradeWorkflowState } from '../../strategy/workflowState';
-import { MonitorNode } from './MonitorNode';
+import type { CopyTradeDispatchItem } from '@domain';
+import type { NodeWorkflowDefinition } from '@domain/nodes/kernel/NodeChainBuilder';
+import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
+import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
+import type { NodeWorkflowEngine } from '@domain/nodes/kernel/NodeWorkflowEngine';
+import { MonitorNode } from '@domain/nodes/monitor/MonitorNode';
+import type { MonitorWorkflowState } from '@domain/nodes/monitor/workflowState';
+import type { CopyTradeWorkflowState } from '@domain/strategy/workflowState';
 
 interface CopyTradeContextBuilder {
     (
@@ -14,19 +14,22 @@ interface CopyTradeContextBuilder {
     ): NodeContext<CopyTradeWorkflowState>;
 }
 
+type WorkflowEngineResolver = () => NodeWorkflowEngine;
+type WorkflowResolver = () => NodeWorkflowDefinition;
+
 export class DispatchCopyTradeNode extends MonitorNode<MonitorWorkflowState> {
-    private readonly engine: NodeWorkflowEngine;
-    private readonly workflow: NodeWorkflowDefinition;
+    private readonly resolveEngine: WorkflowEngineResolver;
+    private readonly resolveWorkflow: WorkflowResolver;
     private readonly buildCopyTradeContext: CopyTradeContextBuilder;
 
     constructor(params: {
-        engine: NodeWorkflowEngine;
-        workflow: NodeWorkflowDefinition;
+        resolveEngine: WorkflowEngineResolver;
+        resolveWorkflow: WorkflowResolver;
         buildCopyTradeContext: CopyTradeContextBuilder;
     }) {
         super('monitor.dispatch');
-        this.engine = params.engine;
-        this.workflow = params.workflow;
+        this.resolveEngine = params.resolveEngine;
+        this.resolveWorkflow = params.resolveWorkflow;
         this.buildCopyTradeContext = params.buildCopyTradeContext;
     }
 
@@ -38,7 +41,7 @@ export class DispatchCopyTradeNode extends MonitorNode<MonitorWorkflowState> {
 
         for (const dispatchItem of dispatchItems) {
             const childCtx = this.buildCopyTradeContext(dispatchItem, ctx);
-            this.engine.runDetached(childCtx, this.workflow);
+            this.resolveEngine().runDetached(childCtx, this.resolveWorkflow());
         }
 
         return this.success({ dispatched: dispatchItems.length });

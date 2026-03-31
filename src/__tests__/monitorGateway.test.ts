@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { PolymarketMonitorGateway } from '../infrastructure/monitor/polymarketMonitorGateway';
-import type { SourceActivityRecord, UserPositionRecord } from '../infrastructure/polymarket/dto';
+import { PolymarketMonitorGateway } from '@infrastructure/monitor/polymarketMonitorGateway';
+import type { SourceActivityRecord, UserPositionRecord } from '@infrastructure/polymarket/dto';
 
 jest.mock('../infrastructure/polymarket/api', () => ({
     __esModule: true,
@@ -35,7 +35,10 @@ const { fetchSourceActivities, fetchUserPositions } = jest.requireMock(
 
 const { getUsdcBalance } = jest.requireMock('../infrastructure/chain/wallet') as {
     getUsdcBalance: jest.MockedFunction<
-        (address: string, config: { rpcUrl: string; usdcContractAddress: string }) => Promise<number>
+        (
+            address: string,
+            config: { rpcUrl: string; usdcContractAddress: string }
+        ) => Promise<number>
     >;
 };
 
@@ -43,22 +46,23 @@ const { getMonitorCursorModel } = jest.requireMock('../infrastructure/db/models'
     getMonitorCursorModel: jest.MockedFunction<(scopeKey: string) => unknown>;
 };
 
-const buildConfig = (strategyKind: 'fixed_amount' | 'proportional' | 'signal' = 'fixed_amount') =>
-    ({
-        runMode: 'live',
-        strategyKind,
-        targetWallet: '0xd9013df863c1ba932780857b020dfdeacedf8e14',
-        scopeKey: 'scope',
-        monitorInitialLookbackMs: 5_000,
-        monitorOverlapMs: 1_000,
-        activitySyncLimit: 100,
-        snapshotStaleAfterMs: 60_000,
-        marketWhitelist: [],
-        minSourceBuyUsdc: 0,
-        dataApiUrl: 'https://data-api.polymarket.com',
-        rpcUrl: 'https://polygon.drpc.org',
-        usdcContractAddress: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
-    });
+const buildConfig = (
+    strategyKind: 'fixed_amount' | 'proportional' | 'signal' = 'fixed_amount'
+) => ({
+    runMode: 'live',
+    strategyKind,
+    targetWallet: '0xd9013df863c1ba932780857b020dfdeacedf8e14',
+    scopeKey: 'scope',
+    monitorInitialLookbackMs: 5_000,
+    monitorOverlapMs: 1_000,
+    activitySyncLimit: 100,
+    snapshotStaleAfterMs: 60_000,
+    marketWhitelist: [],
+    minSourceBuyUsdc: 0,
+    dataApiUrl: 'https://data-api.polymarket.com',
+    rpcUrl: 'https://polygon.drpc.org',
+    usdcContractAddress: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
+});
 
 const buildActivity = (overrides: Partial<SourceActivityRecord> = {}): SourceActivityRecord => ({
     activityKey: 'activity-1',

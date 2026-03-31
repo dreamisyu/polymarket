@@ -1,5 +1,5 @@
-import type { StrategyKind, CopyTradeDispatchItem, SourceTradeEvent } from '../domain';
-import { toSafeNumber } from './math';
+import type { StrategyKind, CopyTradeDispatchItem, SourceTradeEvent } from '@domain';
+import { toSafeNumber } from '@shared/math';
 
 const bundleRawKey = 'aggregatedBuyBundle';
 const epsilon = 1e-8;

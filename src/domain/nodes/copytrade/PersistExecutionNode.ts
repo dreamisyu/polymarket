@@ -1,10 +1,10 @@
 import mongoose from 'mongoose';
-import type { SourceTradeEvent } from '../..';
-import type { NodeContext } from '../kernel/NodeContext';
-import type { NodeResult } from '../kernel/NodeResult';
-import type { CopyTradeWorkflowState } from '../../strategy/workflowState';
-import { CopyTradeNode } from './CopyTradeNode';
-import { buildExecutionRecord, buildPersistencePlans } from '../../../utils/executionPersistence';
+import type { SourceTradeEvent } from '@domain';
+import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
+import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
+import type { CopyTradeWorkflowState } from '@domain/strategy/workflowState';
+import { CopyTradeNode } from '@domain/nodes/copytrade/CopyTradeNode';
+import { buildExecutionRecord, buildPersistencePlans } from '@shared/executionPersistence';
 
 const emptyExecutionResult = {
     status: 'skipped' as const,

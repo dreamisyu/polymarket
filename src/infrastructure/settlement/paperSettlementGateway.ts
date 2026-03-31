@@ -1,6 +1,6 @@
-import type { RuntimeConfig } from '../../config/runtimeConfig';
-import type { SettlementRedeemRequest, SettlementRedeemResult } from '../../domain';
-import type { SettlementGateway } from '../runtime/contracts';
+import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { SettlementRedeemRequest, SettlementRedeemResult } from '@domain';
+import type { SettlementGateway } from '@infrastructure/runtime/contracts';
 
 export class PaperSettlementGateway implements SettlementGateway {
     private readonly config: RuntimeConfig;

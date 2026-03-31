@@ -1,7 +1,11 @@
-import { normalizeOutcomeLabel } from './resolution';
-import { toSafeNumber } from './math';
+import { normalizeOutcomeLabel } from '@shared/resolution';
+import { toSafeNumber } from '@shared/math';
 
-export const buildConditionOutcomeKey = (params: { asset?: string; outcomeIndex?: number; outcome?: string }) => {
+export const buildConditionOutcomeKey = (params: {
+    asset?: string;
+    outcomeIndex?: number;
+    outcome?: string;
+}) => {
     const asset = String(params.asset || '').trim();
     if (asset) {
         return `asset:${asset}`;
@@ -20,15 +24,23 @@ export const buildConditionOutcomeKey = (params: { asset?: string; outcomeIndex?
     return '';
 };
 
-export const computeConditionMergeableSize = (outcomeKeys: string[], sizeByOutcomeKey: Map<string, number>) => {
-    const normalizedKeys = [...new Set(outcomeKeys.map((key) => String(key || '').trim()).filter(Boolean))];
+export const computeConditionMergeableSize = (
+    outcomeKeys: string[],
+    sizeByOutcomeKey: Map<string, number>
+) => {
+    const normalizedKeys = [
+        ...new Set(outcomeKeys.map((key) => String(key || '').trim()).filter(Boolean)),
+    ];
     if (normalizedKeys.length < 2) {
         return 0;
     }
 
     let mergeableSize = Number.POSITIVE_INFINITY;
     for (const outcomeKey of normalizedKeys) {
-        mergeableSize = Math.min(mergeableSize, Math.max(toSafeNumber(sizeByOutcomeKey.get(outcomeKey)), 0));
+        mergeableSize = Math.min(
+            mergeableSize,
+            Math.max(toSafeNumber(sizeByOutcomeKey.get(outcomeKey)), 0)
+        );
     }
 
     return Number.isFinite(mergeableSize) ? mergeableSize : 0;

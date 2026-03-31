@@ -1,7 +1,9 @@
 const repetitiveUpdownSlugPattern = /(?:^|[-_])(5m|15m)-(\d{10})(?:$|[-_])/i;
 
 const resolveDurationMs = (durationText: string) => {
-    const normalized = String(durationText || '').trim().toLowerCase();
+    const normalized = String(durationText || '')
+        .trim()
+        .toLowerCase();
     if (normalized === '5m') {
         return 5 * 60_000;
     }
@@ -12,12 +14,13 @@ const resolveDurationMs = (durationText: string) => {
     return null;
 };
 
-export const resolveRepetitiveMarketWindow = (market: {
-    slug?: string;
-    eventSlug?: string;
-}) => {
+export const resolveRepetitiveMarketWindow = (market: { slug?: string; eventSlug?: string }) => {
     const slugCandidates = [market.eventSlug, market.slug]
-        .map((value) => String(value || '').trim().toLowerCase())
+        .map((value) =>
+            String(value || '')
+                .trim()
+                .toLowerCase()
+        )
         .filter(Boolean);
 
     for (const candidate of slugCandidates) {

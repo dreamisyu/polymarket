@@ -1,16 +1,16 @@
 import type { Model } from 'mongoose';
-import type { RuntimeConfig } from '../../config/runtimeConfig';
-import type { MonitorSyncResult, SourceTradeEvent } from '../../domain';
-import { mapSourceActivity } from '../polymarket/mappers/sourceActivityMapper';
-import { fetchSourceActivities, fetchUserPositions } from '../polymarket/api';
-import { getUsdcBalance } from '../chain/wallet';
-import { buildTradeSnapshots } from '../../utils/snapshots';
-import { buildActivityKey } from '../../utils/activityKey';
-import { toSafeNumber } from '../../utils/math';
-import { resolveSourceEventBuyFilterRejection } from '../../utils/sourceEventFilters';
-import type { SourceActivityRecord } from '../polymarket/dto';
-import type { LoggerLike, MonitorGateway } from '../runtime/contracts';
-import { getMonitorCursorModel } from '../db/models';
+import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { MonitorSyncResult, SourceTradeEvent } from '@domain';
+import { mapSourceActivity } from '@infrastructure/polymarket/mappers/sourceActivityMapper';
+import { fetchSourceActivities, fetchUserPositions } from '@infrastructure/polymarket/api';
+import { getUsdcBalance } from '@infrastructure/chain/wallet';
+import { buildTradeSnapshots } from '@shared/snapshots';
+import { buildActivityKey } from '@shared/activityKey';
+import { toSafeNumber } from '@shared/math';
+import { resolveSourceEventBuyFilterRejection } from '@shared/sourceEventFilters';
+import type { SourceActivityRecord } from '@infrastructure/polymarket/dto';
+import type { LoggerLike, MonitorGateway } from '@infrastructure/runtime/contracts';
+import { getMonitorCursorModel } from '@infrastructure/db/models';
 
 interface MonitorCursorState {
     wallet: string;
@@ -32,7 +32,9 @@ const normalizeTimestamp = (rawTimestamp: number) => {
 
 const normalizeTrade = (trade: SourceActivityRecord): SourceActivityRecord | null => {
     const timestamp = normalizeTimestamp(Number(trade.timestamp));
-    const type = String(trade.type || '').trim().toUpperCase();
+    const type = String(trade.type || '')
+        .trim()
+        .toUpperCase();
     if (!timestamp || !trackedTypes.has(type)) {
         return null;
     }
@@ -75,11 +77,14 @@ export class PolymarketMonitorGateway implements MonitorGateway {
     }
 
     async syncOnce(): Promise<MonitorSyncResult> {
-        const cursor = await this.Cursor.findOne({ wallet: this.config.targetWallet }).lean<MonitorCursorState | null>();
+        const cursor = await this.Cursor.findOne({
+            wallet: this.config.targetWallet,
+        }).lean<MonitorCursorState | null>();
         const endTimestamp = Date.now();
         const startTimestamp = Math.max(
             0,
-            (cursor?.lastSyncedTimestamp || endTimestamp - this.config.monitorInitialLookbackMs) - this.config.monitorOverlapMs
+            (cursor?.lastSyncedTimestamp || endTimestamp - this.config.monitorInitialLookbackMs) -
+                this.config.monitorOverlapMs
         );
         const fetchedTrades = await this.fetchActivityWindow(startTimestamp, endTimestamp);
         const [positions, balance] = await Promise.all([
@@ -87,7 +92,13 @@ export class PolymarketMonitorGateway implements MonitorGateway {
             this.resolveMonitoredUsdcBalance(),
         ]);
         const capturedAt = Date.now();
-        const snapshots = buildTradeSnapshots(fetchedTrades, positions, balance, capturedAt, this.config);
+        const snapshots = buildTradeSnapshots(
+            fetchedTrades,
+            positions,
+            balance,
+            capturedAt,
+            this.config
+        );
         const filterCounts = {
             marketWhitelist: 0,
             minSourceBuyUsdc: 0,
@@ -131,7 +142,7 @@ export class PolymarketMonitorGateway implements MonitorGateway {
         );
 
         this.logger.debug(
-            `监控同步完成 fetched=${events.length} raw=${rawEvents.length}  start=${startTimestamp} end=${endTimestamp}`
+            `监控同步完成 fetched=${events.length} raw=${rawEvents.length} filteredByMarketWhitelist=${filterCounts.marketWhitelist} filteredByMinBuy=${filterCounts.minSourceBuyUsdc} start=${startTimestamp} end=${endTimestamp}`
         );
 
         return {

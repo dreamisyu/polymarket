@@ -1,7 +1,7 @@
-import type { RuntimeConfig } from '../config/runtimeConfig';
-import type { SourceActivityRecord, UserPositionRecord } from '../infrastructure/polymarket/dto';
-import { buildConditionOutcomeKey, computeConditionMergeableSize } from './conditionMath';
-import { normalizeSize, toSafeNumber } from './math';
+import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { SourceActivityRecord, UserPositionRecord } from '@infrastructure/polymarket/dto';
+import { buildConditionOutcomeKey, computeConditionMergeableSize } from '@shared/conditionMath';
+import { normalizeSize, toSafeNumber } from '@shared/math';
 
 export interface TradeSnapshotFields {
     sourceBalanceAfterTrade?: number;
@@ -24,7 +24,9 @@ interface RollingConditionState {
 const sortTradesDesc = (trades: SourceActivityRecord[]) =>
     [...trades].sort((left, right) => {
         if (left.timestamp === right.timestamp) {
-            return String(right.transactionHash || '').localeCompare(String(left.transactionHash || ''));
+            return String(right.transactionHash || '').localeCompare(
+                String(left.transactionHash || '')
+            );
         }
 
         return right.timestamp - left.timestamp;
@@ -52,7 +54,10 @@ export const buildTradeSnapshots = (
     }
 
     const outcomeKeysByCondition = new Map<string, Set<string>>();
-    const registerOutcome = (conditionId: string, params: { asset?: string; outcomeIndex?: number; outcome?: string }) => {
+    const registerOutcome = (
+        conditionId: string,
+        params: { asset?: string; outcomeIndex?: number; outcome?: string }
+    ) => {
         const normalizedConditionId = String(conditionId || '').trim();
         const outcomeKey = buildConditionOutcomeKey(params);
         if (!normalizedConditionId || !outcomeKey) {
@@ -114,43 +119,63 @@ export const buildTradeSnapshots = (
         const afterPrice = Math.max(toSafeNumber(currentPosition.price, trade.price), 0);
         const tradeSize = Math.max(toSafeNumber(trade.size), 0);
         const tradeUsdc = Math.max(toSafeNumber(trade.usdcSize), 0);
-        const normalizedAction = String(trade.side || trade.type || '').trim().toUpperCase();
+        const normalizedAction = String(trade.side || trade.type || '')
+            .trim()
+            .toUpperCase();
         const outcomeKey = buildConditionOutcomeKey(trade);
-        const afterMergeableSize = computeConditionMergeableSize(conditionState.outcomeKeys, conditionState.sizes);
+        const afterMergeableSize = computeConditionMergeableSize(
+            conditionState.outcomeKeys,
+            conditionState.sizes
+        );
 
         let beforePositionSize = afterPositionSize;
         let beforeBalance = rollingBalance;
         let beforeMergeableSize = afterMergeableSize;
         let snapshotStatus: TradeSnapshotFields['snapshotStatus'] =
-            capturedAt - toSafeNumber(trade.timestamp) > config.snapshotStaleAfterMs ? 'STALE' : 'COMPLETE';
-        let sourceSnapshotReason = snapshotStatus === 'STALE' ? '快照生成时点距离源成交时间过长，已标记为陈旧' : '';
+            capturedAt - toSafeNumber(trade.timestamp) > config.snapshotStaleAfterMs
+                ? 'STALE'
+                : 'COMPLETE';
+        let sourceSnapshotReason =
+            snapshotStatus === 'STALE' ? '快照生成时点距离源成交时间过长，已标记为陈旧' : '';
 
         if (normalizedAction === 'BUY') {
             beforePositionSize = normalizeSize(Math.max(afterPositionSize - tradeSize, 0));
             beforeBalance = rollingBalance + tradeUsdc;
             if (outcomeKey) {
                 conditionState.sizes.set(outcomeKey, beforePositionSize);
-                beforeMergeableSize = computeConditionMergeableSize(conditionState.outcomeKeys, conditionState.sizes);
+                beforeMergeableSize = computeConditionMergeableSize(
+                    conditionState.outcomeKeys,
+                    conditionState.sizes
+                );
             }
         } else if (normalizedAction === 'SELL') {
             beforePositionSize = normalizeSize(afterPositionSize + tradeSize);
             beforeBalance = rollingBalance - tradeUsdc;
             if (outcomeKey) {
                 conditionState.sizes.set(outcomeKey, beforePositionSize);
-                beforeMergeableSize = computeConditionMergeableSize(conditionState.outcomeKeys, conditionState.sizes);
+                beforeMergeableSize = computeConditionMergeableSize(
+                    conditionState.outcomeKeys,
+                    conditionState.sizes
+                );
             }
         } else if (normalizedAction === 'MERGE') {
             const mergeSize = Math.max(tradeSize, tradeUsdc);
             beforeBalance = rollingBalance - tradeUsdc;
             if (conditionState.outcomeKeys.length < 2) {
                 snapshotStatus = 'PARTIAL';
-                sourceSnapshotReason = '缺少完整的 condition outcome 快照，无法估算 merge 前后 complete-set 数量';
+                sourceSnapshotReason =
+                    '缺少完整的 condition outcome 快照，无法估算 merge 前后 complete-set 数量';
             } else {
                 beforeMergeableSize = normalizeSize(afterMergeableSize + mergeSize);
                 for (const conditionOutcomeKey of conditionState.outcomeKeys) {
                     conditionState.sizes.set(
                         conditionOutcomeKey,
-                        normalizeSize(Math.max(toSafeNumber(conditionState.sizes.get(conditionOutcomeKey)), 0) + mergeSize)
+                        normalizeSize(
+                            Math.max(
+                                toSafeNumber(conditionState.sizes.get(conditionOutcomeKey)),
+                                0
+                            ) + mergeSize
+                        )
                     );
                 }
             }

@@ -1,7 +1,7 @@
-import type { RuntimeConfig } from '../config/runtimeConfig';
-import type { GammaMarketRecord, MarketTokenRecord } from '../infrastructure/polymarket/dto';
-import { fetchJson } from '../infrastructure/http/fetchJson';
-import { toSafeNumber } from './math';
+import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { GammaMarketRecord, MarketTokenRecord } from '@infrastructure/polymarket/dto';
+import { fetchJson } from '@infrastructure/http/fetchJson';
+import { toSafeNumber } from '@shared/math';
 
 interface ClobMarketRecord {
     condition_id?: string;
@@ -32,7 +32,10 @@ export interface MarketResolution {
     archived: boolean | null;
 }
 
-const resolutionCache = new Map<string, { checkedAt: number; resolution: MarketResolution | null }>();
+const resolutionCache = new Map<
+    string,
+    { checkedAt: number; resolution: MarketResolution | null }
+>();
 const resolvedTtlMs = 10 * 60_000;
 const unresolvedTtlMs = 30_000;
 
@@ -52,14 +55,20 @@ const parseArrayLike = (value: unknown) => {
             return parsed.map((item) => String(item || '').trim()).filter(Boolean);
         }
     } catch {
-        return normalized.split(',').map((item) => String(item || '').trim()).filter(Boolean);
+        return normalized
+            .split(',')
+            .map((item) => String(item || '').trim())
+            .filter(Boolean);
     }
 
     return [] as string[];
 };
 
 export const normalizeOutcomeLabel = (value: string) =>
-    String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, ' ');
 
 const buildMarketUrl = (marketSlug: string) =>
     marketSlug ? `https://polymarket.com/event/${marketSlug}/${marketSlug}` : '';
@@ -67,7 +76,10 @@ const buildMarketUrl = (marketSlug: string) =>
 const inferWinnerFromTokens = (tokens: MarketTokenRecord[] = []) =>
     normalizeOutcomeLabel(tokens.find((token) => token.winner)?.outcome || '');
 
-const inferWinnerFromOutcomePrices = (outcomes: string | string[] | null | undefined, prices: string | string[] | null | undefined) => {
+const inferWinnerFromOutcomePrices = (
+    outcomes: string | string[] | null | undefined,
+    prices: string | string[] | null | undefined
+) => {
     const normalizedOutcomes = parseArrayLike(outcomes);
     const normalizedPrices = parseArrayLike(prices).map((value) => toSafeNumber(value, -1));
     if (normalizedOutcomes.length === 0 || normalizedOutcomes.length !== normalizedPrices.length) {
@@ -88,12 +100,18 @@ const deriveResolvedStatus = (params: {
     acceptingOrders: boolean | null;
     umaResolutionStatus?: string | null;
 }) => {
-    const normalizedUma = String(params.umaResolutionStatus || '').trim().toLowerCase();
+    const normalizedUma = String(params.umaResolutionStatus || '')
+        .trim()
+        .toLowerCase();
     if (params.winnerOutcome) {
         return 'resolved';
     }
 
-    if (normalizedUma.includes('resolved') || normalizedUma.includes('finalized') || normalizedUma.includes('settled')) {
+    if (
+        normalizedUma.includes('resolved') ||
+        normalizedUma.includes('finalized') ||
+        normalizedUma.includes('settled')
+    ) {
         return 'resolved';
     }
 
@@ -104,8 +122,13 @@ const deriveResolvedStatus = (params: {
     return 'open';
 };
 
-const fetchClobMarketResolution = async (conditionId: string, config: Pick<RuntimeConfig, 'clobHttpUrl'>) => {
-    const response = await fetchJson<ClobMarketRecord>(`${config.clobHttpUrl.replace(/\/+$/, '')}/markets/${conditionId}`);
+const fetchClobMarketResolution = async (
+    conditionId: string,
+    config: Pick<RuntimeConfig, 'clobHttpUrl'>
+) => {
+    const response = await fetchJson<ClobMarketRecord>(
+        `${config.clobHttpUrl.replace(/\/+$/, '')}/markets/${conditionId}`
+    );
     if (!response) {
         return null;
     }
@@ -130,7 +153,10 @@ const fetchClobMarketResolution = async (conditionId: string, config: Pick<Runti
         }),
         winnerOutcome,
         title: String(response.question || '').trim(),
-        updateDescription: winnerOutcome || Boolean(response.closed) ? `source=clob closed=${Boolean(response.closed)}` : 'source=clob unresolved',
+        updateDescription:
+            winnerOutcome || Boolean(response.closed)
+                ? `source=clob closed=${Boolean(response.closed)}`
+                : 'source=clob unresolved',
         source: 'clob' as const,
         closed: Boolean(response.closed),
         acceptingOrders,
@@ -139,8 +165,13 @@ const fetchClobMarketResolution = async (conditionId: string, config: Pick<Runti
     };
 };
 
-const fetchGammaMarketBySlug = async (marketSlug: string, config: Pick<RuntimeConfig, 'gammaApiUrl'>) => {
-    const bySlug = await fetchJson<GammaMarketRecord | GammaMarketRecord[]>(`${config.gammaApiUrl.replace(/\/+$/, '')}/markets/slug/${marketSlug}`);
+const fetchGammaMarketBySlug = async (
+    marketSlug: string,
+    config: Pick<RuntimeConfig, 'gammaApiUrl'>
+) => {
+    const bySlug = await fetchJson<GammaMarketRecord | GammaMarketRecord[]>(
+        `${config.gammaApiUrl.replace(/\/+$/, '')}/markets/slug/${marketSlug}`
+    );
     if (Array.isArray(bySlug)) {
         return bySlug[0] || null;
     }
@@ -148,11 +179,16 @@ const fetchGammaMarketBySlug = async (marketSlug: string, config: Pick<RuntimeCo
         return bySlug;
     }
 
-    const list = await fetchJson<GammaMarketRecord[]>(`${config.gammaApiUrl.replace(/\/+$/, '')}/markets?slug=${encodeURIComponent(marketSlug)}`);
+    const list = await fetchJson<GammaMarketRecord[]>(
+        `${config.gammaApiUrl.replace(/\/+$/, '')}/markets?slug=${encodeURIComponent(marketSlug)}`
+    );
     return Array.isArray(list) ? list[0] || null : null;
 };
 
-const fetchGammaMarketResolution = async (params: { conditionId?: string; marketSlug?: string; title?: string }, config: Pick<RuntimeConfig, 'gammaApiUrl'>) => {
+const fetchGammaMarketResolution = async (
+    params: { conditionId?: string; marketSlug?: string; title?: string },
+    config: Pick<RuntimeConfig, 'gammaApiUrl'>
+) => {
     const marketSlug = String(params.marketSlug || '').trim();
     if (!marketSlug) {
         return null;
@@ -163,8 +199,11 @@ const fetchGammaMarketResolution = async (params: { conditionId?: string; market
         return null;
     }
 
-    const winnerOutcome = inferWinnerFromTokens(response.tokens || []) || inferWinnerFromOutcomePrices(response.outcomes, response.outcomePrices);
-    const acceptingOrders = typeof response.acceptingOrders === 'boolean' ? response.acceptingOrders : null;
+    const winnerOutcome =
+        inferWinnerFromTokens(response.tokens || []) ||
+        inferWinnerFromOutcomePrices(response.outcomes, response.outcomePrices);
+    const acceptingOrders =
+        typeof response.acceptingOrders === 'boolean' ? response.acceptingOrders : null;
 
     return {
         conditionId: String(response.conditionId || params.conditionId || '').trim(),
@@ -191,16 +230,20 @@ export const fetchMarketResolution = async (
     params: { conditionId?: string; marketSlug?: string; title?: string },
     config: Pick<RuntimeConfig, 'clobHttpUrl' | 'gammaApiUrl'>
 ) => {
-    const cacheKey = String(params.conditionId || '').trim() || `slug:${String(params.marketSlug || '').trim()}`;
+    const cacheKey =
+        String(params.conditionId || '').trim() || `slug:${String(params.marketSlug || '').trim()}`;
     const cached = resolutionCache.get(cacheKey);
     if (cached) {
-        const ttl = cached.resolution?.resolvedStatus === 'resolved' ? resolvedTtlMs : unresolvedTtlMs;
+        const ttl =
+            cached.resolution?.resolvedStatus === 'resolved' ? resolvedTtlMs : unresolvedTtlMs;
         if (Date.now() - cached.checkedAt < ttl) {
             return cached.resolution;
         }
     }
 
-    const clobResolution = params.conditionId ? await fetchClobMarketResolution(params.conditionId, config) : null;
+    const clobResolution = params.conditionId
+        ? await fetchClobMarketResolution(params.conditionId, config)
+        : null;
     const resolution =
         clobResolution && clobResolution.resolvedStatus === 'resolved'
             ? clobResolution
@@ -210,4 +253,6 @@ export const fetchMarketResolution = async (
 };
 
 export const isResolvedMarket = (resolution: MarketResolution | null | undefined) =>
-    String(resolution?.resolvedStatus || '').trim().toLowerCase() === 'resolved';
+    String(resolution?.resolvedStatus || '')
+        .trim()
+        .toLowerCase() === 'resolved';

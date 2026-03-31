@@ -1,14 +1,22 @@
-import type { RuntimeConfig } from '../../config/runtimeConfig';
-import { createRpcProvider } from './wallet';
-import { sleep } from '../../utils/sleep';
-import { withRpcTimeout } from './rpc';
+import type { RuntimeConfig } from '@config/runtimeConfig';
+import { createRpcProvider } from '@infrastructure/chain/wallet';
+import { sleep } from '@shared/sleep';
+import { withRpcTimeout } from '@infrastructure/chain/rpc';
 
 export const confirmTransactionHashes = async (
     transactionHashes: string[],
-    config: Pick<RuntimeConfig, 'rpcUrl' | 'orderConfirmationTimeoutMs' | 'orderConfirmationPollMs' | 'orderConfirmationBlocks'>,
+    config: Pick<
+        RuntimeConfig,
+        | 'rpcUrl'
+        | 'orderConfirmationTimeoutMs'
+        | 'orderConfirmationPollMs'
+        | 'orderConfirmationBlocks'
+    >,
     options: { timeoutMs?: number } = {}
 ) => {
-    const uniqueHashes = [...new Set(transactionHashes.map((hash) => String(hash || '').trim()))].filter(Boolean);
+    const uniqueHashes = [
+        ...new Set(transactionHashes.map((hash) => String(hash || '').trim())),
+    ].filter(Boolean);
     if (uniqueHashes.length === 0) {
         return {
             status: 'PENDING' as const,

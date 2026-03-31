@@ -180,7 +180,8 @@ const monitorCursorSchema = new Schema<MonitorCursorState>(
 
 monitorCursorSchema.index({ wallet: 1 }, { unique: true });
 
-const buildCollectionName = (prefix: string, scopeKey: string) => `${prefix}_${normalizeKey(scopeKey)}`;
+const buildCollectionName = (prefix: string, scopeKey: string) =>
+    `${prefix}_${normalizeKey(scopeKey)}`;
 
 export const getSourceEventModel = (scopeKey: string) =>
     getModel<SourceTradeEvent>(

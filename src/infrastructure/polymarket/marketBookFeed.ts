@@ -1,12 +1,12 @@
 import type { OrderBookSummary, Side } from '@polymarket/clob-client';
-import type { RuntimeConfig } from '../../config/runtimeConfig';
+import type { RuntimeConfig } from '@config/runtimeConfig';
 import {
     buildMarketBookSnapshot,
     sortBookLevels,
     type MarketBookLevel,
     type MarketBookSnapshot,
 } from '../../utils/executionPlanning';
-import type { LoggerLike } from '../runtime/contracts';
+import type { LoggerLike } from '@infrastructure/runtime/contracts';
 
 interface RuntimeWebSocket {
     readyState: number;

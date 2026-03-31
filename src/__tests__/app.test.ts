@@ -1,12 +1,12 @@
 import { describe, expect, it, jest } from '@jest/globals';
-import { createLoopWorker } from '../app/loopWorker';
+import { createLoopWorker } from '@application/worker/createLoopWorker';
 
-jest.mock('../utils/sleep', () => ({
+jest.mock('@shared/sleep', () => ({
     __esModule: true,
     sleep: jest.fn(),
 }));
 
-const { sleep } = jest.requireMock('../utils/sleep') as {
+const { sleep } = jest.requireMock('@shared/sleep') as {
     sleep: jest.MockedFunction<(ms: number) => Promise<void>>;
 };
 
@@ -19,9 +19,7 @@ describe('createLoopWorker', () => {
             .fn<() => Promise<void>>()
             .mockRejectedValueOnce(new Error('boom'))
             .mockResolvedValueOnce(undefined);
-        sleep
-            .mockResolvedValueOnce(undefined)
-            .mockRejectedValueOnce(new Error('stop'));
+        sleep.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('stop'));
 
         const worker = createLoopWorker({
             name: '监控分发工作流',

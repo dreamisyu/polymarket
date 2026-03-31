@@ -1,17 +1,11 @@
-import type { NodeRegistry } from '../nodes/kernel/NodeRegistry';
-import { SignalSizingNode } from '../nodes/copytrade/SizingNodes';
-import { BaseCopyTradeStrategy } from './BaseCopyTradeStrategy';
-import type { StrategyExtensionDefinition } from './types';
+import { BaseCopyTradeStrategy } from '@domain/strategy/BaseCopyTradeStrategy';
+import type { StrategyExtensionDefinition } from '@domain/strategy/types';
 
-export class SignalCopyTradeStrategy extends BaseCopyTradeStrategy {
+export default class SignalCopyTradeStrategy extends BaseCopyTradeStrategy {
     readonly name = 'signal' as const;
+    readonly entryNodeId = 'copytrade.signal.sizing';
 
     constructor(extensions: StrategyExtensionDefinition[] = []) {
         super(extensions);
-    }
-
-    protected registerStrategyNodes(registry: NodeRegistry) {
-        registry.register(new SignalSizingNode());
-        return 'copytrade.signal.sizing';
     }
 }

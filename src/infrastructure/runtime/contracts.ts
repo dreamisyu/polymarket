@@ -1,5 +1,5 @@
-import type { Logger } from '../../utils/logger';
-import type { RuntimeConfig } from '../../config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
+import type { NodeWorkflowEngine } from '@domain/nodes/kernel/NodeWorkflowEngine';
 import type {
     ConditionPositionSnapshot,
     MergeExecutionRequest,
@@ -13,8 +13,9 @@ import type {
     TradeExecutionRequest,
     TradeExecutionResult,
     WorkflowExecutionRecord,
-} from '../../domain';
-import type { MarketBookSnapshot } from '../../utils/executionPlanning';
+} from '@domain';
+import type { Logger } from '@shared/logger';
+import type { MarketBookSnapshot } from '@shared/executionPlanning';
 export type LoggerLike = Logger;
 
 export interface SourceEventStore {
@@ -97,8 +98,9 @@ export interface RuntimeGateways {
 }
 
 export interface Runtime {
-    config: RuntimeConfig;
+    config: AppConfig;
     logger: LoggerLike;
+    workflowEngine: NodeWorkflowEngine;
     stores: RuntimeStores;
     gateways: RuntimeGateways;
 }

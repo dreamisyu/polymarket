@@ -1,8 +1,8 @@
-import type { RuntimeConfig } from '../config/runtimeConfig';
-import type { SourceTradeEvent, StrategySizingDecision } from '../domain';
-import { getAggregatedTradeCount } from './copytradeDispatch';
-import { computeBuyTargetUsdc, computeSellTargetSize } from './executionPlanning';
-import { isTradeWithinSignalMarketScope } from './marketScope';
+import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { SourceTradeEvent, StrategySizingDecision } from '@domain';
+import { getAggregatedTradeCount } from '@shared/copytradeDispatch';
+import { computeBuyTargetUsdc, computeSellTargetSize } from '@shared/executionPlanning';
+import { isTradeWithinSignalMarketScope } from '@shared/marketScope';
 
 export const computeProportionalDecision = (
     event: SourceTradeEvent,

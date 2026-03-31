@@ -1,14 +1,17 @@
-import type { NodeContext } from '../kernel/NodeContext';
-import type { NodeResult } from '../kernel/NodeResult';
-import type { CopyTradeWorkflowState } from '../../strategy/workflowState';
-import { CopyTradeNode } from './CopyTradeNode';
+import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
+import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
+import type { CopyTradeWorkflowState } from '@domain/strategy/workflowState';
+import { CopyTradeNode } from '@domain/nodes/copytrade/CopyTradeNode';
+
+const strategyEntryNodeIds = {
+    fixed_amount: 'copytrade.fixed_amount.sizing',
+    proportional: 'copytrade.proportional.sizing',
+    signal: 'copytrade.signal.sizing',
+} as const;
 
 export class ActionRouterNode extends CopyTradeNode {
-    private readonly strategyEntryNodeId: string;
-
-    constructor(strategyEntryNodeId: string) {
+    constructor() {
         super('copytrade.action-router');
-        this.strategyEntryNodeId = strategyEntryNodeId;
     }
 
     async doAction(ctx: NodeContext<CopyTradeWorkflowState>): Promise<NodeResult> {
@@ -38,7 +41,7 @@ export class ActionRouterNode extends CopyTradeNode {
 
         const action = ctx.state.sourceEvent?.action;
         if (action === 'buy' || action === 'sell') {
-            return { next: this.strategyEntryNodeId };
+            return { next: strategyEntryNodeIds[ctx.runtime.config.strategyKind] };
         }
         if (action === 'merge') {
             return { next: 'copytrade.merge.plan' };

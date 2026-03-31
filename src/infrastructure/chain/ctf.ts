@@ -1,7 +1,7 @@
 import { encodeFunctionData, zeroHash } from 'viem';
 import type { Address, Hex } from 'viem';
-import type { RuntimeConfig } from '../../config/runtimeConfig';
-import { createWalletWriter, asAddress } from './wallet';
+import type { RuntimeConfig } from '@config/runtimeConfig';
+import { createWalletWriter, asAddress } from '@infrastructure/chain/wallet';
 
 const positionTokenDecimals = 6;
 

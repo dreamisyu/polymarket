@@ -1,9 +1,9 @@
-import type { RuntimeConfig } from '../../../config/runtimeConfig';
-import type { SourceTradeEvent, TradeAction } from '../../../domain';
-import type { SourceActivityRecord } from '../dto';
-import { buildActivityKey } from '../../../utils/activityKey';
-import { resolveExecutionIntent, resolveTradeAction } from '../../../utils/executionSemantics';
-import { toSafeNumber } from '../../../utils/math';
+import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { SourceTradeEvent, TradeAction } from '@domain';
+import type { SourceActivityRecord } from '@infrastructure/polymarket/dto';
+import { buildActivityKey } from '@shared/activityKey';
+import { resolveExecutionIntent, resolveTradeAction } from '@shared/executionSemantics';
+import { toSafeNumber } from '@shared/math';
 
 const normalizeTradeAction = (trade: SourceActivityRecord): TradeAction => {
     const tradeAction = resolveTradeAction(trade).toLowerCase();
@@ -11,7 +11,9 @@ const normalizeTradeAction = (trade: SourceActivityRecord): TradeAction => {
         return tradeAction;
     }
 
-    const type = String(trade.type || '').trim().toUpperCase();
+    const type = String(trade.type || '')
+        .trim()
+        .toUpperCase();
     if (type === 'MERGE') {
         return 'merge';
     }
@@ -26,8 +28,12 @@ export const mapSourceActivity = (
     sourceWallet: String(trade.proxyWallet || '').trim(),
     activityKey: String(trade.activityKey || '').trim() || buildActivityKey(trade),
     timestamp: toSafeNumber(trade.timestamp, Date.now()),
-    type: String(trade.type || '').trim().toUpperCase(),
-    side: String(trade.side || '').trim().toUpperCase(),
+    type: String(trade.type || '')
+        .trim()
+        .toUpperCase(),
+    side: String(trade.side || '')
+        .trim()
+        .toUpperCase(),
     action: normalizeTradeAction(trade),
     transactionHash: String(trade.transactionHash || '').trim(),
     conditionId: String(trade.conditionId || '').trim(),

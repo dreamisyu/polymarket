@@ -9,8 +9,8 @@ jest.mock('@polymarket/clob-client', () => ({
     TickSize: {},
 }));
 
-import { PolymarketMarketBookFeed } from '../infrastructure/polymarket/marketBookFeed';
-import { PolymarketUserExecutionFeed } from '../infrastructure/polymarket/userExecutionFeed';
+import { PolymarketMarketBookFeed } from '@infrastructure/polymarket/marketBookFeed';
+import { PolymarketUserExecutionFeed } from '@infrastructure/polymarket/userExecutionFeed';
 
 class MockWebSocket {
     static instances: MockWebSocket[] = [];

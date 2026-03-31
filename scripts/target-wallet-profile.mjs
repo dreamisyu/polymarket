@@ -148,7 +148,8 @@ if (argv.help) {
 
 const normalizeText = (value, fallback = '') => String(value || '').trim() || fallback;
 
-const normalizeUpper = (value, fallback = 'UNKNOWN') => normalizeText(value, fallback).toUpperCase();
+const normalizeUpper = (value, fallback = 'UNKNOWN') =>
+    normalizeText(value, fallback).toUpperCase();
 
 const inferAction = (item) => {
     const action = normalizeText(item?.action, '').toLowerCase();
@@ -220,7 +221,9 @@ const buildAdjacentBuyClusters = (buyEvents, mergeWindowMs, top) => {
     const rescuedClusters = multiDocClusters.filter(
         (cluster) =>
             cluster.totalUsdc >= 1 &&
-            cluster.docs.every((event) => toSafeNumber(event?.usdcSize) > 0 && toSafeNumber(event?.usdcSize) < 1)
+            cluster.docs.every(
+                (event) => toSafeNumber(event?.usdcSize) > 0 && toSafeNumber(event?.usdcSize) < 1
+            )
     );
 
     return {
@@ -248,11 +251,20 @@ const summarizePositions = (positions, top) => {
     const normalized = Array.isArray(positions)
         ? positions.map((position) => ({
               conditionId: normalizeText(position?.conditionId, ''),
-              title: normalizeText(position?.title, normalizeText(position?.slug, normalizeText(position?.question, 'UNKNOWN'))),
+              title: normalizeText(
+                  position?.title,
+                  normalizeText(position?.slug, normalizeText(position?.question, 'UNKNOWN'))
+              ),
               outcome: normalizeText(position?.outcome, ''),
               size: toSafeNumber(position?.size),
-              currentValue: toSafeNumber(position?.currentValue, toSafeNumber(position?.current_value)),
-              initialValue: toSafeNumber(position?.initialValue, toSafeNumber(position?.initial_value)),
+              currentValue: toSafeNumber(
+                  position?.currentValue,
+                  toSafeNumber(position?.current_value)
+              ),
+              initialValue: toSafeNumber(
+                  position?.initialValue,
+                  toSafeNumber(position?.initial_value)
+              ),
               redeemable: Boolean(position?.redeemable),
               mergeable: Boolean(position?.mergeable),
           }))
@@ -308,17 +320,45 @@ const renderText = (summary) => {
     lines.push('');
     lines.push('活动概览');
     lines.push(`- 活动总数: ${summary.activities.total}`);
-    lines.push(`- TRADE BUY / SELL: ${summary.activities.buyCount} / ${summary.activities.sellCount}`);
+    lines.push(
+        `- TRADE BUY / SELL: ${summary.activities.buyCount} / ${summary.activities.sellCount}`
+    );
     lines.push(`- MERGE + REDEEM: ${summary.activities.mergeRedeemCount}`);
     lines.push(`- BUY 中 <1u 占比: ${formatPct(summary.activities.smallBuyPct)}`);
     lines.push(`- pending+retry+processing 占比: ${formatPct(summary.activities.pendingRetryPct)}`);
-    lines.push(`- BUY usdc 分位 P25/P50/P75: ${formatUsd(summary.activities.buyUsdcP25)} / ${formatUsd(summary.activities.buyUsdcP50)} / ${formatUsd(summary.activities.buyUsdcP75)}`);
+    lines.push(
+        `- BUY usdc 分位 P25/P50/P75: ${formatUsd(summary.activities.buyUsdcP25)} / ${formatUsd(summary.activities.buyUsdcP50)} / ${formatUsd(summary.activities.buyUsdcP75)}`
+    );
     lines.push(`- 交易频率: ${summary.activities.tradesPerHour.toFixed(2)} 次/小时`);
     lines.push(`- BUY 相邻间隔 P50: ${(summary.activities.buyIntervalP50Ms / 1000).toFixed(2)} 秒`);
-    lines.push(...renderTopItems('动作分布', summary.activities.actionCounts, (item) => `${item.key}: ${item.value}`));
-    lines.push(...renderTopItems('活动状态分布', summary.activities.statusCounts, (item) => `${item.key}: ${item.value}`));
-    lines.push(...renderTopItems('快照状态分布', summary.activities.snapshotCounts, (item) => `${item.key}: ${item.value}`));
-    lines.push(...renderTopItems('热点市场（按成交额）', summary.activities.topConditionsByUsdc, (item) => `${item.title}: ${formatUsd(item.usdc)} (${item.count} 笔)`));
+    lines.push(
+        ...renderTopItems(
+            '动作分布',
+            summary.activities.actionCounts,
+            (item) => `${item.key}: ${item.value}`
+        )
+    );
+    lines.push(
+        ...renderTopItems(
+            '活动状态分布',
+            summary.activities.statusCounts,
+            (item) => `${item.key}: ${item.value}`
+        )
+    );
+    lines.push(
+        ...renderTopItems(
+            '快照状态分布',
+            summary.activities.snapshotCounts,
+            (item) => `${item.key}: ${item.value}`
+        )
+    );
+    lines.push(
+        ...renderTopItems(
+            '热点市场（按成交额）',
+            summary.activities.topConditionsByUsdc,
+            (item) => `${item.title}: ${formatUsd(item.usdc)} (${item.count} 笔)`
+        )
+    );
 
     lines.push('');
     lines.push('相邻 BUY 聚类');
@@ -326,15 +366,35 @@ const renderText = (summary) => {
     lines.push(`- 聚类后簇数: ${summary.adjacentBuy.clusterCount}`);
     lines.push(`- 可节省文档写入: ${summary.adjacentBuy.mergedSavings}`);
     lines.push(`- 多笔簇数量: ${summary.adjacentBuy.multiDocClusterCount}`);
-    lines.push(`- 可跨 1u 门槛簇: ${summary.adjacentBuy.rescuedClusterCount}（${formatUsd(summary.adjacentBuy.rescuedUsdc)}）`);
-    lines.push(...renderTopItems('候选簇 Top', summary.adjacentBuy.topCandidates, (item) => `${item.title}: ${item.docCount} 笔, ${formatUsd(item.totalUsdc)} (${formatTimestamp(item.startedAt)} ~ ${formatTimestamp(item.endedAt)})`));
+    lines.push(
+        `- 可跨 1u 门槛簇: ${summary.adjacentBuy.rescuedClusterCount}（${formatUsd(summary.adjacentBuy.rescuedUsdc)}）`
+    );
+    lines.push(
+        ...renderTopItems(
+            '候选簇 Top',
+            summary.adjacentBuy.topCandidates,
+            (item) =>
+                `${item.title}: ${item.docCount} 笔, ${formatUsd(item.totalUsdc)} (${formatTimestamp(item.startedAt)} ~ ${formatTimestamp(item.endedAt)})`
+        )
+    );
 
     if (summary.positions) {
         lines.push('');
         lines.push('官方持仓补充');
-        lines.push(`- open / redeemable / mergeable: ${summary.positions.openCount} / ${summary.positions.redeemableCount} / ${summary.positions.mergeableCount}`);
-        lines.push(`- 当前价值 / 初始价值: ${formatUsd(summary.positions.totalCurrentValue)} / ${formatUsd(summary.positions.totalInitialValue)}`);
-        lines.push(...renderTopItems('持仓 Top', summary.positions.topPositions, (item) => `${item.title} [${item.outcome}] ${formatUsd(item.currentValue)} size=${item.size.toFixed(6)} redeemable=${item.redeemable} mergeable=${item.mergeable}`));
+        lines.push(
+            `- open / redeemable / mergeable: ${summary.positions.openCount} / ${summary.positions.redeemableCount} / ${summary.positions.mergeableCount}`
+        );
+        lines.push(
+            `- 当前价值 / 初始价值: ${formatUsd(summary.positions.totalCurrentValue)} / ${formatUsd(summary.positions.totalInitialValue)}`
+        );
+        lines.push(
+            ...renderTopItems(
+                '持仓 Top',
+                summary.positions.topPositions,
+                (item) =>
+                    `${item.title} [${item.outcome}] ${formatUsd(item.currentValue)} size=${item.size.toFixed(6)} redeemable=${item.redeemable} mergeable=${item.mergeable}`
+            )
+        );
     }
 
     lines.push('');
@@ -402,7 +462,9 @@ const run = async () => {
             return status === 'pending' || status === 'retry' || status === 'processing';
         });
 
-        const buyUsdcSamples = buyEvents.map((item) => toSafeNumber(item?.usdcSize)).filter((value) => value > 0);
+        const buyUsdcSamples = buyEvents
+            .map((item) => toSafeNumber(item?.usdcSize))
+            .filter((value) => value > 0);
         const smallBuyEvents = buyEvents.filter((item) => {
             const usdc = toSafeNumber(item?.usdcSize);
             return usdc > 0 && usdc < 1;
@@ -419,9 +481,7 @@ const run = async () => {
                 ? Math.max(eventTimestamps[eventTimestamps.length - 1] - eventTimestamps[0], 1)
                 : 0;
         const tradesPerHour =
-            timeSpanMs > 0
-                ? (tradeEvents.length * 3_600_000) / timeSpanMs
-                : tradeEvents.length;
+            timeSpanMs > 0 ? (tradeEvents.length * 3_600_000) / timeSpanMs : tradeEvents.length;
 
         const buyIntervals = [];
         for (let index = 1; index < buyEvents.length; index += 1) {
@@ -549,7 +609,8 @@ const run = async () => {
 
         pushSuggestion(
             summary.suggestions,
-            summary.positions && (summary.positions.redeemableCount > 0 || summary.positions.mergeableCount > 0),
+            summary.positions &&
+                (summary.positions.redeemableCount > 0 || summary.positions.mergeableCount > 0),
             '目标账户当前存在 redeemable/mergeable 持仓，可纳入结算链路回归样本。'
         );
 
@@ -558,7 +619,9 @@ const run = async () => {
         }
 
         if (summary.suggestions.length === 0) {
-            summary.suggestions.push('当前窗口画像较平稳，建议结合 DB 与日志报告继续观察连续时段变化。');
+            summary.suggestions.push(
+                '当前窗口画像较平稳，建议结合 DB 与日志报告继续观察连续时段变化。'
+            );
         }
 
         if (argv.json) {

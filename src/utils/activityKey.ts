@@ -1,5 +1,5 @@
-import type { SourceActivityRecord } from '../infrastructure/polymarket/dto';
-import { toSafeNumber } from './math';
+import type { SourceActivityRecord } from '@infrastructure/polymarket/dto';
+import { toSafeNumber } from '@shared/math';
 
 const normalizeText = (value: unknown) => String(value || '').trim();
 const normalizeNumber = (value: unknown) => toSafeNumber(value).toFixed(8);

@@ -1,5 +1,5 @@
 import { ClobClient, OrderType } from '@polymarket/clob-client';
-import type { RuntimeConfig } from '../../config/runtimeConfig';
+import type { RuntimeConfig } from '@config/runtimeConfig';
 import type {
     MergeExecutionRequest,
     PortfolioSnapshot,
@@ -8,11 +8,11 @@ import type {
     TradeExecutionRequest,
     TradeExecutionResult,
 } from '../../domain';
-import { confirmTransactionHashes } from '../chain/confirm';
-import { submitConditionMerge } from '../chain/ctf';
-import { getUsdcBalance } from '../chain/wallet';
-import { fetchUserPositions } from '../polymarket/api';
-import type { MarketBookFeed } from '../polymarket/marketBookFeed';
+import { confirmTransactionHashes } from '@infrastructure/chain/confirm';
+import { submitConditionMerge } from '@infrastructure/chain/ctf';
+import { getUsdcBalance } from '@infrastructure/chain/wallet';
+import { fetchUserPositions } from '@infrastructure/polymarket/api';
+import type { MarketBookFeed } from '@infrastructure/polymarket/marketBookFeed';
 import type {
     UserExecutionConfirmationResult,
     UserExecutionFeed,
@@ -30,8 +30,8 @@ import {
     findMatchingPosition,
     mapUserPosition,
 } from './shared';
-import { sleep } from '../../utils/sleep';
-import { buildExecutionRecord, buildPersistencePlans } from '../../utils/executionPersistence';
+import { sleep } from '@shared/sleep';
+import { buildExecutionRecord, buildPersistencePlans } from '@shared/executionPersistence';
 
 const emptyResult = (
     reason: string,
@@ -65,9 +65,7 @@ const buildConfirmedResult = (
     statusUpdate: Partial<Pick<TradeExecutionResult, 'matchedAt' | 'minedAt'>> = {}
 ): TradeExecutionResult => {
     const executedUsdc =
-        request.side === 'BUY'
-            ? request.orderAmount
-            : request.orderAmount * request.executionPrice;
+        request.side === 'BUY' ? request.orderAmount : request.orderAmount * request.executionPrice;
     const executedSize =
         request.side === 'BUY'
             ? executedUsdc / Math.max(request.executionPrice, 0.0001)
@@ -248,7 +246,11 @@ export class LiveTradingGateway implements TradingGateway {
         transactionHashes: string[]
     ) {
         try {
-            const result = await this.waitForTradeConfirmation(request, orderIds, transactionHashes);
+            const result = await this.waitForTradeConfirmation(
+                request,
+                orderIds,
+                transactionHashes
+            );
             const retryDelayMsOverride =
                 result.status === 'retry' ? this.config.liveReconcileAfterTimeoutMs : undefined;
             await this.persistBackgroundTradeResult(request, result, retryDelayMsOverride);
@@ -282,8 +284,8 @@ export class LiveTradingGateway implements TradingGateway {
         }
 
         const sourceEvents =
-            (request.sourceEvents || []).filter(
-                (event): event is SourceTradeEvent => Boolean(event && event._id)
+            (request.sourceEvents || []).filter((event): event is SourceTradeEvent =>
+                Boolean(event && event._id)
             ) || [];
         const persistedSourceEvents =
             sourceEvents.length > 0
@@ -471,10 +473,16 @@ export class LiveTradingGateway implements TradingGateway {
         const event = request.sourceEvent;
         const userConfirmation = await this.confirmViaUserFeed(event, orderIds);
         if (userConfirmation?.confirmationStatus === 'CONFIRMED') {
-            return buildConfirmedResult(request, orderIds, transactionHashes, userConfirmation.confirmedAt || Date.now(), {
-                matchedAt: userConfirmation.matchedAt,
-                minedAt: userConfirmation.minedAt,
-            });
+            return buildConfirmedResult(
+                request,
+                orderIds,
+                transactionHashes,
+                userConfirmation.confirmedAt || Date.now(),
+                {
+                    matchedAt: userConfirmation.matchedAt,
+                    minedAt: userConfirmation.minedAt,
+                }
+            );
         }
         if (userConfirmation?.confirmationStatus === 'FAILED') {
             return buildFailureResult(

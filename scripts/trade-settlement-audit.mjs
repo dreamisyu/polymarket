@@ -198,10 +198,7 @@ const inferWinnerFromOutcomePrices = (outcomes, outcomePrices) => {
     const normalizedOutcomes = parseArrayLike(outcomes);
     const normalizedPrices = parseArrayLike(outcomePrices).map((value) => toSafeNumber(value, -1));
 
-    if (
-        normalizedOutcomes.length === 0 ||
-        normalizedOutcomes.length !== normalizedPrices.length
-    ) {
+    if (normalizedOutcomes.length === 0 || normalizedOutcomes.length !== normalizedPrices.length) {
         return '';
     }
 
@@ -311,8 +308,14 @@ const fetchConditionResolution = async ({
             });
 
             return {
-                conditionId: normalizeText(clob.data?.condition_id || clob.data?.conditionId, normalizedConditionId),
-                marketSlug: normalizeText(clob.data?.market_slug || clob.data?.marketSlug, normalizedSlug),
+                conditionId: normalizeText(
+                    clob.data?.condition_id || clob.data?.conditionId,
+                    normalizedConditionId
+                ),
+                marketSlug: normalizeText(
+                    clob.data?.market_slug || clob.data?.marketSlug,
+                    normalizedSlug
+                ),
                 status: resolvedStatus,
                 winnerOutcome,
                 source: 'clob',
@@ -468,15 +471,29 @@ const renderText = (summary) => {
 
     lines.push('');
     lines.push('总览');
-    lines.push(`- settlement 状态分布: ${summary.overview.taskStatusCounts.map((item) => `${item.key}=${item.value}`).join(', ') || '无'}`);
+    lines.push(
+        `- settlement 状态分布: ${summary.overview.taskStatusCounts.map((item) => `${item.key}=${item.value}`).join(', ') || '无'}`
+    );
     lines.push(`- 有开仓条件: ${summary.overview.openPositionConditionCount}`);
     lines.push(`- 有 pending source 条件: ${summary.overview.pendingSourceConditionCount}`);
     lines.push(`- 已 resolved 但未 settled: ${summary.overview.resolvedNotSettledCount}`);
     lines.push(`- settled 但仍有残留: ${summary.overview.settledWithResidualCount}`);
 
     lines.push('');
-    lines.push(...renderTopItems('问题分类 Top', summary.issueCounts, (item) => `${item.id}: ${item.count}`));
-    lines.push(...renderTopItems('任务原因 Top', summary.topTaskReasons, (item) => `${item.reason}: ${item.count}`));
+    lines.push(
+        ...renderTopItems(
+            '问题分类 Top',
+            summary.issueCounts,
+            (item) => `${item.id}: ${item.count}`
+        )
+    );
+    lines.push(
+        ...renderTopItems(
+            '任务原因 Top',
+            summary.topTaskReasons,
+            (item) => `${item.reason}: ${item.count}`
+        )
+    );
 
     lines.push('');
     lines.push('重点条件');
@@ -526,9 +543,7 @@ const run = async () => {
 
     try {
         const conditionFilter =
-            argv.conditionIds.length > 0
-                ? { conditionId: { $in: argv.conditionIds } }
-                : {};
+            argv.conditionIds.length > 0 ? { conditionId: { $in: argv.conditionIds } } : {};
 
         const [tasks, positions, sourceEvents, executions] = await Promise.all([
             fetchCollectionDocs(collections.settlementTasks, conditionFilter, {
@@ -630,7 +645,10 @@ const run = async () => {
             profile.marketSlug = normalizeText(event?.slug, profile.marketSlug);
 
             const status = lowerText(event?.status, 'pending');
-            profile.sourceStatusCounts.set(status, (profile.sourceStatusCounts.get(status) || 0) + 1);
+            profile.sourceStatusCounts.set(
+                status,
+                (profile.sourceStatusCounts.get(status) || 0) + 1
+            );
             if (status === 'pending' || status === 'processing' || status === 'retry') {
                 profile.sourcePendingCount += 1;
             }
@@ -638,7 +656,10 @@ const run = async () => {
                 profile.sourceFailedCount += 1;
             }
 
-            profile.sourceLatestTs = Math.max(profile.sourceLatestTs, toSafeNumber(event?.timestamp));
+            profile.sourceLatestTs = Math.max(
+                profile.sourceLatestTs,
+                toSafeNumber(event?.timestamp)
+            );
         }
 
         for (const execution of executions) {
@@ -648,7 +669,10 @@ const run = async () => {
             }
 
             const status = lowerText(execution?.status, 'unknown');
-            profile.executionStatusCounts.set(status, (profile.executionStatusCounts.get(status) || 0) + 1);
+            profile.executionStatusCounts.set(
+                status,
+                (profile.executionStatusCounts.get(status) || 0) + 1
+            );
             if (status === 'failed') {
                 profile.executionFailedCount += 1;
             }
@@ -682,9 +706,7 @@ const run = async () => {
         profiles.sort((left, right) => right.riskScore - left.riskScore);
 
         const selectedProfiles =
-            argv.conditionIds.length > 0
-                ? profiles
-                : profiles.slice(0, argv.topConditions);
+            argv.conditionIds.length > 0 ? profiles : profiles.slice(0, argv.topConditions);
 
         if (!argv.skipRemote) {
             for (const profile of selectedProfiles) {
@@ -717,12 +739,20 @@ const run = async () => {
             }
 
             if (remoteResolved && !['settled', 'closed'].includes(profile.taskStatus)) {
-                addFinding(profile, 'resolved_not_settled', '远程已 resolved，但本地任务未 settled');
+                addFinding(
+                    profile,
+                    'resolved_not_settled',
+                    '远程已 resolved，但本地任务未 settled'
+                );
                 countIssue('resolved_not_settled');
             }
 
             if (profile.taskStatus === 'settled' && hasResidual) {
-                addFinding(profile, 'settled_with_residual', '任务已 settled，但仍有残留 source/position');
+                addFinding(
+                    profile,
+                    'settled_with_residual',
+                    '任务已 settled，但仍有残留 source/position'
+                );
                 countIssue('settled_with_residual');
             }
 
@@ -776,12 +806,17 @@ const run = async () => {
             overview: {
                 conditionUniverseCount: profiles.length,
                 selectedCount: selectedProfiles.length,
-                openPositionConditionCount: selectedProfiles.filter((profile) => profile.openPositionCount > 0).length,
-                pendingSourceConditionCount: selectedProfiles.filter((profile) => profile.sourcePendingCount > 0).length,
+                openPositionConditionCount: selectedProfiles.filter(
+                    (profile) => profile.openPositionCount > 0
+                ).length,
+                pendingSourceConditionCount: selectedProfiles.filter(
+                    (profile) => profile.sourcePendingCount > 0
+                ).length,
                 taskStatusCounts,
-                resolvedNotSettledCount: selectedProfiles.filter((profile) =>
-                    lowerText(profile.remote?.status, '') === 'resolved' &&
-                    !['settled', 'closed'].includes(profile.taskStatus)
+                resolvedNotSettledCount: selectedProfiles.filter(
+                    (profile) =>
+                        lowerText(profile.remote?.status, '') === 'resolved' &&
+                        !['settled', 'closed'].includes(profile.taskStatus)
                 ).length,
                 settledWithResidualCount: selectedProfiles.filter(
                     (profile) =>
@@ -790,10 +825,12 @@ const run = async () => {
                 ).length,
             },
             issueCounts: takeTopEntries(issueCounts, 10).map(([id, count]) => ({ id, count })),
-            topTaskReasons: takeTopEntries(taskReasonCounts, argv.topReasons).map(([reason, count]) => ({
-                reason,
-                count,
-            })),
+            topTaskReasons: takeTopEntries(taskReasonCounts, argv.topReasons).map(
+                ([reason, count]) => ({
+                    reason,
+                    count,
+                })
+            ),
             conditions: selectedProfiles.map((profile) => ({
                 conditionId: profile.conditionId,
                 title: profile.title,
@@ -815,9 +852,15 @@ const run = async () => {
                 openPositionCount: profile.openPositionCount,
                 openPositionSize: profile.openPositionSize,
                 redeemableSize: profile.redeemableSize,
-                remoteStatus: normalizeText(profile.remote?.status, argv.skipRemote ? 'skipped' : 'unknown'),
+                remoteStatus: normalizeText(
+                    profile.remote?.status,
+                    argv.skipRemote ? 'skipped' : 'unknown'
+                ),
                 remoteWinnerOutcome: normalizeText(profile.remote?.winnerOutcome, ''),
-                remoteSource: normalizeText(profile.remote?.source, argv.skipRemote ? 'skipped' : 'unknown'),
+                remoteSource: normalizeText(
+                    profile.remote?.source,
+                    argv.skipRemote ? 'skipped' : 'unknown'
+                ),
                 remoteError: normalizeText(profile.remote?.error, ''),
                 findings: profile.findings,
                 riskScore: profile.riskScore,
@@ -836,14 +879,16 @@ const run = async () => {
             `存在 ${summary.overview.settledWithResidualCount} 个 condition 已 settled 但仍有残留，建议复核回收和事件清理逻辑。`
         );
 
-        const overdueIssue = summary.issueCounts.find((item) => item.id === 'task_overdue')?.count || 0;
+        const overdueIssue =
+            summary.issueCounts.find((item) => item.id === 'task_overdue')?.count || 0;
         pushSuggestion(
             summary.suggestions,
             overdueIssue > 0,
             `存在 ${overdueIssue} 个 task_overdue，建议检查 nextRetryAt 计算与 worker 轮询频率。`
         );
 
-        const highRetryIssue = summary.issueCounts.find((item) => item.id === 'high_retry')?.count || 0;
+        const highRetryIssue =
+            summary.issueCounts.find((item) => item.id === 'high_retry')?.count || 0;
         pushSuggestion(
             summary.suggestions,
             highRetryIssue > 0,
@@ -860,7 +905,9 @@ const run = async () => {
         }
 
         if (summary.suggestions.length === 0) {
-            summary.suggestions.push('当前审计窗口未发现明显结算异常，建议持续采样并观察问题分类趋势。');
+            summary.suggestions.push(
+                '当前审计窗口未发现明显结算异常，建议持续采样并观察问题分类趋势。'
+            );
         }
 
         if (argv.json) {

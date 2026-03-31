@@ -1,16 +1,20 @@
-import type { NodeChainBuilder, NodeWorkflowDefinition } from '../nodes/kernel/NodeChainBuilder';
-import type { NodeRegistry } from '../nodes/kernel/NodeRegistry';
-import type { StrategyKind } from '..';
+import type {
+    NodeChainBuilder,
+    NodeWorkflowDefinition,
+} from '@domain/nodes/kernel/NodeChainBuilder';
+import type { StrategyKind } from '@domain';
 
 export interface StrategyBuildResult {
     strategyKind: StrategyKind;
     headNodeId: string;
+    entryNodeId: string;
     workflow: NodeWorkflowDefinition;
 }
 
 export interface Strategy {
     readonly name: StrategyKind;
-    build(registry: NodeRegistry): StrategyBuildResult;
+    readonly entryNodeId: string;
+    build(): StrategyBuildResult;
 }
 
 export interface StrategyExtensionDefinition {

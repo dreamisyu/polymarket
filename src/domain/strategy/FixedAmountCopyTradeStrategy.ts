@@ -1,17 +1,11 @@
-import type { NodeRegistry } from '../nodes/kernel/NodeRegistry';
-import { FixedAmountSizingNode } from '../nodes/copytrade/SizingNodes';
-import { BaseCopyTradeStrategy } from './BaseCopyTradeStrategy';
-import type { StrategyExtensionDefinition } from './types';
+import { BaseCopyTradeStrategy } from '@domain/strategy/BaseCopyTradeStrategy';
+import type { StrategyExtensionDefinition } from '@domain/strategy/types';
 
-export class FixedAmountCopyTradeStrategy extends BaseCopyTradeStrategy {
+export default class FixedAmountCopyTradeStrategy extends BaseCopyTradeStrategy {
     readonly name = 'fixed_amount' as const;
+    readonly entryNodeId = 'copytrade.fixed_amount.sizing';
 
     constructor(extensions: StrategyExtensionDefinition[] = []) {
         super(extensions);
-    }
-
-    protected registerStrategyNodes(registry: NodeRegistry) {
-        registry.register(new FixedAmountSizingNode());
-        return 'copytrade.fixed_amount.sizing';
     }
 }

@@ -1,5 +1,10 @@
 import mongoose from 'mongoose';
-import type { ExecutionIntent, SnapshotStatus, SourceEventStatus, TradeAction } from '../value-objects/enums';
+import type {
+    ExecutionIntent,
+    SnapshotStatus,
+    SourceEventStatus,
+    TradeAction,
+} from '@domain/value-objects/enums';
 
 export interface SourceTradeEvent {
     _id?: mongoose.Types.ObjectId;

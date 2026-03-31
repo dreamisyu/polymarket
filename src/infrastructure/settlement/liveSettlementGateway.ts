@@ -1,8 +1,8 @@
-import type { RuntimeConfig } from '../../config/runtimeConfig';
-import type { SettlementRedeemRequest, SettlementRedeemResult } from '../../domain';
-import { confirmTransactionHashes } from '../chain/confirm';
-import { submitRedeemPositions } from '../chain/ctf';
-import type { LoggerLike, SettlementGateway } from '../runtime/contracts';
+import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { SettlementRedeemRequest, SettlementRedeemResult } from '@domain';
+import { confirmTransactionHashes } from '@infrastructure/chain/confirm';
+import { submitRedeemPositions } from '@infrastructure/chain/ctf';
+import type { LoggerLike, SettlementGateway } from '@infrastructure/runtime/contracts';
 
 const isBytes32Hex = (value: string) => /^0x[a-fA-F0-9]{64}$/.test(value);
 

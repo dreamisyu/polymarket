@@ -1,4 +1,4 @@
-import type { RuntimeConfig } from '../../config/runtimeConfig';
+import type { RuntimeConfig } from '@config/runtimeConfig';
 import type {
     MergeExecutionRequest,
     PortfolioSnapshot,
@@ -7,10 +7,13 @@ import type {
     TradeExecutionRequest,
     TradeExecutionResult,
 } from '../../domain';
-import { normalizeSize } from '../../utils/math';
-import type { MarketBookFeed } from '../polymarket/marketBookFeed';
-import type { LedgerStore, LoggerLike, TradingGateway } from '../runtime/contracts';
-import { buildConditionPositionSnapshot, buildPortfolioSnapshot } from './shared';
+import { normalizeSize } from '@shared/math';
+import type { MarketBookFeed } from '@infrastructure/polymarket/marketBookFeed';
+import type { LedgerStore, LoggerLike, TradingGateway } from '@infrastructure/runtime/contracts';
+import {
+    buildConditionPositionSnapshot,
+    buildPortfolioSnapshot,
+} from '@infrastructure/trading/shared';
 
 const epsilon = 1e-8;
 

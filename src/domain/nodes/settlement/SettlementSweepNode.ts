@@ -1,13 +1,13 @@
-import type { PositionSnapshot, SettlementTask } from '../..';
-import { buildPortfolioSnapshot } from '../../../infrastructure/trading/shared';
+import type { PositionSnapshot, SettlementTask } from '@domain';
+import { buildPortfolioSnapshot } from '@infrastructure/trading/shared';
 import {
     fetchMarketResolution,
     isResolvedMarket,
     normalizeOutcomeLabel,
 } from '../../../utils/resolution';
-import type { NodeContext } from '../kernel/NodeContext';
-import type { NodeResult } from '../kernel/NodeResult';
-import { BaseNode } from '../kernel/BaseNode';
+import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
+import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
+import { BaseNode } from '@domain/nodes/kernel/BaseNode';
 
 const buildResolvedReason = (winnerOutcome: string) =>
     `市场已 resolved winner=${winnerOutcome || 'unknown'}，已停止未完成跟单并开始结算`;

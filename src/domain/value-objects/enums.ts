@@ -1,7 +1,13 @@
 export type RunMode = 'live' | 'paper';
 export type StrategyKind = 'signal' | 'fixed_amount' | 'proportional';
 export type WorkflowKind = 'monitor' | 'copytrade' | 'settlement';
-export type SourceEventStatus = 'pending' | 'processing' | 'retry' | 'confirmed' | 'skipped' | 'failed';
+export type SourceEventStatus =
+    | 'pending'
+    | 'processing'
+    | 'retry'
+    | 'confirmed'
+    | 'skipped'
+    | 'failed';
 export type WorkflowExecutionStatus =
     | 'ready'
     | 'submitted'

@@ -1,17 +1,11 @@
-import type { NodeRegistry } from '../nodes/kernel/NodeRegistry';
-import { ProportionalSizingNode } from '../nodes/copytrade/SizingNodes';
-import { BaseCopyTradeStrategy } from './BaseCopyTradeStrategy';
-import type { StrategyExtensionDefinition } from './types';
+import { BaseCopyTradeStrategy } from '@domain/strategy/BaseCopyTradeStrategy';
+import type { StrategyExtensionDefinition } from '@domain/strategy/types';
 
-export class ProportionalCopyTradeStrategy extends BaseCopyTradeStrategy {
+export default class ProportionalCopyTradeStrategy extends BaseCopyTradeStrategy {
     readonly name = 'proportional' as const;
+    readonly entryNodeId = 'copytrade.proportional.sizing';
 
     constructor(extensions: StrategyExtensionDefinition[] = []) {
         super(extensions);
-    }
-
-    protected registerStrategyNodes(registry: NodeRegistry) {
-        registry.register(new ProportionalSizingNode());
-        return 'copytrade.proportional.sizing';
     }
 }

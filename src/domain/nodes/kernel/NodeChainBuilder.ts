@@ -1,4 +1,4 @@
-import type { NodeResultStatus } from './NodeResult';
+import type { NodeResultStatus } from '@domain/nodes/kernel/NodeResult';
 
 interface NodeTransitionMap {
     success?: string | null;
@@ -76,10 +76,16 @@ export class NodeChainBuilder {
 
         for (const nodeId of this.nodes) {
             const beforeNodes = this.extensions
-                .filter((extension) => extension.targetNodeId === nodeId && extension.placement === 'before')
+                .filter(
+                    (extension) =>
+                        extension.targetNodeId === nodeId && extension.placement === 'before'
+                )
                 .map((extension) => extension.nodeId);
             const afterNodes = this.extensions
-                .filter((extension) => extension.targetNodeId === nodeId && extension.placement === 'after')
+                .filter(
+                    (extension) =>
+                        extension.targetNodeId === nodeId && extension.placement === 'after'
+                )
                 .map((extension) => extension.nodeId);
 
             result.push(...beforeNodes, nodeId, ...afterNodes);

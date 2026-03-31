@@ -1,7 +1,7 @@
-import type { NodeContext } from '../kernel/NodeContext';
-import type { NodeResult } from '../kernel/NodeResult';
-import type { CopyTradeWorkflowState } from '../../strategy/workflowState';
-import { CopyTradeNode } from './CopyTradeNode';
+import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
+import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
+import type { CopyTradeWorkflowState } from '@domain/strategy/workflowState';
+import { CopyTradeNode } from '@domain/nodes/copytrade/CopyTradeNode';
 
 export class MergePlanningNode extends CopyTradeNode {
     constructor() {
@@ -14,13 +14,19 @@ export class MergePlanningNode extends CopyTradeNode {
             return this.skip('缺少 MERGE 源事件', 'copytrade.persist');
         }
 
-        const sourceMergeRequestedSize = Math.max(Number(event.size) || 0, Number(event.usdcSize) || 0, 0);
+        const sourceMergeRequestedSize = Math.max(
+            Number(event.size) || 0,
+            Number(event.usdcSize) || 0,
+            0
+        );
         const sourceMergeableBefore = Math.max(
             Number(event.sourceConditionMergeableSizeBeforeTrade) || 0,
             (Number(event.sourceConditionMergeableSizeAfterTrade) || 0) + sourceMergeRequestedSize,
             0
         );
-        const conditionPositions = await ctx.runtime.gateways.trading.listConditionPositions(event.conditionId);
+        const conditionPositions = await ctx.runtime.gateways.trading.listConditionPositions(
+            event.conditionId
+        );
         ctx.state.conditionPositions = conditionPositions;
 
         if (sourceMergeRequestedSize <= 0) {
@@ -50,7 +56,11 @@ export class MergePlanningNode extends CopyTradeNode {
                 orderIds: [],
                 transactionHashes: [],
             };
-            return this.retry(ctx.state.executionResult.reason, ctx.runtime.config.retryBackoffMs, 'copytrade.persist');
+            return this.retry(
+                ctx.state.executionResult.reason,
+                ctx.runtime.config.retryBackoffMs,
+                'copytrade.persist'
+            );
         }
 
         if (conditionPositions.positions.length < 2 || conditionPositions.mergeableSize <= 0) {

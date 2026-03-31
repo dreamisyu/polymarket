@@ -1,9 +1,13 @@
-import type { StrategySizingDecision } from '../..';
-import type { NodeContext } from '../kernel/NodeContext';
-import type { NodeResult } from '../kernel/NodeResult';
-import type { CopyTradeWorkflowState } from '../../strategy/workflowState';
-import { computeFixedAmountDecision, computeProportionalDecision, computeSignalDecision } from '../../../utils/strategySizing';
-import { CopyTradeNode } from './CopyTradeNode';
+import type { StrategySizingDecision } from '@domain';
+import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
+import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
+import type { CopyTradeWorkflowState } from '@domain/strategy/workflowState';
+import {
+    computeFixedAmountDecision,
+    computeProportionalDecision,
+    computeSignalDecision,
+} from '@shared/strategySizing';
+import { CopyTradeNode } from '@domain/nodes/copytrade/CopyTradeNode';
 
 abstract class BaseSizingNode extends CopyTradeNode {
     protected abstract evaluate(ctx: NodeContext<CopyTradeWorkflowState>): StrategySizingDecision;
