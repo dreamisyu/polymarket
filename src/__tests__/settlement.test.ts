@@ -11,7 +11,7 @@ import type {
     TradingGateway,
     WorkflowRuntime,
 } from '@infrastructure/runtime/contracts';
-import * as resolutionUtils from '@shared/resolution';
+import * as resolutionUtils from '@infrastructure/polymarket/marketResolution';
 
 const fetchMarketResolutionSpy = jest.spyOn(resolutionUtils, 'fetchMarketResolution');
 const isResolvedMarketSpy = jest.spyOn(resolutionUtils, 'isResolvedMarket');

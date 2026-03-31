@@ -3,11 +3,11 @@ import type {
     PortfolioSnapshot,
     PositionSnapshot,
     SourceTradeEvent,
-    TradeExecutionRequest,
     StrategySizingDecision,
+    TradeExecutionRequest,
     TradeExecutionResult,
-} from '..';
-import type { MarketBookSnapshot } from '@shared/executionPlanning';
+} from '@domain';
+import type { MarketBookSnapshot } from '@domain/trading/executionPlanning';
 
 export interface CopyTradeWorkflowState extends Record<string, unknown> {
     sourceEvent?: SourceTradeEvent | null;

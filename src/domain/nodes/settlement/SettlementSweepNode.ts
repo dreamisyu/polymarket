@@ -1,10 +1,10 @@
 import type { PositionSnapshot, SettlementTask } from '@domain';
+import { normalizeOutcomeLabel } from '@domain/market/outcomeLabel';
 import { buildPortfolioSnapshot } from '@infrastructure/trading/shared';
 import {
     fetchMarketResolution,
     isResolvedMarket,
-    normalizeOutcomeLabel,
-} from '@shared/resolution';
+} from '@infrastructure/polymarket/marketResolution';
 import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
 import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
 import { BaseNode } from '@domain/nodes/kernel/BaseNode';

@@ -15,7 +15,7 @@ import type {
     WorkflowExecutionRecord,
 } from '@domain';
 import type { Logger } from '@shared/logger';
-import type { MarketBookSnapshot } from '@shared/executionPlanning';
+import type { MarketBookSnapshot } from '@domain/trading/executionPlanning';
 export type LoggerLike = Logger;
 
 export type WorkflowConfig = Pick<

@@ -4,9 +4,9 @@ import type {
     PositionSnapshot,
     SourceTradeEvent,
 } from '@domain';
+import { normalizeOutcomeLabel } from '@domain/market/outcomeLabel';
 import type { UserPositionRecord } from '@infrastructure/polymarket/dto';
 import { buildConditionOutcomeKey, computeConditionMergeableSize } from '@shared/conditionMath';
-import { normalizeOutcomeLabel } from '@shared/resolution';
 
 const epsilon = 1e-8;
 

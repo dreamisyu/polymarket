@@ -1,4 +1,4 @@
-import { normalizeOutcomeLabel } from '@shared/resolution';
+import { normalizeOutcomeLabel } from '@domain/market/outcomeLabel';
 import { toSafeNumber } from '@shared/math';
 
 export const buildConditionOutcomeKey = (params: {

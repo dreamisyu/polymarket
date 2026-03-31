@@ -2,7 +2,7 @@ import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
 import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
 import type { CopyTradeWorkflowState } from '@domain/strategy/workflowState';
 import { resolveFixedAmountBundleExecution } from '@domain/strategy/copytradeDispatch';
-import { buildChunkExecutionPlan } from '@shared/executionPlanning';
+import { buildChunkExecutionPlan } from '@domain/trading/executionPlanning';
 import { CopyTradeNode } from '@domain/nodes/copytrade/CopyTradeNode';
 
 export class TradePlanningNode extends CopyTradeNode {

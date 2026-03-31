@@ -1,4 +1,5 @@
 import type { AppConfig } from '@config/appConfig';
+import { normalizeOutcomeLabel } from '@domain/market/outcomeLabel';
 import type { GammaMarketRecord, MarketTokenRecord } from '@infrastructure/polymarket/dto';
 import { fetchJson } from '@infrastructure/http/fetchJson';
 import { toSafeNumber } from '@shared/math';
@@ -63,12 +64,6 @@ const parseArrayLike = (value: unknown) => {
 
     return [] as string[];
 };
-
-export const normalizeOutcomeLabel = (value: string) =>
-    String(value || '')
-        .trim()
-        .toLowerCase()
-        .replace(/\s+/g, ' ');
 
 const buildMarketUrl = (marketSlug: string) =>
     marketSlug ? `https://polymarket.com/event/${marketSlug}/${marketSlug}` : '';
