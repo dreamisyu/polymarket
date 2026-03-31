@@ -1,4 +1,4 @@
-import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
 import type {
     MergeExecutionRequest,
     PortfolioSnapshot,
@@ -34,13 +34,13 @@ const emptyResult = (
 });
 
 export class PaperTradingGateway implements TradingGateway {
-    private readonly config: RuntimeConfig;
+    private readonly config: AppConfig;
     private readonly logger: LoggerLike;
     private readonly ledgerStore: LedgerStore;
     private readonly marketFeed: MarketBookFeed;
 
     constructor(params: {
-        config: RuntimeConfig;
+        config: AppConfig;
         logger: LoggerLike;
         ledgerStore: LedgerStore;
         marketFeed: MarketBookFeed;

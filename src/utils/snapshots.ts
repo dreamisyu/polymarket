@@ -1,4 +1,4 @@
-import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
 import type { SourceActivityRecord, UserPositionRecord } from '@infrastructure/polymarket/dto';
 import { buildConditionOutcomeKey, computeConditionMergeableSize } from '@shared/conditionMath';
 import { normalizeSize, toSafeNumber } from '@shared/math';
@@ -37,7 +37,7 @@ export const buildTradeSnapshots = (
     currentPositions: UserPositionRecord[] | null,
     currentBalance: number | null,
     capturedAt: number,
-    config: Pick<RuntimeConfig, 'snapshotStaleAfterMs'>
+    config: Pick<AppConfig, 'snapshotStaleAfterMs'>
 ) => {
     const snapshots = new Map<string, TradeSnapshotFields>();
     if (!Array.isArray(currentPositions) || !Number.isFinite(currentBalance)) {

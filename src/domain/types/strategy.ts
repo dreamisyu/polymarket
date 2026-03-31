@@ -1,4 +1,4 @@
-import type { StrategyKind, StrategyTicketTier } from '@domain/value-objects/enums';
+import type { StrategyTicketTier } from '@domain/value-objects/enums';
 
 export interface StrategySizingDecision {
     status: 'ready' | 'skip';
@@ -7,9 +7,4 @@ export interface StrategySizingDecision {
     reason: string;
     note?: string;
     ticketTier?: StrategyTicketTier;
-}
-
-export interface StrategyBuildResult {
-    strategyKind: StrategyKind;
-    headNodeId: string;
 }

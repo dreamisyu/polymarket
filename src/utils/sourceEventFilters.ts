@@ -1,4 +1,4 @@
-import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
 import type { SourceTradeEvent } from '@domain';
 import { isTradeWithinMarketWhitelist } from '@shared/marketScope';
 
@@ -11,7 +11,7 @@ export interface SourceEventBuyFilterRejection {
 
 export const resolveSourceEventBuyFilterRejection = (
     event: Pick<SourceTradeEvent, 'action' | 'title' | 'slug' | 'eventSlug' | 'usdcSize'>,
-    config: Pick<RuntimeConfig, 'marketWhitelist' | 'minSourceBuyUsdc'>
+    config: Pick<AppConfig, 'marketWhitelist' | 'minSourceBuyUsdc'>
 ): SourceEventBuyFilterRejection | null => {
     if (event.action !== 'buy') {
         return null;

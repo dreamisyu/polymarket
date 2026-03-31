@@ -1,4 +1,4 @@
 import mongoose from 'mongoose';
-import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
 
-export const connectDatabase = async (config: RuntimeConfig) => mongoose.connect(config.mongoUri);
+export const connectDatabase = async (config: AppConfig) => mongoose.connect(config.mongoUri);

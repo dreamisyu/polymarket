@@ -1,4 +1,4 @@
-import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
 import type { SourceTradeEvent, TradeAction } from '@domain';
 import type { SourceActivityRecord } from '@infrastructure/polymarket/dto';
 import { buildActivityKey } from '@shared/activityKey';
@@ -23,7 +23,7 @@ const normalizeTradeAction = (trade: SourceActivityRecord): TradeAction => {
 
 export const mapSourceActivity = (
     trade: SourceActivityRecord,
-    config: Pick<RuntimeConfig, 'runMode'>
+    config: Pick<AppConfig, 'runMode'>
 ): SourceTradeEvent => ({
     sourceWallet: String(trade.proxyWallet || '').trim(),
     activityKey: String(trade.activityKey || '').trim() || buildActivityKey(trade),

@@ -1,11 +1,11 @@
-import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
 import type { SettlementRedeemRequest, SettlementRedeemResult } from '@domain';
 import type { SettlementGateway } from '@infrastructure/runtime/contracts';
 
 export class PaperSettlementGateway implements SettlementGateway {
-    private readonly config: RuntimeConfig;
+    private readonly config: AppConfig;
 
-    constructor(params: { config: RuntimeConfig }) {
+    constructor(params: { config: AppConfig }) {
         this.config = params.config;
     }
 

@@ -1,5 +1,5 @@
 import { Side, TickSize } from '@polymarket/clob-client';
-import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
 import type { SourceTradeEvent } from '@domain';
 import { toSafeNumber } from '@shared/math';
 
@@ -123,13 +123,13 @@ export const consumeMarketLiquidity = (
 const isAcceptableBuyPrice = (
     askPrice: number,
     sourcePrice: number,
-    config: Pick<RuntimeConfig, 'maxSlippageBps'>
+    config: Pick<AppConfig, 'maxSlippageBps'>
 ) => askPrice <= sourcePrice * (1 + config.maxSlippageBps / 10_000);
 
 const isAcceptableSellPrice = (
     bidPrice: number,
     sourcePrice: number,
-    config: Pick<RuntimeConfig, 'maxSlippageBps'>
+    config: Pick<AppConfig, 'maxSlippageBps'>
 ) => bidPrice >= sourcePrice * (1 - config.maxSlippageBps / 10_000);
 
 const getEffectiveMinOrderSize = (marketSnapshot: MarketBookSnapshot) =>
@@ -138,7 +138,7 @@ const getEffectiveMinOrderSize = (marketSnapshot: MarketBookSnapshot) =>
 export const computeBuyTargetUsdc = (
     trade: SourceTradeEvent,
     availableBalance: number,
-    config: Pick<RuntimeConfig, 'maxOrderUsdc'>
+    config: Pick<AppConfig, 'maxOrderUsdc'>
 ) => {
     const sourceCashBeforeTrade = Number.isFinite(trade.sourceBalanceBeforeTrade)
         ? Math.max(toSafeNumber(trade.sourceBalanceBeforeTrade), 0)
@@ -224,7 +224,7 @@ const collectBuyLiquidity = (
     asks: MarketBookLevel[],
     sourcePrice: number,
     requestedUsdc: number,
-    config: Pick<RuntimeConfig, 'maxSlippageBps'>
+    config: Pick<AppConfig, 'maxSlippageBps'>
 ) => {
     let availableUsdc = 0;
     let executionPrice = 0;
@@ -253,7 +253,7 @@ const collectSellLiquidity = (
     bids: MarketBookLevel[],
     sourcePrice: number,
     requestedSize: number,
-    config: Pick<RuntimeConfig, 'maxSlippageBps'>
+    config: Pick<AppConfig, 'maxSlippageBps'>
 ) => {
     let availableSize = 0;
     let executionPrice = 0;
@@ -284,7 +284,7 @@ export const buildChunkExecutionPlan = (params: {
     sourcePositionAfterTradeSize: number;
     availableBalance: number;
     marketSnapshot: MarketBookSnapshot;
-    config: Pick<RuntimeConfig, 'maxSlippageBps' | 'maxOrderUsdc' | 'buyDustResidualMode'>;
+    config: Pick<AppConfig, 'maxSlippageBps' | 'maxOrderUsdc' | 'buyDustResidualMode'>;
     remainingRequestedUsdc?: number;
     remainingRequestedSize?: number;
     requestedUsdcOverride?: number;

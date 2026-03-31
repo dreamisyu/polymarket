@@ -1,5 +1,5 @@
 import { ClobClient, OrderType } from '@polymarket/clob-client';
-import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
 import type {
     MergeExecutionRequest,
     PortfolioSnapshot,
@@ -128,7 +128,7 @@ interface BackgroundTradePersistence {
 }
 
 export class LiveTradingGateway implements TradingGateway {
-    private readonly config: RuntimeConfig;
+    private readonly config: AppConfig;
     private readonly logger: LoggerLike;
     private readonly clobClient: ClobClient;
     private readonly marketFeed: MarketBookFeed;
@@ -138,7 +138,7 @@ export class LiveTradingGateway implements TradingGateway {
     private lastSubmissionStartedAt = 0;
 
     constructor(params: {
-        config: RuntimeConfig;
+        config: AppConfig;
         logger: LoggerLike;
         clobClient: ClobClient;
         marketFeed: MarketBookFeed;

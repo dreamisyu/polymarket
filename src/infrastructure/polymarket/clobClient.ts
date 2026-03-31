@@ -1,6 +1,6 @@
 import { ApiKeyCreds, Chain, ClobClient, SignatureType } from '@polymarket/clob-client';
 import { Wallet, type TypedDataDomain, type TypedDataField } from 'ethers';
-import type { ClobSignatureType, RuntimeConfig } from '@config/runtimeConfig';
+import type { ClobSignatureType, AppConfig } from '@config/appConfig';
 
 export interface LiveClobSession {
     client: ClobClient;
@@ -36,7 +36,7 @@ const createSigner = (privateKey: string) => {
     };
 };
 
-export const createPublicClobClient = (config: Pick<RuntimeConfig, 'clobHttpUrl'>) =>
+export const createPublicClobClient = (config: Pick<AppConfig, 'clobHttpUrl'>) =>
     new ClobClient(
         config.clobHttpUrl,
         Chain.POLYGON,
@@ -67,7 +67,7 @@ const resolveSignatureType = (signatureType: ClobSignatureType): SignatureType =
 };
 
 export const createLiveClobClient = async (
-    config: Pick<RuntimeConfig, 'clobHttpUrl' | 'proxyWallet' | 'privateKey' | 'clobSignatureType'>
+    config: Pick<AppConfig, 'clobHttpUrl' | 'proxyWallet' | 'privateKey' | 'clobSignatureType'>
 ): Promise<LiveClobSession> => {
     if (!config.privateKey) {
         throw new Error('live 模式缺少 PRIVATE_KEY');

@@ -1,5 +1,5 @@
 import type { OrderBookSummary, Side } from '@polymarket/clob-client';
-import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
 import {
     buildMarketBookSnapshot,
     sortBookLevels,
@@ -77,7 +77,7 @@ export interface MarketBookFeed {
 
 export class PolymarketMarketBookFeed implements MarketBookFeed {
     private readonly config: Pick<
-        RuntimeConfig,
+        AppConfig,
         | 'clobWsUrl'
         | 'marketWsReconnectMs'
         | 'wsHeartbeatMs'
@@ -96,7 +96,7 @@ export class PolymarketMarketBookFeed implements MarketBookFeed {
 
     constructor(params: {
         config: Pick<
-            RuntimeConfig,
+            AppConfig,
             | 'clobWsUrl'
             | 'marketWsReconnectMs'
             | 'wsHeartbeatMs'

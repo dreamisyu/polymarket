@@ -1,4 +1,4 @@
-import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
 import { createRpcProvider } from '@infrastructure/chain/wallet';
 import { sleep } from '@shared/sleep';
 import { withRpcTimeout } from '@infrastructure/chain/rpc';
@@ -6,7 +6,7 @@ import { withRpcTimeout } from '@infrastructure/chain/rpc';
 export const confirmTransactionHashes = async (
     transactionHashes: string[],
     config: Pick<
-        RuntimeConfig,
+        AppConfig,
         | 'rpcUrl'
         | 'orderConfirmationTimeoutMs'
         | 'orderConfirmationPollMs'

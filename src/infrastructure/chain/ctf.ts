@@ -1,6 +1,6 @@
 import { encodeFunctionData, zeroHash } from 'viem';
 import type { Address, Hex } from 'viem';
-import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
 import { createWalletWriter, asAddress } from '@infrastructure/chain/wallet';
 
 const positionTokenDecimals = 6;
@@ -47,7 +47,7 @@ const normalizeAmount = (value: number) =>
 export const submitConditionMerge = async (
     params: { conditionId: string; partition: bigint[]; amount: number },
     config: Pick<
-        RuntimeConfig,
+        AppConfig,
         'privateKey' | 'rpcUrl' | 'ctfContractAddress' | 'usdcContractAddress'
     >
 ) => {
@@ -78,7 +78,7 @@ export const submitConditionMerge = async (
 export const submitRedeemPositions = async (
     params: { conditionId: string; indexSets: bigint[] },
     config: Pick<
-        RuntimeConfig,
+        AppConfig,
         'privateKey' | 'rpcUrl' | 'ctfContractAddress' | 'usdcContractAddress'
     >
 ) => {

@@ -1,5 +1,5 @@
 import type { ApiKeyCreds } from '@polymarket/clob-client';
-import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
 import type { LoggerLike } from '@infrastructure/runtime/contracts';
 
 interface RuntimeWebSocket {
@@ -205,7 +205,7 @@ export class PolymarketUserExecutionFeed implements UserExecutionFeed {
 
     constructor(params: {
         config: Pick<
-            RuntimeConfig,
+            AppConfig,
             'userWsUrl' | 'userWsReconnectMs' | 'wsHeartbeatMs' | 'liveConfirmTimeoutMs'
         >;
         logger: LoggerLike;

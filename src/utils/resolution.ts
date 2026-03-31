@@ -1,4 +1,4 @@
-import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
 import type { GammaMarketRecord, MarketTokenRecord } from '@infrastructure/polymarket/dto';
 import { fetchJson } from '@infrastructure/http/fetchJson';
 import { toSafeNumber } from '@shared/math';
@@ -124,7 +124,7 @@ const deriveResolvedStatus = (params: {
 
 const fetchClobMarketResolution = async (
     conditionId: string,
-    config: Pick<RuntimeConfig, 'clobHttpUrl'>
+    config: Pick<AppConfig, 'clobHttpUrl'>
 ) => {
     const response = await fetchJson<ClobMarketRecord>(
         `${config.clobHttpUrl.replace(/\/+$/, '')}/markets/${conditionId}`
@@ -167,7 +167,7 @@ const fetchClobMarketResolution = async (
 
 const fetchGammaMarketBySlug = async (
     marketSlug: string,
-    config: Pick<RuntimeConfig, 'gammaApiUrl'>
+    config: Pick<AppConfig, 'gammaApiUrl'>
 ) => {
     const bySlug = await fetchJson<GammaMarketRecord | GammaMarketRecord[]>(
         `${config.gammaApiUrl.replace(/\/+$/, '')}/markets/slug/${marketSlug}`
@@ -187,7 +187,7 @@ const fetchGammaMarketBySlug = async (
 
 const fetchGammaMarketResolution = async (
     params: { conditionId?: string; marketSlug?: string; title?: string },
-    config: Pick<RuntimeConfig, 'gammaApiUrl'>
+    config: Pick<AppConfig, 'gammaApiUrl'>
 ) => {
     const marketSlug = String(params.marketSlug || '').trim();
     if (!marketSlug) {
@@ -228,7 +228,7 @@ const fetchGammaMarketResolution = async (
 
 export const fetchMarketResolution = async (
     params: { conditionId?: string; marketSlug?: string; title?: string },
-    config: Pick<RuntimeConfig, 'clobHttpUrl' | 'gammaApiUrl'>
+    config: Pick<AppConfig, 'clobHttpUrl' | 'gammaApiUrl'>
 ) => {
     const cacheKey =
         String(params.conditionId || '').trim() || `slug:${String(params.marketSlug || '').trim()}`;

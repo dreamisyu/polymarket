@@ -1,4 +1,4 @@
-import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
 import type { SourceTradeEvent, StrategySizingDecision } from '@domain';
 import { getAggregatedTradeCount } from '@shared/copytradeDispatch';
 import { computeBuyTargetUsdc, computeSellTargetSize } from '@shared/executionPlanning';
@@ -8,7 +8,7 @@ export const computeProportionalDecision = (
     event: SourceTradeEvent,
     availableBalance: number,
     localPositionSize: number,
-    config: Pick<RuntimeConfig, 'maxOrderUsdc'>
+    config: Pick<AppConfig, 'maxOrderUsdc'>
 ): StrategySizingDecision => {
     if (event.action === 'buy') {
         const result = computeBuyTargetUsdc(event, availableBalance, config);
@@ -58,7 +58,7 @@ export const computeFixedAmountDecision = (
     event: SourceTradeEvent,
     availableBalance: number,
     localPositionSize: number,
-    config: Pick<RuntimeConfig, 'fixedTradeAmountUsdc'>
+    config: Pick<AppConfig, 'fixedTradeAmountUsdc'>
 ): StrategySizingDecision => {
     if (event.action === 'buy') {
         const requestedUsdc = Math.min(
@@ -90,7 +90,7 @@ export const computeSignalDecision = (
     availableBalance: number,
     localPositionSize: number,
     config: Pick<
-        RuntimeConfig,
+        AppConfig,
         | 'signalMarketScope'
         | 'signalWeakThresholdUsdc'
         | 'signalNormalThresholdUsdc'

@@ -1,4 +1,4 @@
-import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
 import type { SourceActivityRecord, UserPositionRecord } from '@infrastructure/polymarket/dto';
 import { fetchJson } from '@infrastructure/http/fetchJson';
 
@@ -17,7 +17,7 @@ export interface OrderBookRecord {
 export const fetchSourceActivities = async (
     params: { start: number; end: number; limit: number },
     wallet: string,
-    config: Pick<RuntimeConfig, 'dataApiUrl'>
+    config: Pick<AppConfig, 'dataApiUrl'>
 ) => {
     const search = new URLSearchParams({
         user: wallet,
@@ -34,7 +34,7 @@ export const fetchSourceActivities = async (
 
 export const fetchUserPositions = async (
     wallet: string,
-    config: Pick<RuntimeConfig, 'dataApiUrl'>
+    config: Pick<AppConfig, 'dataApiUrl'>
 ) =>
     fetchJson<UserPositionRecord[]>(
         `${config.dataApiUrl.replace(/\/+$/, '')}/positions?user=${encodeURIComponent(wallet)}&sizeThreshold=0`

@@ -1,4 +1,4 @@
-import type { SourceTradeEvent } from '@domain/model/sourceTradeEvent';
+import type { SourceTradeEvent } from '@domain/types/sourceTradeEvent';
 
 export interface CopyTradeDispatchItem {
     dispatchId: string;

@@ -6,7 +6,7 @@ import type {
     TradeAction,
     WorkflowExecutionStatus,
 } from '../value-objects/enums';
-import type { SourceTradeEvent } from '@domain/model/sourceTradeEvent';
+import type { SourceTradeEvent } from '@domain/types/sourceTradeEvent';
 
 export interface TradeExecutionRequest {
     sourceEvent: SourceTradeEvent;

@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
 import type {
     PortfolioSnapshot,
     PositionSnapshot,
@@ -538,7 +538,7 @@ class MongoSettlementTaskStore implements SettlementTaskStore {
     }
 }
 
-export const createStores = (config: RuntimeConfig) => ({
+export const createStores = (config: AppConfig) => ({
     sourceEvents: new MongoSourceEventStore(config.scopeKey),
     executions: new MongoExecutionStore(config.scopeKey),
     ledger: config.runMode === 'paper' ? new MongoLedgerStore(config.scopeKey) : undefined,

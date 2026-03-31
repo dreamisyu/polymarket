@@ -1,5 +1,5 @@
 import type { Model } from 'mongoose';
-import type { RuntimeConfig } from '@config/runtimeConfig';
+import type { AppConfig } from '@config/appConfig';
 import type { MonitorSyncResult, SourceTradeEvent } from '@domain';
 import { mapSourceActivity } from '@infrastructure/polymarket/mappers/sourceActivityMapper';
 import { fetchSourceActivities, fetchUserPositions } from '@infrastructure/polymarket/api';
@@ -66,11 +66,11 @@ const dedupeByActivityKey = (trades: SourceActivityRecord[]) => {
 };
 
 export class PolymarketMonitorGateway implements MonitorGateway {
-    private readonly config: RuntimeConfig;
+    private readonly config: AppConfig;
     private readonly logger: LoggerLike;
     private readonly Cursor: Model<MonitorCursorState>;
 
-    constructor(params: { config: RuntimeConfig; logger: LoggerLike }) {
+    constructor(params: { config: AppConfig; logger: LoggerLike }) {
         this.config = params.config;
         this.logger = params.logger;
         this.Cursor = getMonitorCursorModel(params.config.scopeKey);
