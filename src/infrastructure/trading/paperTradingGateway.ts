@@ -6,7 +6,7 @@ import type {
     SourceTradeEvent,
     TradeExecutionRequest,
     TradeExecutionResult,
-} from '../../domain';
+} from '@domain';
 import { normalizeSize } from '@shared/math';
 import type { MarketBookFeed } from '@infrastructure/polymarket/marketBookFeed';
 import type { LedgerStore, LoggerLike, TradingGateway } from '@infrastructure/runtime/contracts';

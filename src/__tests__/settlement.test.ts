@@ -5,18 +5,20 @@ import { SettlementSweepNode } from '@domain/nodes/settlement/SettlementSweepNod
 import { buildTestConfig } from '@/__tests__/testFactories';
 import type {
     LedgerStore,
-    Runtime,
     SettlementGateway,
     SettlementTaskStore,
     SourceEventStore,
     TradingGateway,
+    WorkflowRuntime,
 } from '@infrastructure/runtime/contracts';
 import * as resolutionUtils from '@shared/resolution';
 
 const fetchMarketResolutionSpy = jest.spyOn(resolutionUtils, 'fetchMarketResolution');
 const isResolvedMarketSpy = jest.spyOn(resolutionUtils, 'isResolvedMarket');
 
-const buildConfig = (overrides: Partial<Runtime['config']> = {}): Runtime['config'] =>
+const buildConfig = (
+    overrides: Partial<WorkflowRuntime['config']> = {}
+): WorkflowRuntime['config'] =>
     buildTestConfig({
         settlementMaxTasksPerRun: 3,
         autoRedeemEnabled: true,
@@ -116,14 +118,14 @@ const createSettlementGateway = (
 
 const buildRuntime = (
     params: {
-        config?: Partial<Runtime['config']>;
+        config?: Partial<WorkflowRuntime['config']>;
         sourceEvents?: Partial<SourceEventStore>;
         settlementTasks?: Partial<SettlementTaskStore>;
         ledger?: Partial<LedgerStore>;
         trading?: Partial<TradingGateway>;
         settlement?: Partial<SettlementGateway>;
     } = {}
-): Runtime => {
+): WorkflowRuntime => {
     const config = buildConfig(params.config);
     const sourceEvents = createSourceEventStore(params.sourceEvents);
     const settlementTasks = createSettlementTaskStore(params.settlementTasks);
@@ -138,7 +140,6 @@ const buildRuntime = (
             warn: jest.fn(),
             error: jest.fn(),
         } as never,
-        workflowEngine: {} as never,
         stores: {
             sourceEvents,
             executions: {
@@ -152,10 +153,10 @@ const buildRuntime = (
             trading,
             settlement,
         },
-    } as Runtime;
+    } as WorkflowRuntime;
 };
 
-const buildContext = (runtime: Runtime): NodeContext => ({
+const buildContext = (runtime: WorkflowRuntime): NodeContext => ({
     workflowId: 'settlement:test',
     workflowKind: 'settlement',
     runMode: runtime.config.runMode,

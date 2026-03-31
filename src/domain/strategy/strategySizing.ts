@@ -1,8 +1,8 @@
 import type { AppConfig } from '@config/appConfig';
 import type { SourceTradeEvent, StrategySizingDecision } from '@domain';
-import { getAggregatedTradeCount } from '@shared/copytradeDispatch';
+import { getAggregatedTradeCount } from '@domain/strategy/copytradeDispatch';
 import { computeBuyTargetUsdc, computeSellTargetSize } from '@shared/executionPlanning';
-import { isTradeWithinSignalMarketScope } from '@shared/marketScope';
+import { isTradeWithinSignalMarketScope } from '@domain/market/marketScope';
 
 export const computeProportionalDecision = (
     event: SourceTradeEvent,

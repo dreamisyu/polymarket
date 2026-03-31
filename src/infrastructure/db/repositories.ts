@@ -6,20 +6,20 @@ import type {
     SettlementTask,
     SourceTradeEvent,
     WorkflowExecutionRecord,
-} from '../../domain';
+} from '@domain';
 import type {
     ExecutionStore,
     LedgerStore,
     SettlementTaskStore,
     SourceEventStore,
-} from '../runtime/contracts';
+} from '@infrastructure/runtime/contracts';
 import {
     getExecutionModel,
     getPortfolioModel,
     getPositionModel,
     getSettlementTaskModel,
     getSourceEventModel,
-} from './models';
+} from '@infrastructure/db/models';
 
 const dedupeEvents = (events: SourceTradeEvent[]) => {
     const eventMap = new Map<string, SourceTradeEvent>();

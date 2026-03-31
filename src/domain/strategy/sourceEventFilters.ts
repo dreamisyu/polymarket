@@ -1,6 +1,6 @@
 import type { AppConfig } from '@config/appConfig';
 import type { SourceTradeEvent } from '@domain';
-import { isTradeWithinMarketWhitelist } from '@shared/marketScope';
+import { isTradeWithinMarketWhitelist } from '@domain/market/marketScope';
 
 export type SourceEventBuyFilterCode = 'market_whitelist' | 'min_source_buy_usdc';
 

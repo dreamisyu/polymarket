@@ -18,6 +18,37 @@ import type { Logger } from '@shared/logger';
 import type { MarketBookSnapshot } from '@shared/executionPlanning';
 export type LoggerLike = Logger;
 
+export type WorkflowConfig = Pick<
+    AppConfig,
+    | 'runMode'
+    | 'strategyKind'
+    | 'activitySyncLimit'
+    | 'activityAdjacentMergeWindowMs'
+    | 'copytradeProcessingLeaseMs'
+    | 'retryBackoffMs'
+    | 'maxRetryCount'
+    | 'settlementIntervalMs'
+    | 'settlementMaxTasksPerRun'
+    | 'fixedTradeAmountUsdc'
+    | 'maxOpenPositions'
+    | 'maxActiveExposureUsdc'
+    | 'maxSignalAgeMs'
+    | 'marketWhitelist'
+    | 'minSourceBuyUsdc'
+    | 'signalMarketScope'
+    | 'signalWeakThresholdUsdc'
+    | 'signalNormalThresholdUsdc'
+    | 'signalStrongThresholdUsdc'
+    | 'signalWeakTicketUsdc'
+    | 'signalNormalTicketUsdc'
+    | 'signalStrongTicketUsdc'
+    | 'liveSettlementOnchainRedeemEnabled'
+    | 'autoRedeemEnabled'
+    | 'maxSlippageBps'
+    | 'maxOrderUsdc'
+    | 'buyDustResidualMode'
+>;
+
 export interface SourceEventStore {
     upsertMany(events: SourceTradeEvent[]): Promise<SourceTradeEvent[]>;
     claimDueRetries(
@@ -97,10 +128,13 @@ export interface RuntimeGateways {
     settlement: SettlementGateway;
 }
 
-export interface Runtime {
-    config: AppConfig;
+export interface WorkflowRuntime {
+    config: WorkflowConfig;
     logger: LoggerLike;
-    workflowEngine: NodeWorkflowEngine;
     stores: RuntimeStores;
     gateways: RuntimeGateways;
+}
+
+export interface ApplicationRuntime extends WorkflowRuntime {
+    workflowEngine: NodeWorkflowEngine;
 }

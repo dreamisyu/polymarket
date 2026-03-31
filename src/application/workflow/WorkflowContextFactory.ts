@@ -2,10 +2,10 @@ import type { CopyTradeDispatchItem } from '@domain';
 import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
 import type { MonitorWorkflowState } from '@domain/nodes/monitor/workflowState';
 import type { CopyTradeWorkflowState } from '@domain/strategy/workflowState';
-import type { Runtime } from '@infrastructure/runtime/contracts';
+import type { WorkflowRuntime } from '@infrastructure/runtime/contracts';
 
 export default class WorkflowContextFactory {
-    constructor(private readonly deps: { runtime: Runtime }) {}
+    constructor(private readonly deps: { workflowRuntime: WorkflowRuntime }) {}
 
     createMonitorContext(): NodeContext<MonitorWorkflowState> {
         return this.buildContext('monitor', {} as MonitorWorkflowState);
@@ -32,7 +32,7 @@ export default class WorkflowContextFactory {
                 policyTrail: [],
             },
             {
-                workflowId: `copytrade:${this.deps.runtime.config.strategyKind}:${dispatchItem.dispatchId}`,
+                workflowId: `copytrade:${this.deps.workflowRuntime.config.strategyKind}:${dispatchItem.dispatchId}`,
                 parentWorkflowId: parentCtx.workflowId,
                 dispatchReason: dispatchItem.aggregated
                     ? 'monitor-bundle-dispatch'
@@ -54,15 +54,18 @@ export default class WorkflowContextFactory {
     ): NodeContext<TState> {
         return {
             workflowId:
-                options.workflowId || `${workflowKind}:${this.deps.runtime.config.strategyKind}`,
+                options.workflowId ||
+                `${workflowKind}:${this.deps.workflowRuntime.config.strategyKind}`,
             workflowKind,
-            runMode: this.deps.runtime.config.runMode,
+            runMode: this.deps.workflowRuntime.config.runMode,
             strategyKind:
-                workflowKind === 'copytrade' ? this.deps.runtime.config.strategyKind : undefined,
+                workflowKind === 'copytrade'
+                    ? this.deps.workflowRuntime.config.strategyKind
+                    : undefined,
             parentWorkflowId: options.parentWorkflowId,
             dispatchReason: options.dispatchReason,
             dispatchId: options.dispatchId,
-            runtime: this.deps.runtime,
+            runtime: this.deps.workflowRuntime,
             state,
             startedAt: Date.now(),
             now: () => Date.now(),

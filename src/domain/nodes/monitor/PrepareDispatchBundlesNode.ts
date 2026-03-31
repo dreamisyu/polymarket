@@ -1,7 +1,7 @@
 import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
 import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
 import type { MonitorWorkflowState } from '@domain/nodes/monitor/workflowState';
-import { buildCopyTradeDispatchItems } from '@shared/copytradeDispatch';
+import { buildCopyTradeDispatchItems } from '@domain/strategy/copytradeDispatch';
 import { MonitorNode } from '@domain/nodes/monitor/MonitorNode';
 
 export class PrepareDispatchBundlesNode extends MonitorNode<MonitorWorkflowState> {

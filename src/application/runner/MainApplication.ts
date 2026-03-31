@@ -3,7 +3,7 @@ import DatabaseBootstrap from '@application/database/DatabaseBootstrap';
 import { createLoopWorker } from '@application/worker/createLoopWorker';
 import WorkflowCatalog from '@application/workflow/WorkflowCatalog';
 import WorkflowContextFactory from '@application/workflow/WorkflowContextFactory';
-import type { Runtime } from '@infrastructure/runtime/contracts';
+import type { ApplicationRuntime } from '@infrastructure/runtime/contracts';
 import type { Logger } from '@shared/logger';
 
 const startWorker = (logger: Logger, name: string, run: () => Promise<void>) => {
@@ -19,7 +19,7 @@ export default class MainApplication {
             appConfig: AppConfig;
             appLogger: Logger;
             databaseBootstrap: DatabaseBootstrap;
-            runtime: Runtime;
+            applicationRuntime: ApplicationRuntime;
             workflowCatalog: WorkflowCatalog;
             workflowContextFactory: WorkflowContextFactory;
         }
@@ -28,7 +28,7 @@ export default class MainApplication {
     async start() {
         await this.deps.databaseBootstrap.connect();
 
-        this.deps.runtime.logger.info(
+        this.deps.applicationRuntime.logger.info(
             `启动完成 mode=${this.deps.appConfig.runMode} strategy=${this.deps.appConfig.strategyKind} self=${this.deps.appConfig.sourceWallet} follow=${this.deps.appConfig.targetWallet}`
         );
 
@@ -36,9 +36,9 @@ export default class MainApplication {
             createLoopWorker({
                 name: '监控分发工作流',
                 intervalMs: this.deps.appConfig.monitorIntervalMs,
-                logger: this.deps.runtime.logger,
+                logger: this.deps.applicationRuntime.logger,
                 runOnce: async () => {
-                    await this.deps.runtime.workflowEngine.run(
+                    await this.deps.applicationRuntime.workflowEngine.run(
                         this.deps.workflowContextFactory.createMonitorContext(),
                         this.deps.workflowCatalog.monitor
                     );
@@ -47,9 +47,9 @@ export default class MainApplication {
             createLoopWorker({
                 name: '结算工作流',
                 intervalMs: this.deps.appConfig.settlementIntervalMs,
-                logger: this.deps.runtime.logger,
+                logger: this.deps.applicationRuntime.logger,
                 runOnce: async () => {
-                    await this.deps.runtime.workflowEngine.run(
+                    await this.deps.applicationRuntime.workflowEngine.run(
                         this.deps.workflowContextFactory.createSettlementContext(),
                         this.deps.workflowCatalog.settlement
                     );

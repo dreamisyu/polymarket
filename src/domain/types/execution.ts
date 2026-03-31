@@ -5,7 +5,7 @@ import type {
     StrategyKind,
     TradeAction,
     WorkflowExecutionStatus,
-} from '../value-objects/enums';
+} from '@domain/value-objects/enums';
 import type { SourceTradeEvent } from '@domain/types/sourceTradeEvent';
 
 export interface TradeExecutionRequest {

@@ -7,8 +7,10 @@
 - `src/application` 负责 worker、workflow 编排、启动流程与应用级服务，不直接承担底层协议细节。
 - `src/config` 负责 `.env` 读取、Zod 校验、配置归一化；业务代码禁止直接读取 `process.env`。
 - `src/domain` 负责领域模型、共享类型、工作流节点协议、策略定义与纯业务规则；共享结构统一放 `src/domain/types`，不要恢复 `model` 这类泛化命名。
+- `src/domain/market` 负责市场范围、窗口、标签等纯领域规则，避免继续堆在 `utils` 根目录。
 - `src/infrastructure` 负责数据库、链上、Polymarket API、网关与外部系统适配。
-- `src/utils` 仅保留无状态、可复用、跨模块的纯工具函数；禁止继续新增模糊 `helpers` / `wrapper` / `shared` 式目录。
+- `src/application/workflow` 负责派发组装、执行持久化计划等工作流编排逻辑。
+- `src/utils` 仅保留无状态、可复用、跨模块的纯工具函数；带业务语义的逻辑必须回收到 `domain`、`application` 或 `infrastructure`。
 - `scripts/` 存放审计与汇总脚本，`docs/` 存放运行说明和配置文档，`.env-example` 用作配置模板。
 
 ## 构建、测试与开发命令
@@ -29,6 +31,7 @@
 - 禁止在测试中散写超大配置字面量；优先复用 `src/__tests__/testFactories.ts`。
 - 路径导入统一使用路径别名。
 - 禁止为过渡方便重新引入 `AppConfig`、领域共享类型或策略结果对象的镜像别名文件。
+- 禁止把派发、风控、市场范围、快照、执行持久化这类业务逻辑继续堆回 `src/utils` 根目录。
 
 ## 命名规范
 
@@ -47,7 +50,8 @@
 
 - 配置类型以 `AppConfig` 为唯一事实源；历史别名只能作为过渡，不得继续扩散。
 - 领域共享类型只能保留一份事实源；同名类型不得在 `domain/types`、`domain/strategy`、`infrastructure/dto` 之间重复声明。
-- `Runtime` 只保留运行所需的最小共享依赖集合，禁止继续无限膨胀。
+- 节点上下文只允许依赖 `WorkflowRuntime`；只有应用启动层才允许依赖 `ApplicationRuntime`。
+- `Runtime` 风格的大对象禁止重新回流到节点和测试夹具中；新增依赖优先加到更窄的 runtime 接口或专用 port。
 - 优先使用 `Pick` / `Partial` / 专用接口表达依赖最小面，避免把整份大对象传遍全链路。
 - 新增字段时，必须同步更新配置 schema、测试工厂和相关 mock。
 - DTO、领域模型、数据库模型要分清用途；能复用同一语义模型时不再额外包一层 wrapper。

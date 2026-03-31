@@ -7,7 +7,7 @@ import type {
     SourceTradeEvent,
     TradeExecutionRequest,
     TradeExecutionResult,
-} from '../../domain';
+} from '@domain';
 import { confirmTransactionHashes } from '@infrastructure/chain/confirm';
 import { submitConditionMerge } from '@infrastructure/chain/ctf';
 import { getUsdcBalance } from '@infrastructure/chain/wallet';
@@ -16,22 +16,22 @@ import type { MarketBookFeed } from '@infrastructure/polymarket/marketBookFeed';
 import type {
     UserExecutionConfirmationResult,
     UserExecutionFeed,
-} from '../polymarket/userExecutionFeed';
+} from '@infrastructure/polymarket/userExecutionFeed';
 import type {
     ExecutionStore,
     LoggerLike,
     SettlementTaskStore,
     SourceEventStore,
     TradingGateway,
-} from '../runtime/contracts';
+} from '@infrastructure/runtime/contracts';
 import {
     buildConditionPositionSnapshot,
     buildPortfolioSnapshot,
     findMatchingPosition,
     mapUserPosition,
-} from './shared';
+} from '@infrastructure/trading/shared';
 import { sleep } from '@shared/sleep';
-import { buildExecutionRecord, buildPersistencePlans } from '@shared/executionPersistence';
+import { buildExecutionRecord, buildPersistencePlans } from '@application/workflow/executionPersistence';
 
 const emptyResult = (
     reason: string,

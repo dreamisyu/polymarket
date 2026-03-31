@@ -6,8 +6,8 @@ import type {
     WorkflowExecutionRecord,
     WorkflowExecutionStatus,
     SourceTradeEvent,
-} from '../domain';
-import { countFixedAmountTrades, isAggregatedBuyBundle } from '@shared/copytradeDispatch';
+} from '@domain';
+import { countFixedAmountTrades, isAggregatedBuyBundle } from '@domain/strategy/copytradeDispatch';
 import { computeRetryDelayMs } from '@shared/retry';
 
 export interface EventPersistencePlan {

@@ -44,7 +44,12 @@ import {
 } from '@infrastructure/polymarket/clobClient';
 import { PolymarketMarketBookFeed } from '@infrastructure/polymarket/marketBookFeed';
 import { PolymarketUserExecutionFeed } from '@infrastructure/polymarket/userExecutionFeed';
-import type { Runtime, RuntimeGateways, RuntimeStores } from '@infrastructure/runtime/contracts';
+import type {
+    ApplicationRuntime,
+    RuntimeGateways,
+    RuntimeStores,
+    WorkflowRuntime,
+} from '@infrastructure/runtime/contracts';
 import { LiveSettlementGateway } from '@infrastructure/settlement/liveSettlementGateway';
 import { PaperSettlementGateway } from '@infrastructure/settlement/paperSettlementGateway';
 import { LiveTradingGateway } from '@infrastructure/trading/liveTradingGateway';
@@ -231,15 +236,21 @@ export const createApplicationContext = async (): Promise<ApplicationContext> =>
                     detachedConcurrency: appConfig.copytradeDispatchConcurrency,
                 })
         ).singleton(),
-        runtime: asFunction(
-            ({ runtimeLogger, workflowEngine }) =>
+        workflowRuntime: asFunction(
+            ({ runtimeLogger }) =>
                 ({
                     config: appConfig,
                     logger: runtimeLogger,
-                    workflowEngine,
                     stores: runtimeServices.stores,
                     gateways: runtimeServices.gateways,
-                }) satisfies Runtime
+                }) satisfies WorkflowRuntime
+        ).singleton(),
+        applicationRuntime: asFunction(
+            ({ workflowRuntime, workflowEngine }) =>
+                ({
+                    ...workflowRuntime,
+                    workflowEngine,
+                }) satisfies ApplicationRuntime
         ).singleton(),
         workflowContextFactory: asClass(WorkflowContextFactory).singleton(),
         mainApplication: asClass(MainApplication).singleton(),

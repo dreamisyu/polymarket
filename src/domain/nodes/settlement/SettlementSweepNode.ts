@@ -4,7 +4,7 @@ import {
     fetchMarketResolution,
     isResolvedMarket,
     normalizeOutcomeLabel,
-} from '../../../utils/resolution';
+} from '@shared/resolution';
 import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
 import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
 import { BaseNode } from '@domain/nodes/kernel/BaseNode';

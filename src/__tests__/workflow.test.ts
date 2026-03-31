@@ -8,8 +8,9 @@ import { NodeWorkflowEngine } from '@domain/nodes/kernel/NodeWorkflowEngine';
 import { RiskGuardNode } from '@domain/nodes/copytrade/RiskGuardNode';
 import { DispatchCopyTradeNode } from '@domain/nodes/monitor/DispatchCopyTradeNode';
 import { PrepareDispatchBundlesNode } from '@domain/nodes/monitor/PrepareDispatchBundlesNode';
-import { buildCopyTradeDispatchItems } from '@shared/copytradeDispatch';
 import { buildTestConfig } from '@/__tests__/testFactories';
+import { buildCopyTradeDispatchItems } from '@domain/strategy/copytradeDispatch';
+import type { WorkflowRuntime } from '@infrastructure/runtime/contracts';
 
 class TestNode extends BaseNode {
     private readonly handler: (ctx: NodeContext) => Promise<NodeResult>;
@@ -40,7 +41,6 @@ const buildTestContext = (): NodeContext => ({
             warn: jest.fn(),
             error: jest.fn(),
         } as never,
-        workflowEngine: {} as never,
         stores: {
             sourceEvents: {} as never,
             executions: {} as never,
@@ -51,7 +51,7 @@ const buildTestContext = (): NodeContext => ({
             trading: {} as never,
             settlement: {} as never,
         },
-    },
+    } satisfies WorkflowRuntime,
     state: {},
     startedAt: Date.now(),
     now: () => Date.now(),

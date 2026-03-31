@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@jest/globals';
-import { isMarketWindowClosed, resolveRepetitiveMarketWindow } from '@shared/marketWindow';
+import { isMarketWindowClosed, resolveRepetitiveMarketWindow } from '@domain/market/marketWindow';
 
 describe('marketWindow', () => {
     it('能从 repetitive updown eventSlug 解析开始与结束时间', () => {

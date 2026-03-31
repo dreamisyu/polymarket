@@ -5,7 +5,7 @@ import {
     sortBookLevels,
     type MarketBookLevel,
     type MarketBookSnapshot,
-} from '../../utils/executionPlanning';
+} from '@shared/executionPlanning';
 import type { LoggerLike } from '@infrastructure/runtime/contracts';
 
 interface RuntimeWebSocket {

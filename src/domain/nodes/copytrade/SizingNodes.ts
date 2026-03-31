@@ -6,7 +6,7 @@ import {
     computeFixedAmountDecision,
     computeProportionalDecision,
     computeSignalDecision,
-} from '@shared/strategySizing';
+} from '@domain/strategy/strategySizing';
 import { CopyTradeNode } from '@domain/nodes/copytrade/CopyTradeNode';
 
 abstract class BaseSizingNode extends CopyTradeNode {
