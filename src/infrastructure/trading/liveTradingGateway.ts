@@ -31,7 +31,7 @@ import {
     mapUserPosition,
 } from '@infrastructure/trading/shared';
 import { sleep } from '@shared/sleep';
-import { buildExecutionRecord, buildPersistencePlans } from '@application/workflow/executionPersistence';
+import { buildExecutionRecord, buildPersistencePlans } from '@application/workflow/ExecutionPersistence';
 
 const emptyResult = (
     reason: string,

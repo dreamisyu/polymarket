@@ -1,6 +1,6 @@
 import type { AppConfig } from '@config/appConfig';
 import DatabaseBootstrap from '@application/database/DatabaseBootstrap';
-import { createLoopWorker } from '@application/worker/createLoopWorker';
+import { createLoopWorker } from '@application/worker/CreateLoopWorker';
 import WorkflowCatalog from '@application/workflow/WorkflowCatalog';
 import WorkflowContextFactory from '@application/workflow/WorkflowContextFactory';
 import type { ApplicationRuntime } from '@infrastructure/runtime/contracts';

@@ -4,7 +4,7 @@ import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
 import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
 import type { CopyTradeWorkflowState } from '@domain/strategy/workflowState';
 import { CopyTradeNode } from '@domain/nodes/copytrade/CopyTradeNode';
-import { buildExecutionRecord, buildPersistencePlans } from '@application/workflow/executionPersistence';
+import { buildExecutionRecord, buildPersistencePlans } from '@application/workflow/ExecutionPersistence';
 
 const emptyExecutionResult = {
     status: 'skipped' as const,

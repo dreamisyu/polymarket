@@ -1,5 +1,5 @@
 import { describe, expect, it, jest } from '@jest/globals';
-import { createLoopWorker } from '@application/worker/createLoopWorker';
+import { createLoopWorker } from '@application/worker/CreateLoopWorker';
 
 jest.mock('@shared/sleep', () => ({
     __esModule: true,
