@@ -367,9 +367,33 @@ describe('LiveTradingGateway submission pacing', () => {
             executionPrice: 0.5,
             side: 'BUY' as never,
             tickSize: '0.01' as never,
-            metadata: {
-                bundlePlannedCount: 3,
-                bundleExecutedCount: 2,
+            persistenceContext: {
+                bundle: {
+                    items: [
+                        {
+                            activityKey: 'bundle-buy-1',
+                            requestedUsdc: 1.2,
+                            requestedSize: 2.4,
+                            submittedUsdc: 1.2,
+                            submittedSize: 2.4,
+                        },
+                        {
+                            activityKey: 'bundle-buy-2',
+                            requestedUsdc: 1.2,
+                            requestedSize: 2.4,
+                            submittedUsdc: 1.2,
+                            submittedSize: 2.4,
+                        },
+                        {
+                            activityKey: 'bundle-buy-3',
+                            requestedUsdc: 1.2,
+                            requestedSize: 2.4,
+                            submittedUsdc: 0,
+                            submittedSize: 0,
+                            deferredReason: '聚合买单仅部分成交，剩余批次稍后重试',
+                        },
+                    ],
+                },
             },
         });
 
@@ -381,9 +405,33 @@ describe('LiveTradingGateway submission pacing', () => {
         expect(result.status).toBe('confirmed');
         expect(result.requestedUsdc).toBeCloseTo(3.6, 6);
         expect(result.executedUsdc).toBeCloseTo(2.4, 6);
-        expect(result.metadata).toEqual({
-            bundlePlannedCount: 3,
-            bundleExecutedCount: 2,
+        expect(result.persistenceContext).toEqual({
+            bundle: {
+                items: [
+                    {
+                        activityKey: 'bundle-buy-1',
+                        requestedUsdc: 1.2,
+                        requestedSize: 2.4,
+                        submittedUsdc: 1.2,
+                        submittedSize: 2.4,
+                    },
+                    {
+                        activityKey: 'bundle-buy-2',
+                        requestedUsdc: 1.2,
+                        requestedSize: 2.4,
+                        submittedUsdc: 1.2,
+                        submittedSize: 2.4,
+                    },
+                    {
+                        activityKey: 'bundle-buy-3',
+                        requestedUsdc: 1.2,
+                        requestedSize: 2.4,
+                        submittedUsdc: 0,
+                        submittedSize: 0,
+                        deferredReason: '聚合买单仅部分成交，剩余批次稍后重试',
+                    },
+                ],
+            },
         });
     });
 

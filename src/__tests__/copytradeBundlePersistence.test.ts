@@ -1,5 +1,5 @@
 import { describe, expect, it, jest } from '@jest/globals';
-import type { SourceTradeEvent } from '@domain';
+import type { BundlePersistenceItem, SourceTradeEvent } from '@domain';
 import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
 import { PersistExecutionNode } from '@domain/nodes/copytrade/PersistExecutionNode';
 import { buildTestConfig } from '@/__tests__/testFactories';
@@ -53,6 +53,7 @@ const buildContext = (overrides: Partial<NodeContext> = {}) =>
                 sourceEvents: {
                     upsertMany: jest.fn(),
                     claimDueRetries: jest.fn(),
+                    markProcessing: jest.fn(async () => undefined),
                     markConfirmed: jest.fn(async () => undefined),
                     markSkipped: jest.fn(async () => undefined),
                     markRetry: jest.fn(async () => undefined),
@@ -81,6 +82,12 @@ const buildContext = (overrides: Partial<NodeContext> = {}) =>
         now: () => Date.now(),
         ...overrides,
     }) as unknown as NodeContext;
+
+const buildBundleItems = (items: BundlePersistenceItem[]) => ({
+    bundle: {
+        items,
+    },
+});
 
 describe('PersistExecutionNode', () => {
     it('聚合买单部分成交时会拆分 confirmed 与 retry', async () => {
@@ -117,10 +124,32 @@ describe('PersistExecutionNode', () => {
                     orderIds: ['order-1'],
                     transactionHashes: ['tx-1'],
                     confirmedAt: Date.now(),
-                    metadata: {
-                        bundlePlannedCount: 3,
-                        bundleExecutedCount: 2,
-                    },
+                    persistenceContext: buildBundleItems([
+                        {
+                            activityKey: event1.activityKey,
+                            requestedUsdc: 1.2,
+                            requestedSize: 1.2 / 0.54,
+                            submittedUsdc: 1.2,
+                            submittedSize: 1.2 / 0.54,
+                            deferredReason: '聚合买单仅部分成交，剩余批次稍后重试',
+                        },
+                        {
+                            activityKey: event2.activityKey,
+                            requestedUsdc: 1.2,
+                            requestedSize: 1.2 / 0.54,
+                            submittedUsdc: 1.2,
+                            submittedSize: 1.2 / 0.54,
+                            deferredReason: '聚合买单仅部分成交，剩余批次稍后重试',
+                        },
+                        {
+                            activityKey: event3.activityKey,
+                            requestedUsdc: 1.2,
+                            requestedSize: 1.2 / 0.54,
+                            submittedUsdc: 0,
+                            submittedSize: 0,
+                            deferredReason: '聚合买单仅部分成交，剩余批次稍后重试',
+                        },
+                    ]),
                 },
                 policyTrail: ['bundle:adjacent_buy'],
             },
@@ -178,5 +207,76 @@ describe('PersistExecutionNode', () => {
                 }
             ).status
         ).toBe('failed');
+    });
+
+    it('默认持久化规划器支持非 fixed_amount 的 bundle 明细拆分', async () => {
+        const event1 = buildEvent('signal-01');
+        const event2 = buildEvent('signal-02');
+        const ctx = buildContext({
+            workflowId: 'copytrade:signal:bundle-1',
+            strategyKind: 'signal',
+            runtime: {
+                ...(buildContext().runtime as NodeContext['runtime']),
+                config: buildTestConfig({
+                    strategyKind: 'signal',
+                    maxRetryCount: 2,
+                    autoRedeemEnabled: false,
+                    autoRedeemMaxConditionsPerRun: 1,
+                }),
+            },
+            state: {
+                sourceEvent: {
+                    ...event1,
+                    _id: undefined,
+                    activityKey: 'bundle:signal:1',
+                },
+                sourceEvents: [event1, event2],
+                executionResult: {
+                    status: 'submitted',
+                    reason: '订单已提交，等待后台确认',
+                    requestedUsdc: 8,
+                    requestedSize: 16,
+                    executedUsdc: 0,
+                    executedSize: 0,
+                    executionPrice: 0.5,
+                    orderIds: ['order-1'],
+                    transactionHashes: ['tx-1'],
+                    persistenceContext: buildBundleItems([
+                        {
+                            activityKey: event1.activityKey,
+                            requestedUsdc: 5,
+                            requestedSize: 10,
+                            submittedUsdc: 5,
+                            submittedSize: 10,
+                        },
+                        {
+                            activityKey: event2.activityKey,
+                            requestedUsdc: 3,
+                            requestedSize: 6,
+                            submittedUsdc: 0,
+                            submittedSize: 0,
+                            deferredReason: '等待下一轮信号补单',
+                        },
+                    ]),
+                },
+            },
+        });
+
+        const node = new PersistExecutionNode();
+        const result = await node.doAction(ctx as never);
+
+        expect(result.status).toBe('success');
+        const savedStatuses = (ctx.runtime.stores.executions.save as jest.Mock).mock.calls.map(
+            (call) => (call[0] as { status: string }).status
+        );
+        expect(savedStatuses).toEqual(['submitted', 'retry']);
+        expect(ctx.runtime.stores.sourceEvents.markProcessing).toHaveBeenCalledTimes(1);
+        expect(ctx.runtime.stores.sourceEvents.markRetry).toHaveBeenCalledTimes(1);
+        expect(ctx.runtime.stores.sourceEvents.markRetry).toHaveBeenLastCalledWith(
+            String(event2._id),
+            '等待下一轮信号补单',
+            expect.any(Number),
+            1000
+        );
     });
 });

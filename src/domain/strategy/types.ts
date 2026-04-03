@@ -2,19 +2,19 @@ import type {
     NodeChainBuilder,
     NodeWorkflowDefinition,
 } from '@domain/nodes/kernel/NodeChainBuilder';
-import type { StrategyKind } from '@domain';
+import type { ExecutionPersistencePlanner } from '@domain/strategy/executionPersistence';
+import type { StrategyKind, TradeAction } from '@domain/value-objects/enums';
 
 export interface StrategyBuildResult {
     strategyKind: StrategyKind;
-    headNodeId: string;
-    entryNodeId: string;
     workflow: NodeWorkflowDefinition;
 }
 
 export interface Strategy {
     readonly name: StrategyKind;
-    readonly entryNodeId: string;
-    build(): StrategyBuildResult;
+    readonly persistencePlanner: ExecutionPersistencePlanner;
+    buildWorkflow(): NodeWorkflowDefinition;
+    resolveActionNode(action: TradeAction): string | null;
 }
 
 export interface StrategyExtensionDefinition {
@@ -36,3 +36,8 @@ export const applyStrategyExtensions = (
         builder.after(extension.targetNodeId, extension.nodeId);
     }
 };
+
+export const buildStrategyResult = (strategy: Strategy): StrategyBuildResult => ({
+    strategyKind: strategy.name,
+    workflow: strategy.buildWorkflow(),
+});

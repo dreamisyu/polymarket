@@ -8,6 +8,22 @@ import type {
 } from '@domain/value-objects/enums';
 import type { SourceTradeEvent } from '@domain/types/sourceTradeEvent';
 
+export interface BundlePersistenceItem {
+    activityKey?: string;
+    requestedUsdc: number;
+    requestedSize: number;
+    submittedUsdc?: number;
+    submittedSize?: number;
+    deferredReason?: string;
+}
+
+export interface TradeExecutionPersistenceContext {
+    bundle?: {
+        items: BundlePersistenceItem[];
+    };
+    [key: string]: unknown;
+}
+
 export interface TradeExecutionRequest {
     sourceEvent: SourceTradeEvent;
     sourceEvents?: SourceTradeEvent[];
@@ -21,7 +37,7 @@ export interface TradeExecutionRequest {
     note?: string;
     workflowId?: string;
     policyTrail?: string[];
-    metadata?: Record<string, unknown>;
+    persistenceContext?: TradeExecutionPersistenceContext;
 }
 
 export interface MergeExecutionRequest {
@@ -43,7 +59,7 @@ export interface TradeExecutionResult {
     matchedAt?: number;
     minedAt?: number;
     confirmedAt?: number;
-    metadata?: Record<string, unknown>;
+    persistenceContext?: TradeExecutionPersistenceContext;
 }
 
 export interface WorkflowExecutionRecord {

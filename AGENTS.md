@@ -10,7 +10,7 @@
 - `src/infrastructure` 负责数据库、链上、Polymarket API、网关与外部系统适配。
 - `src/application/workflow` 负责派发组装、执行持久化计划等工作流编排逻辑。
 - `src/utils` 仅保留无状态、可复用、跨模块的纯工具函数；带业务语义的逻辑必须回收到 `domain`、`application` 或 `infrastructure`。
-- `scripts/` 存放审计与汇总脚本，`docs/` 存放运行说明和配置文档，`.env-example` 用作配置模板。
+- `scripts/` 存放审计与汇总脚本，`.env-example` 用作配置模板。
 
 ## 构建、测试与开发命令
 
@@ -25,25 +25,19 @@
 
 - 禁止在业务代码或基础设施模块中直接使用 `process.env`。
 - 禁止在非装配层手工 `new` 跨模块依赖；依赖统一通过 Awilix 容器或显式工厂注入。
-- 禁止继续新增 `createXxx/createYyy` 式多层胶水入口来替代容器注册。
-- 禁止把“策略选择”“节点注册”“工作流定义”混在一个类里。
 - 禁止在测试中散写超大配置字面量；优先复用 `src/__tests__/testFactories.ts`。
 - 路径导入统一使用路径别名。
-- 禁止为过渡方便重新引入 `AppConfig`、领域共享类型或策略结果对象的镜像别名文件。
-- 禁止把派发、风控、市场范围、快照、执行持久化这类业务逻辑继续堆回 `src/utils` 根目录。
-- 禁止把盘口规划、resolved 市场查询、Gamma/CLOB 结果归并这类逻辑继续放进 `src/utils`。
 
 ## 命名规范
 
 - 容器入口统一使用 `ApplicationContext`、`*Registry`、`*Catalog`、`*Factory`、`*Bootstrap` 这类职责明确命名。
-- 策略实现类保留 `*CopyTradeStrategy` 命名，且只描述策略，不负责节点实例化。
+- 策略实现类保留 `*CopyTradeStrategy` 命名。
 - worker、workflow、gateway、store 名称必须体现职责边界，避免 `service` 泛化。
 - 布尔配置使用肯定式命名，如 `autoRedeemEnabled`、`liveSettlementOnchainRedeemEnabled`。
 
 ## 推荐依赖选择原则
 
-- 先选成熟库解决基础设施问题：DI 用 `awilix`，配置校验用 `zod`，env 读取用 `dotenv`。
-- 只有当库不能覆盖需求，且手写逻辑足够短、边界足够清晰时，才允许自己实现。
+- 先选成熟库解决基础设施问题，只有当库不能覆盖需求，且手写逻辑足够短、边界足够清晰时，才允许自己实现。
 - 引库必须服务于收敛：减少胶水、减少重复、减少状态分散，而不是制造新抽象层。
 
 ## 类型治理原则

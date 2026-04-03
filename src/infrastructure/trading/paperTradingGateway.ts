@@ -111,7 +111,7 @@ export class PaperTradingGateway implements TradingGateway {
             orderIds: [],
             transactionHashes: [],
             confirmedAt: Date.now(),
-            metadata: request.metadata,
+            persistenceContext: request.persistenceContext,
         };
     }
 

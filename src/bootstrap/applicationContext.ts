@@ -14,6 +14,7 @@ import WorkflowContextFactory from '@application/workflow/WorkflowContextFactory
 import { loadAppConfig } from '@config/appConfig';
 import { ActionRouterNode } from '@domain/nodes/copytrade/ActionRouterNode';
 import { ExecuteTradeNode } from '@domain/nodes/copytrade/ExecuteTradeNode';
+import { FixedAmountTradePlanningNode } from '@domain/nodes/copytrade/FixedAmountTradePlanningNode';
 import { LoadTradingContextNode } from '@domain/nodes/copytrade/LoadTradingContextNode';
 import { MergeExecuteNode } from '@domain/nodes/copytrade/MergeExecuteNode';
 import { MergePlanningNode } from '@domain/nodes/copytrade/MergePlanningNode';
@@ -33,9 +34,6 @@ import { FetchMonitorEventsNode } from '@domain/nodes/monitor/FetchMonitorEvents
 import { PersistMonitorEventsNode } from '@domain/nodes/monitor/PersistMonitorEventsNode';
 import { PrepareDispatchBundlesNode } from '@domain/nodes/monitor/PrepareDispatchBundlesNode';
 import { SettlementSweepNode } from '@domain/nodes/settlement/SettlementSweepNode';
-import FixedAmountCopyTradeStrategy from '@domain/strategy/FixedAmountCopyTradeStrategy';
-import ProportionalCopyTradeStrategy from '@domain/strategy/ProportionalCopyTradeStrategy';
-import SignalCopyTradeStrategy from '@domain/strategy/SignalCopyTradeStrategy';
 import { createStores } from '@infrastructure/db/repositories';
 import { PolymarketMonitorGateway } from '@infrastructure/monitor/polymarketMonitorGateway';
 import {
@@ -142,6 +140,7 @@ const registerNodeModules = (container: AwilixContainer) => {
     container.register({
         actionRouterNode: asClass(ActionRouterNode).singleton(),
         executeTradeNode: asClass(ExecuteTradeNode).singleton(),
+        fixedAmountTradePlanningNode: asClass(FixedAmountTradePlanningNode).singleton(),
         loadTradingContextNode: asClass(LoadTradingContextNode).singleton(),
         mergeExecuteNode: asClass(MergeExecuteNode).singleton(),
         mergePlanningNode: asClass(MergePlanningNode).singleton(),
@@ -174,6 +173,7 @@ const createNodeRegistry = (container: AwilixContainer) => {
     const nodeNames = [
         'actionRouterNode',
         'executeTradeNode',
+        'fixedAmountTradePlanningNode',
         'loadTradingContextNode',
         'mergeExecuteNode',
         'mergePlanningNode',
@@ -218,9 +218,6 @@ export const createApplicationContext = async (): Promise<ApplicationContext> =>
         monitorGateway: asValue(runtimeServices.gateways.monitor),
         tradingGateway: asValue(runtimeServices.gateways.trading),
         settlementGateway: asValue(runtimeServices.gateways.settlement),
-        fixedAmountCopyTradeStrategy: asClass(FixedAmountCopyTradeStrategy).singleton(),
-        proportionalCopyTradeStrategy: asClass(ProportionalCopyTradeStrategy).singleton(),
-        signalCopyTradeStrategy: asClass(SignalCopyTradeStrategy).singleton(),
         databaseBootstrap: asClass(DatabaseBootstrap).singleton(),
         strategyRegistry: asClass(StrategyRegistry).singleton(),
         workflowCatalog: asClass(WorkflowCatalog).singleton(),

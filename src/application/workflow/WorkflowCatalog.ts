@@ -2,7 +2,7 @@ import {
     NodeChainBuilder,
     type NodeWorkflowDefinition,
 } from '@domain/nodes/kernel/NodeChainBuilder';
-import type { StrategyBuildResult } from '@domain/strategy/types';
+import { buildStrategyResult, type StrategyBuildResult } from '@domain/strategy/types';
 import StrategyRegistry from '@application/workflow/StrategyRegistry';
 
 export default class WorkflowCatalog {
@@ -11,7 +11,7 @@ export default class WorkflowCatalog {
     readonly settlement: NodeWorkflowDefinition;
 
     constructor(private readonly deps: { strategyRegistry: StrategyRegistry }) {
-        this.strategy = deps.strategyRegistry.activeStrategy.build();
+        this.strategy = buildStrategyResult(deps.strategyRegistry.activeStrategy);
         this.monitor = new NodeChainBuilder()
             .append('monitor.fetch')
             .append('monitor.persist')

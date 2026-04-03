@@ -1,11 +1,26 @@
-import { BaseCopyTradeStrategy } from '@domain/strategy/BaseCopyTradeStrategy';
-import type { StrategyExtensionDefinition } from '@domain/strategy/types';
+import { defaultExecutionPersistencePlanner } from '@domain/strategy/executionPersistence';
+import type { Strategy } from '@domain/strategy/types';
+import { buildStandardCopyTradeWorkflow } from '@domain/strategy/workflowBuilder';
 
-export default class SignalCopyTradeStrategy extends BaseCopyTradeStrategy {
-    readonly name = 'signal' as const;
-    readonly entryNodeId = 'copytrade.signal.sizing';
+const tradeEntryNodeId = 'copytrade.signal.sizing';
 
-    constructor(extensions: StrategyExtensionDefinition[] = []) {
-        super(extensions);
-    }
-}
+const signalCopyTradeStrategy: Strategy = {
+    name: 'signal',
+    persistencePlanner: defaultExecutionPersistencePlanner,
+    buildWorkflow: () => buildStandardCopyTradeWorkflow({ tradeEntryNodeId }),
+    resolveActionNode(action) {
+        if (action === 'buy' || action === 'sell') {
+            return tradeEntryNodeId;
+        }
+        if (action === 'merge') {
+            return 'copytrade.merge.plan';
+        }
+        if (action === 'redeem') {
+            return 'copytrade.redeem.forward';
+        }
+
+        return null;
+    },
+};
+
+export default signalCopyTradeStrategy;

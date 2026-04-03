@@ -1,10 +1,10 @@
-import mongoose from 'mongoose';
 import type { SourceTradeEvent } from '@domain';
 import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
 import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
+import { resolveCopyTradeStrategy } from '@domain/strategy/catalog';
 import type { CopyTradeWorkflowState } from '@domain/strategy/workflowState';
 import { CopyTradeNode } from '@domain/nodes/copytrade/CopyTradeNode';
-import { buildExecutionRecord, buildPersistencePlans } from '@application/workflow/ExecutionPersistence';
+import { buildExecutionRecord } from '@domain/strategy/executionPersistence';
 
 const emptyExecutionResult = {
     status: 'skipped' as const,
@@ -130,9 +130,8 @@ export class PersistExecutionNode extends CopyTradeNode {
         sourceEvents: SourceTradeEvent[],
         result: NonNullable<CopyTradeWorkflowState['executionResult']>
     ) {
-        return buildPersistencePlans({
-            strategyKind: ctx.runtime.config.strategyKind,
-            fixedTradeAmountUsdc: ctx.runtime.config.fixedTradeAmountUsdc,
+        const strategy = resolveCopyTradeStrategy(ctx.strategyKind || ctx.runtime.config.strategyKind);
+        return strategy.persistencePlanner.buildPlans({
             retryBackoffMs: ctx.runtime.config.retryBackoffMs,
             maxRetryCount: ctx.runtime.config.maxRetryCount,
             sourceEvent: ctx.state.sourceEvent,

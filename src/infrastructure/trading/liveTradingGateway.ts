@@ -30,8 +30,9 @@ import {
     findMatchingPosition,
     mapUserPosition,
 } from '@infrastructure/trading/shared';
+import { resolveCopyTradeStrategy } from '@domain/strategy/catalog';
+import { buildExecutionRecord } from '@domain/strategy/executionPersistence';
 import { sleep } from '@shared/sleep';
-import { buildExecutionRecord, buildPersistencePlans } from '@application/workflow/ExecutionPersistence';
 
 const emptyResult = (
     reason: string,
@@ -84,7 +85,7 @@ const buildConfirmedResult = (
         matchedAt: statusUpdate.matchedAt,
         minedAt: statusUpdate.minedAt,
         confirmedAt,
-        metadata: request.metadata,
+        persistenceContext: request.persistenceContext,
     };
 };
 
@@ -102,7 +103,7 @@ const buildSubmittedResult = (
     executionPrice: request.executionPrice,
     orderIds,
     transactionHashes,
-    metadata: request.metadata,
+    persistenceContext: request.persistenceContext,
 });
 
 const buildFailureResult = (
@@ -118,7 +119,7 @@ const buildFailureResult = (
     reason,
     orderIds,
     transactionHashes,
-    metadata: request.metadata,
+    persistenceContext: request.persistenceContext,
 });
 
 interface BackgroundTradePersistence {
@@ -301,9 +302,8 @@ export class LiveTradingGateway implements TradingGateway {
             String(request.workflowId || '').trim() ||
             `copytrade:${this.config.strategyKind}:${request.sourceEvent.activityKey}`;
         const policyTrail = request.policyTrail || [];
-        const plans = buildPersistencePlans({
-            strategyKind: this.config.strategyKind,
-            fixedTradeAmountUsdc: this.config.fixedTradeAmountUsdc,
+        const strategy = resolveCopyTradeStrategy(this.config.strategyKind);
+        const plans = strategy.persistencePlanner.buildPlans({
             retryBackoffMs: this.config.retryBackoffMs,
             maxRetryCount: this.config.maxRetryCount,
             sourceEvent: request.sourceEvent,
