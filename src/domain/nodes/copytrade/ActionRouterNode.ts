@@ -36,11 +36,17 @@ export class ActionRouterNode extends CopyTradeNode {
 
         const action = ctx.state.sourceEvent?.action;
         const strategy = resolveCopyTradeStrategy(ctx.strategyKind || ctx.runtime.config.strategyKind);
-        if (action) {
-            const next = strategy.resolveActionNode(action);
-            if (next) {
-                return { next };
-            }
+        if (action === 'buy') {
+            return { next: strategy.resolveBuyNode() };
+        }
+        if (action === 'sell') {
+            return { next: strategy.resolveSellNode() };
+        }
+        if (action === 'merge') {
+            return { next: strategy.resolveMergeNode() };
+        }
+        if (action === 'redeem') {
+            return { next: strategy.resolveRedeemNode() };
         }
 
         ctx.state.executionResult = {

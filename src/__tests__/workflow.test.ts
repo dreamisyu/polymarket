@@ -5,9 +5,11 @@ import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
 import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
 import { NodeRegistry } from '@domain/nodes/kernel/NodeRegistry';
 import { NodeWorkflowEngine } from '@domain/nodes/kernel/NodeWorkflowEngine';
+import { ActionRouterNode } from '@domain/nodes/copytrade/ActionRouterNode';
 import { RiskGuardNode } from '@domain/nodes/copytrade/RiskGuardNode';
 import { DispatchCopyTradeNode } from '@domain/nodes/monitor/DispatchCopyTradeNode';
 import { PrepareDispatchBundlesNode } from '@domain/nodes/monitor/PrepareDispatchBundlesNode';
+import { resolveCopyTradeStrategy } from '@domain/strategy/catalog';
 import { buildTestConfig } from '@/__tests__/testFactories';
 import { buildCopyTradeDispatchItems } from '@domain/strategy/copytradeDispatch';
 import type { WorkflowRuntime } from '@infrastructure/runtime/contracts';
@@ -70,6 +72,64 @@ describe('NodeChainBuilder', () => {
         expect(workflow.transitions.get('a')?.success).toBe('before-b');
         expect(workflow.transitions.get('before-b')?.success).toBe('b');
         expect(workflow.transitions.get('b')?.success).toBe('after-b');
+    });
+});
+
+describe('copytrade strategies', () => {
+    it('mirror 策略直接复用默认兜底工作流', () => {
+        const strategy = resolveCopyTradeStrategy('mirror');
+        const workflow = strategy.buildWorkflow();
+
+        expect(strategy.resolveBuyNode()).toBe('copytrade.mirror.sizing');
+        expect(strategy.resolveSellNode()).toBe('copytrade.mirror.sizing');
+        expect(strategy.resolveMergeNode()).toBe('copytrade.merge.plan');
+        expect(strategy.resolveRedeemNode()).toBe('copytrade.redeem.forward');
+        expect(workflow.transitions.get('copytrade.action-router')?.success).toBe(
+            'copytrade.mirror.sizing'
+        );
+    });
+
+    it('proportional 策略为 merge 动作编排专属节点', () => {
+        const strategy = resolveCopyTradeStrategy('proportional');
+        const workflow = strategy.buildWorkflow();
+
+        expect(strategy.resolveBuyNode()).toBe('copytrade.proportional.sizing');
+        expect(strategy.resolveSellNode()).toBe('copytrade.proportional.sizing');
+        expect(strategy.resolveMergeNode()).toBe('copytrade.proportional.merge.plan');
+        expect(strategy.resolveRedeemNode()).toBe('copytrade.redeem.forward');
+        expect(workflow.transitions.get('copytrade.proportional.merge.plan')?.success).toBe(
+            'copytrade.merge.execute'
+        );
+        expect(workflow.transitions.get('copytrade.proportional.merge.plan')?.skip).toBe(
+            'copytrade.persist'
+        );
+    });
+});
+
+describe('ActionRouterNode', () => {
+    it('按策略的分动作节点方法决定下一跳', async () => {
+        const node = new ActionRouterNode();
+        const ctx = {
+            ...buildTestContext(),
+            strategyKind: 'proportional',
+            runtime: {
+                ...buildTestContext().runtime,
+                config: {
+                    ...buildTestContext().runtime.config,
+                    strategyKind: 'proportional',
+                },
+            },
+            state: {
+                sourceEvent: {
+                    action: 'merge',
+                },
+            },
+        } as unknown as NodeContext;
+
+        const result = await node.doAction(ctx);
+        const route = await node.route(ctx, result);
+
+        expect(route.next).toBe('copytrade.proportional.merge.plan');
     });
 });
 

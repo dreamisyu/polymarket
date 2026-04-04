@@ -2,6 +2,7 @@ import { describe, expect, it, jest } from '@jest/globals';
 import type { SourceTradeEvent } from '@domain';
 import type { NodeContext } from '@domain/nodes/kernel/NodeContext';
 import { MergePlanningNode } from '@domain/nodes/copytrade/MergePlanningNode';
+import { ProportionalMergePlanningNode } from '@domain/nodes/copytrade/ProportionalMergePlanningNode';
 import {
     computeMirrorDecision,
     computeProportionalDecision,
@@ -146,8 +147,8 @@ describe('MergePlanningNode', () => {
         expect(ctx.state.policyTrail).toContain('merge:mirror');
     });
 
-    it('proportional 策略按配置比例缩放 merge 数量', async () => {
-        const node = new MergePlanningNode();
+    it('proportional 策略使用专属 merge 规划节点按配置比例缩放数量', async () => {
+        const node = new ProportionalMergePlanningNode();
         const ctx = buildMergeContext('proportional');
 
         const result = await node.doAction(ctx);

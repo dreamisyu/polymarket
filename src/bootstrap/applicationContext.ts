@@ -19,6 +19,7 @@ import { LoadTradingContextNode } from '@domain/nodes/copytrade/LoadTradingConte
 import { MergeExecuteNode } from '@domain/nodes/copytrade/MergeExecuteNode';
 import { MergePlanningNode } from '@domain/nodes/copytrade/MergePlanningNode';
 import { PersistExecutionNode } from '@domain/nodes/copytrade/PersistExecutionNode';
+import { ProportionalMergePlanningNode } from '@domain/nodes/copytrade/ProportionalMergePlanningNode';
 import { RedeemForwardNode } from '@domain/nodes/copytrade/RedeemForwardNode';
 import { RiskGuardNode } from '@domain/nodes/copytrade/RiskGuardNode';
 import {
@@ -146,6 +147,7 @@ const registerNodeModules = (container: AwilixContainer) => {
         mergeExecuteNode: asClass(MergeExecuteNode).singleton(),
         mergePlanningNode: asClass(MergePlanningNode).singleton(),
         persistExecutionNode: asClass(PersistExecutionNode).singleton(),
+        proportionalMergePlanningNode: asClass(ProportionalMergePlanningNode).singleton(),
         redeemForwardNode: asClass(RedeemForwardNode).singleton(),
         riskGuardNode: asClass(RiskGuardNode).singleton(),
         tradePlanningNode: asClass(TradePlanningNode).singleton(),
@@ -180,6 +182,7 @@ const createNodeRegistry = (container: AwilixContainer) => {
         'mergeExecuteNode',
         'mergePlanningNode',
         'persistExecutionNode',
+        'proportionalMergePlanningNode',
         'redeemForwardNode',
         'riskGuardNode',
         'tradePlanningNode',

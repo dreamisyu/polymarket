@@ -1,21 +1,12 @@
 import { NodeChainBuilder, type NodeWorkflowDefinition } from '@domain/nodes/kernel/NodeChainBuilder';
-import {
-    applyStrategyExtensions,
-    type StrategyExtensionDefinition,
-} from '@domain/strategy/types';
 
-export const buildStandardCopyTradeWorkflow = (options: {
-    tradeEntryNodeId: string;
-    tradePlanningNodeId?: string;
-    extensions?: StrategyExtensionDefinition[];
-}): NodeWorkflowDefinition => {
-    const tradePlanningNodeId = options.tradePlanningNodeId || 'copytrade.trade.plan';
+export const buildStandardCopyTradeWorkflow = (): NodeWorkflowDefinition => {
     const builder = new NodeChainBuilder()
         .append('copytrade.context')
         .append('copytrade.action-router')
-        .append(options.tradeEntryNodeId)
+        .append('copytrade.mirror.sizing')
         .append('copytrade.risk')
-        .append(tradePlanningNodeId)
+        .append('copytrade.trade.plan')
         .append('copytrade.trade.execute')
         .append('copytrade.merge.plan')
         .append('copytrade.merge.execute')
@@ -27,12 +18,12 @@ export const buildStandardCopyTradeWorkflow = (options: {
     builder.setTransition('copytrade.trade.execute', 'skip', 'copytrade.persist');
     builder.setTransition('copytrade.trade.execute', 'retry', 'copytrade.persist');
     builder.setTransition('copytrade.trade.execute', 'fail', 'copytrade.persist');
-    builder.setTransition(tradePlanningNodeId, 'success', 'copytrade.trade.execute');
-    builder.setTransition(tradePlanningNodeId, 'skip', 'copytrade.persist');
-    builder.setTransition(tradePlanningNodeId, 'retry', 'copytrade.persist');
-    builder.setTransition(tradePlanningNodeId, 'fail', 'copytrade.persist');
+    builder.setTransition('copytrade.trade.plan', 'success', 'copytrade.trade.execute');
+    builder.setTransition('copytrade.trade.plan', 'skip', 'copytrade.persist');
+    builder.setTransition('copytrade.trade.plan', 'retry', 'copytrade.persist');
+    builder.setTransition('copytrade.trade.plan', 'fail', 'copytrade.persist');
     builder.setTransition('copytrade.risk', 'skip', 'copytrade.persist');
-    builder.setTransition(options.tradeEntryNodeId, 'skip', 'copytrade.persist');
+    builder.setTransition('copytrade.mirror.sizing', 'skip', 'copytrade.persist');
     builder.setTransition('copytrade.merge.plan', 'success', 'copytrade.merge.execute');
     builder.setTransition('copytrade.merge.plan', 'skip', 'copytrade.persist');
     builder.setTransition('copytrade.merge.plan', 'retry', 'copytrade.persist');
@@ -45,7 +36,6 @@ export const buildStandardCopyTradeWorkflow = (options: {
     builder.setTransition('copytrade.redeem.forward', 'skip', 'copytrade.persist');
     builder.setTransition('copytrade.redeem.forward', 'retry', 'copytrade.persist');
     builder.setTransition('copytrade.redeem.forward', 'fail', 'copytrade.persist');
-    applyStrategyExtensions(builder, options.extensions || []);
 
     return builder.build();
 };
