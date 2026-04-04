@@ -30,6 +30,7 @@ export interface AppConfig {
     settlementIntervalMs: number;
     settlementMaxTasksPerRun: number;
     fixedTradeAmountUsdc: number;
+    proportionalCopyRatio: number;
     maxOpenPositions: number;
     maxActiveExposureUsdc: number;
     maxSignalAgeMs: number;
@@ -125,6 +126,24 @@ const positiveNumberWithDefault = (field: string, fallback: number) =>
             return parsed;
         });
 
+const optionalPositiveNumber = (field: string) =>
+    z
+        .string()
+        .optional()
+        .transform((value) => {
+            const normalized = String(value || '').trim();
+            if (!normalized) {
+                return undefined;
+            }
+
+            const parsed = parseNumber(normalized, field);
+            if (parsed <= 0) {
+                throw new Error(`${field} 必须是正数`);
+            }
+
+            return parsed;
+        });
+
 const nonNegativeNumberWithDefault = (field: string, fallback: number) =>
     z
         .string()
@@ -185,7 +204,9 @@ const envSchema = z
         LOG_LEVEL: stringWithDefault('info'),
         LOG_FILE_PATH: optionalTrimmedString,
         RUN_MODE: z.enum(['live', 'paper']).default('paper'),
-        STRATEGY_KIND: z.enum(['signal', 'fixed_amount', 'proportional']).default('fixed_amount'),
+        STRATEGY_KIND: z
+            .enum(['signal', 'fixed_amount', 'mirror', 'proportional'])
+            .default('fixed_amount'),
         SOURCE_WALLET: z.string().trim().min(1, 'SOURCE_WALLET 未配置'),
         TARGET_WALLET: z.string().trim().min(1, 'TARGET_WALLET 未配置'),
         MONGO_URI: z.string().trim().min(1, 'MONGO_URI 未配置'),
@@ -214,6 +235,7 @@ const envSchema = z
         SETTLEMENT_INTERVAL_MS: positiveNumberWithDefault('SETTLEMENT_INTERVAL_MS', 30_000),
         SETTLEMENT_MAX_TASKS_PER_RUN: positiveNumberWithDefault('SETTLEMENT_MAX_TASKS_PER_RUN', 8),
         FIXED_TRADE_USDC: positiveNumberWithDefault('FIXED_TRADE_USDC', 20),
+        PROPORTIONAL_COPY_RATIO: optionalPositiveNumber('PROPORTIONAL_COPY_RATIO'),
         MAX_OPEN_POSITIONS: positiveNumberWithDefault('MAX_OPEN_POSITIONS', 20),
         MAX_ACTIVE_EXPOSURE_USDC: positiveNumberWithDefault('MAX_ACTIVE_EXPOSURE_USDC', 1_000),
         MAX_SIGNAL_AGE_MS: nonNegativeNumberWithDefault('MAX_SIGNAL_AGE_MS', 15_000),
@@ -291,6 +313,14 @@ const envSchema = z
                 message: '代理签名模式缺少 PROXY_WALLET',
             });
         }
+
+        if (value.STRATEGY_KIND === 'proportional' && value.PROPORTIONAL_COPY_RATIO === undefined) {
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ['PROPORTIONAL_COPY_RATIO'],
+                message: 'proportional 策略缺少 PROPORTIONAL_COPY_RATIO',
+            });
+        }
     });
 
 let cachedConfig: AppConfig | null = null;
@@ -327,6 +357,7 @@ export const loadAppConfig = (): AppConfig => {
         settlementIntervalMs: parsed.SETTLEMENT_INTERVAL_MS,
         settlementMaxTasksPerRun: parsed.SETTLEMENT_MAX_TASKS_PER_RUN,
         fixedTradeAmountUsdc: parsed.FIXED_TRADE_USDC,
+        proportionalCopyRatio: parsed.PROPORTIONAL_COPY_RATIO || 1,
         maxOpenPositions: parsed.MAX_OPEN_POSITIONS,
         maxActiveExposureUsdc: parsed.MAX_ACTIVE_EXPOSURE_USDC,
         maxSignalAgeMs: parsed.MAX_SIGNAL_AGE_MS,

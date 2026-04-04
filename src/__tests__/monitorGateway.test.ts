@@ -47,7 +47,7 @@ const { getMonitorCursorModel } = jest.requireMock('../infrastructure/db/models'
 };
 
 const buildConfig = (
-    strategyKind: 'fixed_amount' | 'proportional' | 'signal' = 'fixed_amount'
+    strategyKind: 'fixed_amount' | 'mirror' | 'proportional' | 'signal' = 'fixed_amount'
 ) => ({
     runMode: 'live',
     strategyKind,
@@ -59,6 +59,7 @@ const buildConfig = (
     snapshotStaleAfterMs: 60_000,
     marketWhitelist: [],
     minSourceBuyUsdc: 0,
+    proportionalCopyRatio: 0.5,
     dataApiUrl: 'https://data-api.polymarket.com',
     rpcUrl: 'https://polygon.drpc.org',
     usdcContractAddress: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
@@ -191,7 +192,19 @@ describe('PolymarketMonitorGateway', () => {
         expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining('filteredByMinBuy=1'));
     });
 
-    it('proportional 策略在目标钱包余额读取失败时仍会抛错', async () => {
+    it('mirror 策略在目标钱包余额读取失败时仍会抛错', async () => {
+        getUsdcBalance.mockRejectedValueOnce(new Error('rpc down'));
+
+        const gateway = new PolymarketMonitorGateway({
+            config: buildConfig('mirror') as never,
+            logger: logger as never,
+        });
+
+        await expect(gateway.syncOnce()).rejects.toThrow('rpc down');
+        expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it('proportional 策略在目标钱包余额读取失败时会降级为 PARTIAL 快照', async () => {
         getUsdcBalance.mockRejectedValueOnce(new Error('rpc down'));
 
         const gateway = new PolymarketMonitorGateway({
@@ -199,7 +212,10 @@ describe('PolymarketMonitorGateway', () => {
             logger: logger as never,
         });
 
-        await expect(gateway.syncOnce()).rejects.toThrow('rpc down');
-        expect(logger.warn).not.toHaveBeenCalled();
+        const result = await gateway.syncOnce();
+
+        expect(result.events).toHaveLength(1);
+        expect(result.events[0]?.snapshotStatus).toBe('PARTIAL');
+        expect(logger.warn).toHaveBeenCalled();
     });
 });

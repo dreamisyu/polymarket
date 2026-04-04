@@ -30,6 +30,7 @@ export const buildTestConfig = (overrides: Partial<AppConfig> = {}): AppConfig =
         settlementIntervalMs: 1000,
         settlementMaxTasksPerRun: 8,
         fixedTradeAmountUsdc: 1,
+        proportionalCopyRatio: 1,
         maxOpenPositions: 4,
         maxActiveExposureUsdc: 10,
         maxSignalAgeMs: 15_000,

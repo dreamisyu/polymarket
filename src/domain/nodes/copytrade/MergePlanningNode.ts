@@ -10,6 +10,7 @@ export class MergePlanningNode extends CopyTradeNode {
 
     async doAction(ctx: NodeContext<CopyTradeWorkflowState>): Promise<NodeResult> {
         const event = ctx.state.sourceEvent;
+        const strategyKind = ctx.strategyKind || ctx.runtime.config.strategyKind;
         if (!event) {
             return this.skip('缺少 MERGE 源事件', 'copytrade.persist');
         }
@@ -44,7 +45,7 @@ export class MergePlanningNode extends CopyTradeNode {
             return this.skip(ctx.state.executionResult.reason, 'copytrade.persist');
         }
 
-        if (sourceMergeableBefore <= 0) {
+        if (strategyKind !== 'proportional' && sourceMergeableBefore <= 0) {
             ctx.state.executionResult = {
                 status: 'retry',
                 reason: '缺少源账户 condition mergeable 快照，暂缓 merge',
@@ -78,6 +79,39 @@ export class MergePlanningNode extends CopyTradeNode {
             return this.skip(ctx.state.executionResult.reason, 'copytrade.persist');
         }
 
+        if (strategyKind === 'proportional') {
+            const requestedSize = Math.min(
+                sourceMergeRequestedSize * ctx.runtime.config.proportionalCopyRatio,
+                conditionPositions.mergeableSize
+            );
+            if (requestedSize <= 0) {
+                ctx.state.executionResult = {
+                    status: 'skipped',
+                    reason: '按比例缩放后的本地 merge 数量为 0',
+                    requestedUsdc: 0,
+                    requestedSize: 0,
+                    executedUsdc: 0,
+                    executedSize: 0,
+                    executionPrice: 0,
+                    orderIds: [],
+                    transactionHashes: [],
+                };
+                return this.skip(ctx.state.executionResult.reason, 'copytrade.persist');
+            }
+
+            ctx.state.sizingDecision = {
+                status: 'ready',
+                requestedSize,
+                reason: `根据比例跟单 ${(ctx.runtime.config.proportionalCopyRatio * 100).toFixed(2)}% 执行本地 merge`,
+                note: `比例跟单 ${(ctx.runtime.config.proportionalCopyRatio * 100).toFixed(2)}%`,
+            };
+            ctx.state.policyTrail = [...(ctx.state.policyTrail || []), 'merge:proportional'];
+            return this.success({
+                requestedSize,
+                proportionalCopyRatio: ctx.runtime.config.proportionalCopyRatio,
+            });
+        }
+
         const sourceMergeRatio = Math.min(sourceMergeRequestedSize / sourceMergeableBefore, 1);
         const requestedSize = Math.max(conditionPositions.mergeableSize * sourceMergeRatio, 0);
         if (requestedSize <= 0) {
@@ -100,7 +134,7 @@ export class MergePlanningNode extends CopyTradeNode {
             requestedSize,
             reason: `根据源账户 MERGE 比例 ${(sourceMergeRatio * 100).toFixed(2)}% 执行本地 merge`,
         };
-        ctx.state.policyTrail = [...(ctx.state.policyTrail || []), 'merge:proportional'];
+        ctx.state.policyTrail = [...(ctx.state.policyTrail || []), 'merge:mirror'];
         return this.success({ requestedSize, sourceMergeRatio });
     }
 }

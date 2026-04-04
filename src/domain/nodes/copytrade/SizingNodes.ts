@@ -4,6 +4,7 @@ import type { NodeResult } from '@domain/nodes/kernel/NodeResult';
 import type { CopyTradeWorkflowState } from '@domain/strategy/workflowState';
 import {
     computeFixedAmountDecision,
+    computeMirrorDecision,
     computeProportionalDecision,
     computeSignalDecision,
 } from '@domain/strategy/strategySizing';
@@ -40,6 +41,21 @@ abstract class BaseSizingNode extends CopyTradeNode {
             requestedSize: decision.requestedSize || 0,
             ticketTier: decision.ticketTier || '',
         });
+    }
+}
+
+export class MirrorSizingNode extends BaseSizingNode {
+    constructor() {
+        super('copytrade.mirror.sizing');
+    }
+
+    protected evaluate(ctx: NodeContext<CopyTradeWorkflowState>) {
+        return computeMirrorDecision(
+            ctx.state.sourceEvent!,
+            Math.max(Number(ctx.state.portfolio?.cashBalance) || 0, 0),
+            Math.max(Number(ctx.state.localPosition?.size) || 0, 0),
+            ctx.runtime.config
+        );
     }
 }
 

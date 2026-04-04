@@ -30,6 +30,7 @@ export type WorkflowConfig = Pick<
     | 'settlementIntervalMs'
     | 'settlementMaxTasksPerRun'
     | 'fixedTradeAmountUsdc'
+    | 'proportionalCopyRatio'
     | 'maxOpenPositions'
     | 'maxActiveExposureUsdc'
     | 'maxSignalAgeMs'

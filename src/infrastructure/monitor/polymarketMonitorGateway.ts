@@ -161,7 +161,7 @@ export class PolymarketMonitorGateway implements MonitorGateway {
         try {
             return await getUsdcBalance(this.config.targetWallet, this.config);
         } catch (error) {
-            if (this.config.strategyKind === 'proportional') {
+            if (this.config.strategyKind === 'mirror') {
                 throw error;
             }
 

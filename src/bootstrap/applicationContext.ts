@@ -23,6 +23,7 @@ import { RedeemForwardNode } from '@domain/nodes/copytrade/RedeemForwardNode';
 import { RiskGuardNode } from '@domain/nodes/copytrade/RiskGuardNode';
 import {
     FixedAmountSizingNode,
+    MirrorSizingNode,
     ProportionalSizingNode,
     SignalSizingNode,
 } from '@domain/nodes/copytrade/SizingNodes';
@@ -149,6 +150,7 @@ const registerNodeModules = (container: AwilixContainer) => {
         riskGuardNode: asClass(RiskGuardNode).singleton(),
         tradePlanningNode: asClass(TradePlanningNode).singleton(),
         fixedAmountSizingNode: asClass(FixedAmountSizingNode).singleton(),
+        mirrorSizingNode: asClass(MirrorSizingNode).singleton(),
         proportionalSizingNode: asClass(ProportionalSizingNode).singleton(),
         signalSizingNode: asClass(SignalSizingNode).singleton(),
         fetchMonitorEventsNode: asClass(FetchMonitorEventsNode).singleton(),
@@ -182,6 +184,7 @@ const createNodeRegistry = (container: AwilixContainer) => {
         'riskGuardNode',
         'tradePlanningNode',
         'fixedAmountSizingNode',
+        'mirrorSizingNode',
         'proportionalSizingNode',
         'signalSizingNode',
         'fetchMonitorEventsNode',

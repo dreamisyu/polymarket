@@ -4,7 +4,7 @@ import { getAggregatedTradeCount } from '@domain/strategy/copytradeDispatch';
 import { computeBuyTargetUsdc, computeSellTargetSize } from '@domain/trading/executionPlanning';
 import { isTradeWithinSignalMarketScope } from '@domain/market/marketScope';
 
-export const computeProportionalDecision = (
+export const computeMirrorDecision = (
     event: SourceTradeEvent,
     availableBalance: number,
     localPositionSize: number,
@@ -54,6 +54,71 @@ export const computeProportionalDecision = (
     };
 };
 
+export const computeProportionalDecision = (
+    event: SourceTradeEvent,
+    availableBalance: number,
+    localPositionSize: number,
+    config: Pick<AppConfig, 'proportionalCopyRatio' | 'maxOrderUsdc'>
+): StrategySizingDecision => {
+    if (event.action === 'buy') {
+        let requestedUsdc = Math.max(Number(event.usdcSize) || 0, 0) * config.proportionalCopyRatio;
+        let note = `比例跟单 ${(config.proportionalCopyRatio * 100).toFixed(2)}%`;
+
+        if (config.maxOrderUsdc > 0 && requestedUsdc > config.maxOrderUsdc) {
+            requestedUsdc = config.maxOrderUsdc;
+            note = `${note}；已按单笔风控上限裁剪至 ${config.maxOrderUsdc.toFixed(4)} USDC`;
+        }
+
+        requestedUsdc = Math.min(requestedUsdc, availableBalance);
+        if (requestedUsdc <= 0) {
+            return {
+                status: 'skip',
+                reason: '本地可用余额不足',
+            };
+        }
+
+        return {
+            status: 'ready',
+            requestedUsdc,
+            reason: '',
+            note,
+        };
+    }
+
+    if (event.action === 'sell' || event.action === 'merge') {
+        if (localPositionSize <= 0) {
+            return {
+                status: 'skip',
+                reason: event.action === 'merge' ? '本地无可 merge 的持仓' : '本地没有可卖出的仓位',
+            };
+        }
+
+        const sourceRequestedSize = Math.max(Number(event.size) || 0, 0);
+        const requestedSize = Math.min(
+            sourceRequestedSize * config.proportionalCopyRatio,
+            localPositionSize
+        );
+        if (requestedSize <= 0) {
+            return {
+                status: 'skip',
+                reason: event.action === 'merge' ? '没有可 merge 的数量' : '没有可卖出的数量',
+            };
+        }
+
+        return {
+            status: 'ready',
+            requestedSize,
+            reason: '',
+            note: `比例跟单 ${(config.proportionalCopyRatio * 100).toFixed(2)}%`,
+        };
+    }
+
+    return {
+        status: 'skip',
+        reason: '当前事件不在跟单策略范围内',
+    };
+};
+
 export const computeFixedAmountDecision = (
     event: SourceTradeEvent,
     availableBalance: number,
@@ -80,7 +145,7 @@ export const computeFixedAmountDecision = (
         };
     }
 
-    return computeProportionalDecision(event, availableBalance, localPositionSize, {
+    return computeMirrorDecision(event, availableBalance, localPositionSize, {
         maxOrderUsdc: 0,
     });
 };
@@ -102,7 +167,7 @@ export const computeSignalDecision = (
     >
 ): StrategySizingDecision => {
     if (event.action !== 'buy') {
-        return computeProportionalDecision(event, availableBalance, localPositionSize, config);
+        return computeMirrorDecision(event, availableBalance, localPositionSize, config);
     }
 
     if (config.signalMarketScope === 'crypto_updown_5m' && !isTradeWithinSignalMarketScope(event)) {
